@@ -91,12 +91,15 @@ cmake --build . --config Release
 If you don't want to compile anything, just download the pre-built release:
 
 1. Go to [**Releases**](../../releases/latest)
-2. Download `wow_optimize_v3.0.zip`
+2. Download `wow_optimize.zip`
 3. Extract the archive. You will get:
     
-wow_optimize_v3.0/
-├── wow_optimize.dll # The optimization DLL
+wow_optimize/
+ 
+├──wow_optimize.dll # The optimization DLL
+
 ├── Dll_Injector.exe # Simple DLL injector
+
 └── inject.bat # One-click injection script
 
 4. Copy **all three files** to your World of Warcraft folder (same directory as `Wow.exe`):
@@ -105,6 +108,7 @@ wow_optimize_v3.0/
 7. You should see:
 
 =================================
+
 wow_optimize.dll injector
 
 [+] The process wow.exe was found in memory.
