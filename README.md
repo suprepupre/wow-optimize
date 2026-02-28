@@ -72,7 +72,7 @@ This is **not** a magic FPS doubler. Think of it like replacing an HDD with an S
 
 ### Build Steps
 
-git clone https://github.com/suprepupre/wow_optimize.git
+git clone https://github.com/suprepupre/wow-optimize.git
 cd wow_optimize
 build.bat
 
