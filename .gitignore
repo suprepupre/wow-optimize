@@ -1,0 +1,32 @@
+# Build output
+build/
+out/
+x64/
+x86/
+Release/
+Debug/
+*.dll
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.log
+
+# IDE files
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+CMakeSettings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Dependencies are downloaded by CMake
+_deps/
