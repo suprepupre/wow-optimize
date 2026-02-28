@@ -46,6 +46,10 @@ This is **not** a magic FPS doubler. Think of it like replacing an HDD with an S
 - ✗ No visual changes
 - ✗ No in-game notifications
 
+### VIDEO DEMONSTATION ON WARMANE LORDAERON
+
+[VIDEO](https://www.youtube.com/watch?v=mDswd1cGJ24)
+
 ### Where it matters most
 
 - 🏰 Dalaran / Stormwind with many players
