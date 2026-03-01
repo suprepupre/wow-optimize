@@ -198,9 +198,9 @@ static bool InstallAllocatorHooks() {
     #define TRY_HOOK(target, hook, orig, name)                    \
         if (target) { total++;                                    \
             if (MH_CreateHook(target, (void*)(hook),              \
-                              (void**)&(orig)) == MH_OK) {       \
+                              (void**)&(orig)) == MH_OK) {        \
                 ok++; Log("  Hook %s: OK", name);                 \
-            } else { Log("  Hook %s: FAILED", name); }           \
+            } else { Log("  Hook %s: FAILED", name); }            \
         }
 
     TRY_HOOK(pm, hooked_malloc,  orig_malloc,  "malloc");
@@ -315,6 +315,48 @@ static bool InstallNetworkHooks() {
 }
 
 // ================================================================
+// MPQ Handle Tracking
+// We only want to cache reads from MPQ files (read-only archives).
+// SavedVariables, config files, and other writable files must
+// NEVER be cached or they will get corrupted on /reload.
+// ================================================================
+
+static HANDLE g_mpqHandles[256] = {};
+static int    g_mpqHandleCount = 0;
+static CRITICAL_SECTION g_mpqHandleLock;
+
+static void TrackMpqHandle(HANDLE h) {
+    EnterCriticalSection(&g_mpqHandleLock);
+    if (g_mpqHandleCount < 256) {
+        g_mpqHandles[g_mpqHandleCount++] = h;
+    }
+    LeaveCriticalSection(&g_mpqHandleLock);
+}
+
+static bool IsMpqHandle(HANDLE h) {
+    EnterCriticalSection(&g_mpqHandleLock);
+    for (int i = 0; i < g_mpqHandleCount; i++) {
+        if (g_mpqHandles[i] == h) {
+            LeaveCriticalSection(&g_mpqHandleLock);
+            return true;
+        }
+    }
+    LeaveCriticalSection(&g_mpqHandleLock);
+    return false;
+}
+
+static void UntrackMpqHandle(HANDLE h) {
+    EnterCriticalSection(&g_mpqHandleLock);
+    for (int i = 0; i < g_mpqHandleCount; i++) {
+        if (g_mpqHandles[i] == h) {
+            g_mpqHandles[i] = g_mpqHandles[--g_mpqHandleCount];
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_mpqHandleLock);
+}
+
+// ================================================================
 // 4. ReadFile Cache — Read-Ahead for MPQ Files
 //
 // WoW reads data from MPQ archives using many small ReadFile()
@@ -378,13 +420,15 @@ static ReadCache* AllocCache(HANDLE h) {
 static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
                                     DWORD nBytesToRead, LPDWORD lpBytesRead,
                                     LPOVERLAPPED lpOverlapped) {
-    // Pass through: async reads, very large reads, uninitialized cache
-    if (lpOverlapped || nBytesToRead >= READ_AHEAD_SIZE || !g_cacheInitialized)
+    // CRITICAL: Only cache reads from MPQ files!
+    // Caching SavedVariables/config files causes data corruption on /reload
+    if (lpOverlapped || !g_cacheInitialized || !IsMpqHandle(hFile) ||
+        nBytesToRead >= READ_AHEAD_SIZE) {
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
+    }
 
     EnterCriticalSection(&g_cacheLock);
 
-    // Get current file position
     LARGE_INTEGER currentPos, zero;
     zero.QuadPart = 0;
     if (!SetFilePointerEx(hFile, zero, &currentPos, FILE_CURRENT)) {
@@ -394,7 +438,7 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
 
     ReadCache* cache = FindCache(hFile);
 
-    // Check for cache hit
+    // Cache hit check
     if (cache && cache->validBytes > 0) {
         LONGLONG cStart = cache->fileOffset.QuadPart;
         LONGLONG cEnd   = cStart + cache->validBytes;
@@ -402,12 +446,10 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         LONGLONG rEnd   = rStart + nBytesToRead;
 
         if (rStart >= cStart && rEnd <= cEnd) {
-            // Cache HIT — copy from buffer
             DWORD offset = (DWORD)(rStart - cStart);
             memcpy(lpBuffer, cache->buffer + offset, nBytesToRead);
             if (lpBytesRead) *lpBytesRead = nBytesToRead;
 
-            // Advance file pointer
             LARGE_INTEGER newPos;
             newPos.QuadPart = rEnd;
             SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
@@ -417,7 +459,7 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         }
     }
 
-    // Cache MISS — read ahead
+    // Cache miss — read ahead
     if (!cache) cache = AllocCache(hFile);
 
     if (cache && cache->buffer) {
@@ -450,7 +492,6 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
 }
 
 static bool InstallReadFileHook() {
-    InitializeCriticalSection(&g_cacheLock);
     g_cacheInitialized = true;
 
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ReadFile");
@@ -458,7 +499,7 @@ static bool InstallReadFileHook() {
     if (MH_CreateHook(p, (void*)hooked_ReadFile, (void**)&orig_ReadFile) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
 
-    Log("ReadFile hook: ACTIVE (64KB read-ahead, %d handle slots)", MAX_CACHED_HANDLES);
+    Log("ReadFile hook: ACTIVE (MPQ-only cache, 64KB read-ahead, %d slots)", MAX_CACHED_HANDLES);
     return true;
 }
 
@@ -558,13 +599,24 @@ static HANDLE WINAPI hooked_CreateFileA(
     LPSECURITY_ATTRIBUTES lpSA, DWORD dwDisposition,
     DWORD dwFlags, HANDLE hTemplate)
 {
+    bool isMPQ = false;
     if (lpFileName && (dwAccess & GENERIC_READ)) {
         const char* ext = strrchr(lpFileName, '.');
-        if (ext && (_stricmp(ext, ".mpq") == 0 || _stricmp(ext, ".MPQ") == 0))
+        if (ext && (_stricmp(ext, ".mpq") == 0 || _stricmp(ext, ".MPQ") == 0)) {
             dwFlags |= FILE_FLAG_SEQUENTIAL_SCAN;
+            isMPQ = true;
+        }
     }
-    return orig_CreateFileA(lpFileName, dwAccess, dwShare,
-                            lpSA, dwDisposition, dwFlags, hTemplate);
+
+    HANDLE result = orig_CreateFileA(lpFileName, dwAccess, dwShare,
+                                      lpSA, dwDisposition, dwFlags, hTemplate);
+
+    // Track MPQ handles so ReadFile cache only applies to them
+    if (isMPQ && result != INVALID_HANDLE_VALUE) {
+        TrackMpqHandle(result);
+    }
+
+    return result;
 }
 
 static HANDLE WINAPI hooked_CreateFileW(
@@ -572,13 +624,23 @@ static HANDLE WINAPI hooked_CreateFileW(
     LPSECURITY_ATTRIBUTES lpSA, DWORD dwDisposition,
     DWORD dwFlags, HANDLE hTemplate)
 {
+    bool isMPQ = false;
     if (lpFileName && (dwAccess & GENERIC_READ)) {
         const wchar_t* ext = wcsrchr(lpFileName, L'.');
-        if (ext && (_wcsicmp(ext, L".mpq") == 0 || _wcsicmp(ext, L".MPQ") == 0))
+        if (ext && (_wcsicmp(ext, L".mpq") == 0 || _wcsicmp(ext, L".MPQ") == 0)) {
             dwFlags |= FILE_FLAG_SEQUENTIAL_SCAN;
+            isMPQ = true;
+        }
     }
-    return orig_CreateFileW(lpFileName, dwAccess, dwShare,
-                            lpSA, dwDisposition, dwFlags, hTemplate);
+
+    HANDLE result = orig_CreateFileW(lpFileName, dwAccess, dwShare,
+                                      lpSA, dwDisposition, dwFlags, hTemplate);
+
+    if (isMPQ && result != INVALID_HANDLE_VALUE) {
+        TrackMpqHandle(result);
+    }
+
+    return result;
 }
 
 static bool InstallFileHooks() {
@@ -602,6 +664,49 @@ static bool InstallFileHooks() {
         return true;
     }
     return false;
+}
+
+// ================================================================
+// CloseHandle Hook — cleanup cached and tracked handles
+// ================================================================
+typedef BOOL (WINAPI* CloseHandle_fn)(HANDLE);
+static CloseHandle_fn orig_CloseHandle = nullptr;
+
+static BOOL WINAPI hooked_CloseHandle(HANDLE hObject) {
+    // Safety: don't process NULL or pseudo-handles
+    if (!hObject || hObject == INVALID_HANDLE_VALUE ||
+        hObject == GetCurrentProcess() || hObject == GetCurrentThread()) {
+        return orig_CloseHandle(hObject);
+    }
+
+    // Remove from MPQ tracking (only if initialized)
+    if (g_mpqHandleCount > 0) {
+        UntrackMpqHandle(hObject);
+    }
+
+    // Invalidate ReadFile cache for this handle
+    if (g_cacheInitialized) {
+        EnterCriticalSection(&g_cacheLock);
+        for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
+            if (g_readCache[i].active && g_readCache[i].handle == hObject) {
+                g_readCache[i].active = false;
+                g_readCache[i].validBytes = 0;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_cacheLock);
+    }
+
+    return orig_CloseHandle(hObject);
+}
+
+static bool InstallCloseHandleHook() {
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "CloseHandle");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_CloseHandle, (void**)&orig_CloseHandle) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("CloseHandle hook: ACTIVE (cache invalidation)");
+    return true;
 }
 
 // ================================================================
@@ -851,6 +956,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     }
     Log("MinHook initialized");
 
+    // Initialize critical sections BEFORE any hooks that use them
+    InitializeCriticalSection(&g_mpqHandleLock);
+    InitializeCriticalSection(&g_cacheLock);
+
     ConfigureMimalloc();
     TryEnableLargePages();
 
@@ -873,6 +982,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- File I/O ---");
     bool fileOk = InstallFileHooks();
     bool readOk = InstallReadFileHook();
+    bool closeOk = InstallCloseHandleHook(); 
 
     Log("--- System Timer ---");
     SetHighTimerResolution();
@@ -899,6 +1009,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] TCP_NODELAY (network)",       netOk   ? " OK " : "FAIL");
     Log("  [%s] CreateFile (sequential I/O)", fileOk  ? " OK " : "FAIL");
     Log("  [%s] ReadFile (read-ahead cache)", readOk  ? " OK " : "FAIL");
+    Log("  [%s] CloseHandle (cache cleanup)",  closeOk ? " OK " : "FAIL");
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
@@ -929,8 +1040,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                     g_readCache[i].buffer = nullptr;
                 }
             }
-            if (g_cacheInitialized)
+            if (g_cacheInitialized) {
                 DeleteCriticalSection(&g_cacheLock);
+                DeleteCriticalSection(&g_mpqHandleLock); 
+            }
 
             Log("wow_optimize.dll unloaded");
             LogClose();
