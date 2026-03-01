@@ -1,5 +1,3 @@
-DO NOT USE. REMOVES YOUR ADDONS SETTINGS. NOT JOKING
-
 # 🚀 wow_optimize
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
