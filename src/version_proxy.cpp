@@ -186,7 +186,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hModule);
             if (!LoadRealVersionDll()) return FALSE;
-            CreateThread(NULL, 0, LoaderThread, (LPVOID)hModule, 0, NULL);
+            CloseHandle(CreateThread(NULL, 0, LoaderThread, (LPVOID)hModule, 0, NULL));
             break;
 
         case DLL_PROCESS_DETACH:

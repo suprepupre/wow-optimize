@@ -732,7 +732,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hModule);
-            CreateThread(NULL, 0, MainThread, NULL, 0, NULL);
+            CloseHandle(CreateThread(NULL, 0, MainThread, NULL, 0, NULL));
             break;
         case DLL_PROCESS_DETACH:
             CombatLogOpt::Shutdown();
