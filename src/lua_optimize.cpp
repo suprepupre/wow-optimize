@@ -41,7 +41,7 @@ typedef void        (__cdecl *fn_lua_pushnil)(lua_State* L);
 typedef void        (__cdecl *fn_lua_setfield)(lua_State* L, int index, const char* k);
 typedef void        (__cdecl *fn_lua_getfield)(lua_State* L, int index, const char* k);
 typedef int         (__cdecl *fn_lua_type)(lua_State* L, int index);
-
+typedef void        (__cdecl *fn_luaS_resize)(lua_State* L, int newsize);
 typedef void        (__cdecl *fn_FrameScript_Execute)(const char* code,
                                                        const char* source,
                                                        int unknown);
@@ -53,6 +53,7 @@ typedef void        (__cdecl *fn_FrameScript_Execute)(const char* code,
 namespace Addr {
     static constexpr uintptr_t lua_State_ptr       = 0x00D3F78C;
     static constexpr uintptr_t FrameScript_Execute = 0x00819210;
+    static constexpr uintptr_t luaS_resize         = 0x00856AF0;
     static constexpr uintptr_t lua_gc              = 0x0084ED50;
     static constexpr uintptr_t lua_gettop          = 0x0084DBD0;
     static constexpr uintptr_t lua_settop          = 0x0084DBF0;
@@ -86,7 +87,7 @@ static struct {
     fn_lua_setfield         lua_setfield = nullptr;
     fn_lua_getfield         lua_getfield = nullptr;
     fn_lua_type             lua_type = nullptr;
-
+    fn_luaS_resize          luaS_resize = nullptr;
     fn_FrameScript_Execute  FrameScript_Execute = nullptr;
 } Api;
 
@@ -185,6 +186,8 @@ static bool ResolveAddresses() {
     RESOLVE(lua_setfield,    Addr::lua_setfield,     fn_lua_setfield,    "lua_setfield");
     RESOLVE(lua_getfield,    Addr::lua_getfield,     fn_lua_getfield,    "lua_getfield");
     RESOLVE(lua_type,        Addr::lua_type,         fn_lua_type,        "lua_type");
+    RESOLVE(luaS_resize,     Addr::luaS_resize,     fn_luaS_resize,     "luaS_resize");
+
     RESOLVE(FrameScript_Execute, Addr::FrameScript_Execute,
             fn_FrameScript_Execute, "FrameScript_Execute");
 
@@ -422,6 +425,72 @@ static void ResetAllocStats() {
     g_luaAllocStats_realloc = 0;
     g_luaAllocStats_freeLegacy = 0;
     g_luaAllocStats_reallocMigrate = 0;
+}
+
+// ================================================================
+//  String Table Pre-sizer
+//
+//  Lua 5.1 starts with a small string hash table (32-64 buckets).
+//  With heavy addons (DBM + Skada + WA + ElvUI), 30,000-50,000
+//  unique strings accumulate. Each resize rehashes ALL strings,
+//  causing 5-15ms freezes during gameplay.
+//
+//  We pre-size the table to 32768 buckets at startup.
+//  This eliminates all resize events during normal gameplay.
+//
+//  global_State layout:
+//    +0x00 strt.hash  (TString** bucket array)
+//    +0x04 strt.nuse  (int, number of strings)
+//    +0x08 strt.size  (int, number of buckets)
+// ================================================================
+
+static constexpr int STRING_TABLE_TARGET_SIZE = 32768;  // 128 KB of pointers
+
+static bool PreSizeStringTable(lua_State* L) {
+    if (!Api.luaS_resize) return false;
+
+    __try {
+        // Read current string table size from global_State
+        uintptr_t L_addr = (uintptr_t)L;
+        if (!IsReadableMemory(L_addr + 0x14)) return false;
+
+        uintptr_t globalState = *(uintptr_t*)(L_addr + 0x14);
+        if (!IsReadableMemory(globalState + 0x08)) return false;
+
+        int currentSize = *(int*)(globalState + 0x08);
+        int currentNuse = *(int*)(globalState + 0x04);
+
+        Log("[LuaOpt-Str] String table: %d buckets, %d strings (%.1f strings/bucket)",
+            currentSize, currentNuse,
+            currentSize > 0 ? (double)currentNuse / currentSize : 0.0);
+
+        if (currentSize >= STRING_TABLE_TARGET_SIZE) {
+            Log("[LuaOpt-Str] Already large enough, skipping");
+            return true;
+        }
+
+        // Call luaS_resize to expand the table
+        Api.luaS_resize(L, STRING_TABLE_TARGET_SIZE);
+
+        // Verify
+        int newSize = *(int*)(globalState + 0x08);
+        if (newSize == STRING_TABLE_TARGET_SIZE) {
+            Log("[LuaOpt-Str]  [ OK ] Resized: %d -> %d buckets (%.1f KB)",
+                currentSize, newSize, (newSize * 4) / 1024.0);
+            Log("[LuaOpt-Str]  Strings/bucket: %.2f -> %.2f",
+                currentSize > 0 ? (double)currentNuse / currentSize : 0.0,
+                newSize > 0 ? (double)currentNuse / newSize : 0.0);
+            return true;
+        } else {
+            Log("[LuaOpt-Str]  [FAIL] Expected %d, got %d",
+                STRING_TABLE_TARGET_SIZE, newSize);
+            return false;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[LuaOpt-Str] EXCEPTION in PreSizeStringTable");
+        return false;
+    }
 }
 
 // ================================================================
@@ -730,6 +799,7 @@ static void DoMainThreadInit() {
 
     bool allocOk = ReplaceLuaAllocator(Api.L);
     bool gcOk = OptimizeGC(Api.L);
+    bool strOk = PreSizeStringTable(Api.L);
 
     SetupLuaInterface(Api.L);
 
@@ -744,6 +814,7 @@ static void DoMainThreadInit() {
     Log("[LuaOpt]  Init Complete");
     Log("[LuaOpt]    Lua allocator:    %s", allocOk ? "mimalloc (REPLACED)" : "original (WoW pool)");
     Log("[LuaOpt]    GC optimized:     %s", gcOk ? "YES" : "NO");
+    Log("[LuaOpt]    String table:     %s", strOk ? "PRE-SIZED" : "default");    
     Log("[LuaOpt]    Lua interface:    via FrameScript (safe)");
     Log("[LuaOpt]    GC tiers (KB/f):");
     Log("[LuaOpt]      normal  = %d", Config.normalStepKB);
@@ -827,6 +898,7 @@ void OnMainThreadSleep(DWORD mainThreadId) {
 
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
+        PreSizeStringTable(Api.L);
         SetupLuaInterface(Api.L);
         return;
     }
