@@ -1,4 +1,4 @@
-# 🚀 wow_optimize v1.4.2 BY SUPREMATIST
+# 🚀 wow_optimize v1.5.0 BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 
@@ -27,19 +27,26 @@ Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threadi
 | 13 | **Process Priority** | Above Normal + disabled priority boost |
 | 14 | **FPS Cap Removal** | Raises hardcoded 200 FPS limit to 999 |
 | 15 | **Lua VM GC Optimizer** | 4-tier per-frame GC stepping from C (loading/combat/idle/normal) |
-| 16 | **Combat Log Optimizer** | Prevents combat log data loss in raids (retention + anti-recycle + cleanup) |
+| 16 | **Combat Log Optimizer** | Prevents combat log data loss in raids (retention + cleanup + entry pool) |
 
 ---
 
-## 🆕 What's New in v1.4.2
+## 🆕 What's New in v1.5.0
 
-### Bug Fixes
-- **Fixed memory protection leak** — VirtualProtect now correctly restores original page protection after Lua allocator replacement. Previously the memory region was left as PAGE_READWRITE permanently.
-- **Fixed UI reload crash path** — On `/reload`, the original Lua allocator is now properly restored before resetting internal state. Previously, if WoW accessed the old global_State during transition, it could dereference a null function pointer.
-- **Fixed version string inconsistencies** — Log output and fallback code path now correctly report the actual version.
-- **Fixed race condition** — Removed unsynchronized read of MPQ handle count in CloseHandle hook.
-- **Fixed CriticalSection cleanup** — Init and delete of critical sections are now properly symmetric, preventing potential kernel object leaks on DLL unload.
-- **Fixed proxy DLL logging** — version.dll proxy now creates the Logs directory before attempting to write its log file.
+### Combat Log Entry Pool
+- **Pre-allocates 4096 entries** (480 KB) into the engine's internal free list
+- During AoE combat in 25-man raids, the combat log allocator (`sub_750400`) previously had to call `SMemAlloc` for every new event — **500-1000 heap allocations per second**
+- Now the free list is always full — the engine grabs pre-made entries instantly, **zero heap allocation during combat**
+- Uses the engine's own `EntryInit` (0x74D920) and `FreeListInsert` (0x86E200) functions — **zero code patching**
+- Deferred injection: waits until the CVar system is ready before filling the pool
+
+### Universal Loader (wow_loader.exe)
+- **Works with ANY Wow.exe** — patched, custom, standard
+- Launches `Wow.exe` in suspended state, injects `wow_optimize.dll`, then resumes
+- **Single click** — no manual injection needed
+- If injection fails, WoW still starts normally with a warning
+- Logs to `Logs/wow_loader.log`
+- Alternative to `version.dll` proxy for servers with modified executables
 
 ---
 
@@ -57,6 +64,7 @@ This is **not** a magic FPS doubler. Think of it like replacing an HDD with an S
 - ✅ Faster zone loading
 - ✅ Reduced lag spikes on boss kills and dungeon queue pops
 - ✅ No more broken damage meters in 25-man raids
+- ✅ **NEW:** No micro-freezes during AoE combat (entry pool eliminates heap alloc)
 
 ### You WON'T notice
 
@@ -80,8 +88,8 @@ For maximum optimization, use this DLL together with the **[!LuaBoost](https://g
 
 | Layer | Tool | What It Does |
 |-------|------|--------------|
-| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix |
-| **Lua / Addons** | !LuaBoost addon | Faster math/table, incremental GC, SpeedyLoad, table pool, throttle API |
+| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix + pool |
+| **Lua / Addons** | !LuaBoost addon | Incremental GC, SpeedyLoad, table pool, throttle API, GUI |
 
 When both are installed, the DLL handles Lua allocator replacement, GC stepping from C (zero Lua overhead), and combat log buffering. The addon provides the GUI, combat awareness, idle detection, SpeedyLoad, and runtime function optimizations.
 
@@ -90,9 +98,6 @@ When both are installed, the DLL handles Lua allocator replacement, GC stepping 
 > ⚠️ **You can remove the CombatLogFix addon** if you're using wow_optimize.dll v1.4.0+ — the DLL handles combat log cleanup from C level without Lua overhead.
 
 ---
-
-## 📹 Video Demonstration (Outdated)
-[Video Demonstration of first version](https://www.youtube.com/watch?v=mDswd1cGJ24)
 
 ## 📦 Building
 
@@ -111,7 +116,7 @@ cd wow-optimize
 build.bat
 ```
 
-Output: `build\Release\wow_optimize.dll` + `build\Release\version.dll`
+Output: `build\Release\wow_optimize.dll` + `build\Release\version.dll` + `build\Release\wow_loader.exe`
 
 > ⚠️ **Must be compiled as 32-bit (Win32).** WoW 3.3.5a is a 32-bit application.
 
@@ -134,13 +139,19 @@ Download pre-built binaries from [**Releases**](../../releases/latest).
 
 ## 🎮 Usage
 
-### Option A — Auto-Load (recommended)
+### Option A — Auto-Load via Proxy (standard Wow.exe)
 
 1. Copy `version.dll` and `wow_optimize.dll` to your WoW folder
 2. Launch WoW normally
 3. Done — loads automatically every time
 
-### Option B — Manual Injection
+### Option B — Universal Loader (patched/custom Wow.exe)
+
+1. Copy `wow_loader.exe` and `wow_optimize.dll` to your WoW folder
+2. Launch `wow_loader.exe` instead of `Wow.exe`
+3. Done — WoW starts with optimizations applied
+
+### Option C — Manual Injection
 
 1. Copy `wow_optimize.dll`, `Dll_Injector.exe`, `inject.bat` to WoW folder
 2. Launch WoW, wait for login screen
@@ -152,7 +163,7 @@ Check `Logs/wow_optimize.log` — all lines should show `[ OK ]`.
 
 ```
 [02:42:28.155] ========================================
-[02:42:28.155]   wow_optimize.dll v1.4.2 BY SUPREMATIST
+[02:42:28.155]   wow_optimize.dll v1.5.0 BY SUPREMATIST
 [02:42:28.155]   PID: 13088
 [02:42:28.155] ========================================
 [02:42:28.155] MinHook initialized
@@ -170,27 +181,16 @@ Check `Logs/wow_optimize.log` — all lines should show `[ OK ]`.
 [02:42:28.338] Process: Above Normal priority
 [02:42:28.338] Working set: min 256 MB, max 2048 MB
 [02:42:28.338] FPS cap: changed from 200 to 999
-[02:42:28.339]   [WAIT] Lua VM GC optimizer
-[02:42:28.340]
-[02:42:28.340] [CombatLog] ====================================
-[02:42:28.340] [CombatLog]  Combat Log Buffer Optimizer
-[02:42:28.340] [CombatLog]  Build 12340
-[02:42:28.340] [CombatLog] ====================================
-[02:42:28.340] [CombatLog] Current retention: 300 sec
-[02:42:28.340] [CombatLog] Retention: 300 -> 900 sec
-[02:42:28.340] [CombatLog]  [ OK ] Periodic cleanup (every 600 frames)
-[02:42:28.340] [CombatLog]  [ OK ] Retention time (300 -> 900 sec)
-[02:42:28.340] [CombatLog]  [ OK ] Prevent entry recycling
-[02:42:28.340] [CombatLog]  [ OK ] Periodic cleanup (every 1800 frames)
-[02:42:28.340] [CombatLog] ====================================
-[02:42:38.789]
-[02:42:38.789] [LuaOpt] lua_State* = 0x18D68A68
-[02:42:38.789] [LuaOpt-Alloc]  >>> ALLOCATOR REPLACED <<<
+[02:42:28.340] [CombatLog]  [ OK ] Retention time (300 -> 1800 sec)
+[02:42:28.340] [CombatLog]  [ OK ] Periodic clear (every 600 frames)
+[02:42:28.340] [CombatLog]  [WAIT] Entry pool (4096 entries, 480 KB)
+[02:42:38.789] [LuaOpt]  >>> ALLOCATOR REPLACED <<<
+[02:42:39.100] [CombatLog-Pool]  [ OK ] Injected 4096 entries into free list
 ```
 
 ### Uninstall
 
-Delete `version.dll` (and `wow_optimize.dll`) from WoW folder. Log files in `Logs/` folder can be safely deleted.
+Delete `version.dll`, `wow_loader.exe` (if present), and `wow_optimize.dll` from WoW folder. Log files in `Logs/` folder can be safely deleted.
 
 ---
 
@@ -242,7 +242,7 @@ DLL reads addon globals per-frame from the Sleep hook (main thread).
 
 ### The Problem
 
-In 25-man raids (ICC, RS) with addons like DBM, WeakAuras, and Skada running simultaneously, the combat log loses events. Damage meters show incomplete data, often called "combat log breaks."
+In 25-man raids (ICC, RS) with addons like DBM, WeakAuras, and Skada running simultaneously, the combat log loses events. Damage meters show incomplete data, often called "combat log breaks." Additionally, heavy AoE combat causes micro-stutters from hundreds of heap allocations per second.
 
 ### How WoW's Combat Log Works
 
@@ -255,30 +255,51 @@ Active List:  HEAD → [entry1] → [entry2] → ... → [entryN]
 Free List:    HEAD → [recycled1] → [recycled2] → ...
 ```
 
-Events are stored as a linked list. Each entry is ~120 bytes with timestamp, GUIDs, spell info, and event flags. When a new event arrives:
+Events are stored as a linked list. Each entry is 0x78 bytes (120 bytes) with timestamp, GUIDs, spell info, and event flags. When a new event arrives:
 
 1. Check free list → reuse a recycled node
 2. Free list empty → check if oldest entry expired (age > retention × 1000ms)
 3. Expired → **recycle it** (even if Lua hasn't processed it!)
-4. Not expired → allocate new node from heap
+4. Not expired → allocate new node from heap (**SLOW**)
 
-Step 3 is the bug: if `CA1394` (the Lua processing pointer) points to the entry being recycled, the pointer advances past it and `COMBAT_LOG_EVENT_UNFILTERED` never fires.
+Step 3 is the data loss bug. Step 4 is the micro-stutter source.
 
-### The Fix
+### The Fix (3 Layers)
 
-| Patch | Address | What |
-|-------|---------|------|
-| Retention | CVar at `BD09F0+0x30` | 300 → 900 seconds. Entries survive longer. |
-| Anti-recycle | `0x75043D`: `js` → `jmp` | Allocator always creates new nodes. Never recycles unprocessed entries. |
-| Cleanup | From Sleep hook | Walks active list every ~30 sec. Frees expired entries that Lua has already processed. |
+| Layer | What | How |
+|-------|------|-----|
+| **Retention** | Prevent premature recycling | CVar `BD09F0+0x30`: 300 → 1800 seconds |
+| **Cleanup** | Prevent list corruption | Periodic `CombatLogClearEntries` from Sleep hook |
+| **Entry Pool** | Eliminate heap allocation | Pre-fill free list with 4096 entries via `EntryInit` + `FreeListInsert` |
+
+### Entry Pool Details
+
+```
+Without pool (vanilla behavior):
+  AoE event → sub_750400 → free list empty → sub_74F2D0 → SMemAlloc
+  500 events/sec = 500 heap allocations/sec = MICRO-STUTTERS
+
+With pool (wow_optimize v1.5.0):
+  At startup: 4096 entries pre-allocated via mimalloc (480 KB)
+            → Each initialized via engine's EntryInit (0x74D920)
+            → Each inserted via engine's FreeListInsert (0x86E200)
+            → Free list is pre-filled with 4096 ready-to-use entries
+  
+  AoE event → sub_750400 → free list HAS entries → instant grab
+  500 events/sec = 0 heap allocations = SMOOTH
+
+  After use: entries return to free list via normal recycling
+           → Pool entries are reused indefinitely
+```
 
 ### Memory Impact
 
-At 500 events/sec × 120 bytes × 900 sec retention = ~54 MB worst case. In practice much less because the periodic cleanup frees processed entries continuously.
+Pool: 4096 × 120 bytes = 480 KB (one-time allocation, never freed).
+Retention: at 500 events/sec × 120 bytes × 1800 sec = ~103 MB worst case. In practice much less because the periodic cleanup frees processed entries continuously.
 
 ### Replacing CombatLogFix Addon
 
-If you use the CombatLogFix addon (from KPack or standalone), you can **remove it**. The DLL does the same job from C level without any Lua overhead. The addon just calls `CombatLogClearEntries()` on a timer — the DLL does smarter cleanup that respects the Lua processing boundary.
+If you use the CombatLogFix addon (from KPack or standalone), you can **remove it**. The DLL does the same job from C level without any Lua overhead.
 
 ---
 
@@ -307,14 +328,15 @@ After replacement:   Lua alloc → mimalloc
 ### Combat Log Entry Lifecycle
 
 ```
-New event → sub_750400 (alloc)
-         → sub_86E200 (insert into active list)
+New event → sub_750400 (alloc from free list or pool)
+         → populate entry (GUIDs, spell info, flags)
          → sub_74F910 (push to Lua via CA1394)
          → addon processes COMBAT_LOG_EVENT_UNFILTERED
          → CA1394 advances to next entry
          ...
-         → DLL cleanup: entry expired + already processed → sub_750390 (free)
-         → entry moves to free list for reuse
+         → DLL cleanup: entry expired + processed → sub_750390 (recycle)
+         → sub_86E200 (insert back into free list)
+         → entry reused for next event (no heap alloc!)
 ```
 
 ### CRT Auto-Detection
@@ -355,13 +377,14 @@ What this DLL **does**:
 
 - ✅ Hooks system-level functions (`malloc`, `free`, `Sleep`, `connect`, `ReadFile`)
 - ✅ Calls Lua VM GC API for performance tuning (read-only stats + GC stepping)
-- ✅ Patches combat log retention and recycling (write to CVar value + 1 byte code patch)
+- ✅ Patches combat log retention (write to CVar value)
+- ✅ Pre-fills combat log free list (no code patching, uses engine functions)
 
 ### System Requirements
 
 - 32-bit compilation only (WoW 3.3.5a is 32-bit)
 - Compatible with DXVK and LAA patch
-- Inject after login screen appears
+- Works with standard and patched Wow.exe builds
 
 ---
 
@@ -371,7 +394,7 @@ What this DLL **does**:
 
 **Symptom:** You placed `version.dll` and `wow_optimize.dll` next to `Wow.exe`, but no `wow_optimize.log` is created on launch — the DLL is not being picked up.
 
-**Fix:** UNCHECK "Disable fullscreen optimizations" for `Wow.exe`:
+**Fix — Option 1:** UNCHECK "Disable fullscreen optimizations" for `Wow.exe`:
 
 1. Right-click `Wow.exe` → **Properties**
 2. Go to the **Compatibility** tab
@@ -379,7 +402,7 @@ What this DLL **does**:
 4. Click **Apply** → **OK**
 5. Relaunch WoW
 
-> Windows fullscreen optimizations can interfere with how the application loads DLLs from its working directory. Disabling this feature forces Windows to use the classic DLL search order, allowing the proxy `version.dll` to be loaded correctly.
+**Fix — Option 2:** Use `wow_loader.exe` instead. It works with any `Wow.exe` regardless of compatibility settings.
 
 ![Disable fullscreen optimizations](screenshots/wow.exe%20properties.png)
 
@@ -387,17 +410,18 @@ What this DLL **does**:
 
 | Problem | Solution |
 |---------|----------|
-| Proxy DLL doesn't load (no log file) | Check `Logs/wow_optimize_proxy.log`. If the file doesn't exist, see above — UNCHECK "disable fullscreen optimizations" on `Wow.exe` |
+| Proxy DLL doesn't load (no log file) | Use `wow_loader.exe` instead, or check compatibility settings above |
 | WoW crashes after injection | Wait for login screen + 10 seconds before injecting |
 | `FATAL: MinHook initialization failed` | Another hook DLL conflicting |
 | `ERROR: No CRT DLL found` | Non-standard WoW build |
 | Lua optimizer shows `SKIP` | Lua addresses not found (different build?) |
-| `Invalid function pointer` crash | Old DLL version — update to v1.2+ |
+| `Invalid function pointer` crash | Old DLL version — update to v1.5+ |
 | `Large pages: no permission` | Normal — requires admin policy change, optional |
 | Combat log shows `SKIP` | CVar pointer not valid yet — try injecting later |
-| Combat log `Expected 0x78` error | Different client build — recycle patch skipped (retention patch still works) |
+| Combat log pool shows `SKIP` | Missing EntryInit or FreeListInsert functions (different build?) |
 | Damage meters still broken | Remove CombatLogFix addon if present — two fixers may conflict |
 | No noticeable difference | Expected on high-end PCs with few addons |
+| wow_loader.exe shows warning | Check `Logs/wow_loader.log` for details |
 
 ---
 
@@ -409,8 +433,9 @@ wow-optimize/
 │   ├── dllmain.cpp              # Main DLL — all system hooks
 │   ├── lua_optimize.cpp         # Lua VM optimizer (allocator + GC + communication)
 │   ├── lua_optimize.h           # Lua optimizer interface
-│   ├── combatlog_optimize.cpp   # Combat log buffer optimizer
+│   ├── combatlog_optimize.cpp   # Combat log optimizer (retention + cleanup + pool)
 │   ├── combatlog_optimize.h     # Combat log optimizer interface
+│   ├── wow_loader.cpp           # Universal auto-loader executable
 │   ├── version_proxy.cpp        # Auto-loader (version.dll proxy)
 │   ├── version_exports.def      # Export definitions for version.dll
 │   └── version.rc               # DLL version info resource
