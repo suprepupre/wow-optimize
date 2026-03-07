@@ -71,3 +71,18 @@ target_compile_definitions(version PRIVATE
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
 )
+
+# === Loader EXE (wow_loader.exe) — works with any Wow.exe ===
+add_executable(wow_loader WIN32
+    src/wow_loader.cpp
+)
+
+set_target_properties(wow_loader PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    OUTPUT_NAME "wow_loader"
+)
+
+target_compile_definitions(wow_loader PRIVATE
+    WIN32_LEAN_AND_MEAN
+    _CRT_SECURE_NO_WARNINGS
+)
