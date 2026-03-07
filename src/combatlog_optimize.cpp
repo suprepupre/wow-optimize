@@ -2,25 +2,23 @@
 //  Combat Log Buffer Optimizer — Implementation
 //  WoW 3.3.5a build 12340 (Warmane)
 //
-//  Two-layer fix for combat log breaks:
+//  Three-layer fix for combat log issues:
 //
 //  Layer 1: Retention increase (300 -> 1800 sec)
-//    Prevents the allocator from recycling entries that Lua
-//    hasn't processed yet. Addresses the root cause of data
-//    loss during heavy combat bursts.
-//
 //  Layer 2: Periodic CombatLogClearEntries
-//    Clears all processed entries every ~10 seconds.
-//    Addresses secondary causes: internal list corruption,
-//    stuck CA1394 pointer, dispatch loop errors.
-//    Only runs when CA1394 == NULL (all entries processed).
-//    Equivalent to CombatLogFix addon but from C level.
+//  Layer 3: Pre-allocated entry pool
+//
+//  Layer 3 eliminates heap allocation during combat by
+//  pre-filling the combat log's internal free list with
+//  pool entries. Zero code patching — we just give the
+//  engine more pre-made bullets to use.
 // ================================================================
 
 #include "combatlog_optimize.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <mimalloc.h>
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -29,42 +27,105 @@ extern "C" void Log(const char* fmt, ...);
 // ================================================================
 
 namespace Addr {
+    // CVar
     static constexpr uintptr_t CVar_RetentionPtr     = 0x00BD09F0;
+
+    // Combat log linked list
     static constexpr uintptr_t ActiveListHead        = 0x00ADB97C;
+    static constexpr uintptr_t FreeListManager       = 0x00ADB980; // unk_ADB980 (ecx for sub_86E200)
+    static constexpr uintptr_t FreeListHead           = 0x00ADB984; // ADB980+4
+    static constexpr uintptr_t FreeListIndicator      = 0x00ADB988; // checked first in sub_750400
+
+    // Processing pointers
     static constexpr uintptr_t PendingEntry          = 0x00CA1394;
+    static constexpr uintptr_t ProcessingEntry       = 0x00CA1390;
+
+    // Engine time
     static constexpr uintptr_t CurrentTime           = 0x00CD76AC;
+
+    // Functions
     static constexpr uintptr_t CombatLogClearEntries = 0x00751120;
+    static constexpr uintptr_t EntryInit             = 0x0074D920; // sub_74D920: initializes entry fields
+    static constexpr uintptr_t FreeListInsert        = 0x0086E200; // sub_86E200: insert into free list
+    static constexpr uintptr_t StringVtable          = 0x009EAA04; // off_9EAA04: string object vtable
 }
 
-static constexpr int CVAR_INT_OFFSET = 0x30;
+// ================================================================
+//  Combat Log Entry Layout
+//
+//  +0x00  next pointer (linked list)
+//  +0x04  prev pointer (linked list)
+//  +0x08  timestamp
+//  +0x0C  event type
+//  +0x10  ...
+//  +0x18  source GUID lo
+//  +0x1C  source GUID hi
+//  +0x20  source flags
+//  +0x24  source name buffer
+//  +0x28  ...
+//  +0x30  dest GUID lo
+//  +0x34  dest GUID hi
+//  +0x38  dest flags
+//  +0x3C  dest name buffer
+//  +0x40  ...
+//  +0x44  extra data
+//  +0x48  string object (vtable at +0x48, length at +0x4C)
+//  +0x50  string buffer pointer
+//  +0x54  additional field
+//  ...
+//  +0x78  END (total size = 0x78 = 120 bytes)
+// ================================================================
+
+static constexpr int ENTRY_SIZE = 0x78;  // 120 bytes per entry
 
 // ================================================================
 //  Configuration
 // ================================================================
 
-static constexpr int TARGET_RETENTION_SEC    = 1800;  // 30 min (default 300)
-static constexpr int CLEAR_INTERVAL_FRAMES   = 600;   // ~10 sec at 60fps
+static constexpr int TARGET_RETENTION_SEC    = 1800;
+static constexpr int CLEAR_INTERVAL_FRAMES   = 600;
 static constexpr int RETENTION_CHECK_FRAMES  = 600;
 static constexpr int MAX_RETENTION_RETRIES   = 600;
+static constexpr int CVAR_INT_OFFSET         = 0x30;
+
+// Pool configuration
+static constexpr int POOL_ENTRY_COUNT        = 4096;  // Pre-allocate 4096 entries
+static constexpr int POOL_TOTAL_BYTES        = POOL_ENTRY_COUNT * ENTRY_SIZE; // ~480 KB
+
+// ================================================================
+//  Function Types
+// ================================================================
+
+typedef int  (__cdecl *ClearEntries_fn)();
+typedef void (__thiscall *EntryInit_fn)(void* thisPtr);
+typedef void (__thiscall *FreeListInsert_fn)(void* manager, void* entry);
 
 // ================================================================
 //  State
 // ================================================================
 
 static bool    g_initialized       = false;
+
+// Retention
 static int     g_origRetention     = 0;
 static bool    g_retentionPatched  = false;
 static bool    g_retentionGaveUp   = false;
 static int     g_retentionRetries  = 0;
 
-static int g_clearCounter          = 0;
-static int g_retentionCheckCounter = 0;
-static int g_totalClears           = 0;
+// Periodic clear
+static int     g_clearCounter          = 0;
+static int     g_retentionCheckCounter = 0;
+static int     g_totalClears           = 0;
 
-// CombatLogClearEntries is a simple function with no args,
-// uses ecx from global (reads ADB97C internally).
-typedef int (__cdecl *ClearEntries_fn)();
-static ClearEntries_fn g_clearEntries = nullptr;
+// Pool
+static uint8_t* g_poolMemory       = nullptr;   // Raw pool memory
+static bool     g_poolInjected     = false;
+static int      g_poolEntriesAdded = 0;
+
+// Functions
+static ClearEntries_fn   g_clearEntries   = nullptr;
+static EntryInit_fn      g_entryInit      = nullptr;
+static FreeListInsert_fn g_freeListInsert = nullptr;
 
 // ================================================================
 //  Memory Validation
@@ -116,19 +177,14 @@ static bool WriteRetention(int seconds) {
 }
 
 // ================================================================
-//  Retention Patch (with retry)
+//  Retention Patch
 // ================================================================
 
 static int TryPatchRetention() {
-    if (!IsReadable(Addr::CVar_RetentionPtr)) {
-        return 0;
-    }
+    if (!IsReadable(Addr::CVar_RetentionPtr)) return 0;
 
     int current = ReadRetention();
-    if (current < 0) {
-        return 0;
-    }
-
+    if (current < 0) return 0;
     if (current <= 0 || current > 100000) {
         Log("[CombatLog] Implausible retention value: %d", current);
         return -1;
@@ -147,29 +203,13 @@ static int TryPatchRetention() {
 
 // ================================================================
 //  Periodic Clear
-//
-//  Calls CombatLogClearEntries when all entries have been
-//  processed by Lua (CA1394 == NULL). This prevents the combat
-//  log from entering a broken state due to internal corruption,
-//  stuck pointers, or dispatch errors.
-//
-//  Equivalent to the CombatLogFix addon but from C level:
-//    local f = CreateFrame("Frame")
-//    f:SetScript("OnUpdate", CombatLogClearEntries)
-//
-//  We run it every ~10 seconds instead of every frame — less
-//  aggressive but still effective. Events are dispatched to Lua
-//  via COMBAT_LOG_EVENT_UNFILTERED before we clear, so addons
-//  receive all data.
 // ================================================================
 
 static void TryClearProcessedEntries() {
     __try {
-        // Only clear when Lua has processed everything
         uintptr_t pending = *(uintptr_t*)Addr::PendingEntry;
         if (pending != 0) return;
 
-        // Only clear if there are entries to clear
         uintptr_t head = *(uintptr_t*)Addr::ActiveListHead;
         if (!head || (head & 1)) return;
 
@@ -179,6 +219,114 @@ static void TryClearProcessedEntries() {
     __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("[CombatLog] Exception in clear");
     }
+}
+
+// ================================================================
+//  Entry Pool — Pre-fill the Free List
+//
+//  We allocate POOL_ENTRY_COUNT entries (each 0x78 bytes) as one
+//  contiguous block via mimalloc. Then we initialize each entry
+//  and insert it into the combat log's free list using the
+//  engine's own FreeListInsert function.
+//
+//  After this, sub_750400 will find entries in the free list
+//  and NEVER need to call sub_74F2D0 (heap alloc) during combat.
+//
+//  This is called from OnFrame when we detect the free list
+//  manager is ready (after player login).
+// ================================================================
+
+static bool InitializeEntry(uint8_t* entry) {
+    __try {
+        // Zero the entire entry
+        memset(entry, 0, ENTRY_SIZE);
+
+        // Set up linked list pointers (will be overwritten by FreeListInsert)
+        *(uintptr_t*)(entry + 0x00) = 0;  // next
+        *(uintptr_t*)(entry + 0x04) = 0;  // prev
+
+        // Set up string object vtable at +0x48
+        *(uintptr_t*)(entry + 0x48) = Addr::StringVtable;
+        *(uintptr_t*)(entry + 0x4C) = 0;  // string length = 0
+
+        // Call the engine's entry initializer
+        g_entryInit((void*)entry);
+
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool InjectPool() {
+    if (g_poolInjected) return true;
+
+    // Verify functions
+    if (!g_entryInit || !g_freeListInsert) {
+        Log("[CombatLog-Pool] Functions not resolved");
+        return false;
+    }
+
+    // Verify free list manager exists
+    if (!IsReadable(Addr::FreeListManager)) {
+        Log("[CombatLog-Pool] Free list manager not readable");
+        return false;
+    }
+
+    // Allocate pool memory (one big contiguous block)
+    g_poolMemory = (uint8_t*)mi_calloc(POOL_ENTRY_COUNT, ENTRY_SIZE);
+    if (!g_poolMemory) {
+        Log("[CombatLog-Pool] Failed to allocate %d bytes", POOL_TOTAL_BYTES);
+        return false;
+    }
+
+    Log("[CombatLog-Pool] Allocated %d entries (%d KB) at 0x%08X",
+        POOL_ENTRY_COUNT, POOL_TOTAL_BYTES / 1024, (unsigned)(uintptr_t)g_poolMemory);
+
+    // Initialize each entry and insert into free list
+    int injected = 0;
+    int failed = 0;
+
+    for (int i = 0; i < POOL_ENTRY_COUNT; i++) {
+        uint8_t* entry = g_poolMemory + (i * ENTRY_SIZE);
+
+        if (!InitializeEntry(entry)) {
+            failed++;
+            if (failed > 10) {
+                Log("[CombatLog-Pool] Too many init failures, stopping at %d", i);
+                break;
+            }
+            continue;
+        }
+
+        // Insert into free list using engine's function
+        // sub_86E200 signature: void __thiscall FreeListInsert(void* manager, void* entry)
+        // ecx = manager (ADB980), arg = entry pointer
+        __try {
+            g_freeListInsert((void*)Addr::FreeListManager, (void*)entry);
+            injected++;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            failed++;
+            Log("[CombatLog-Pool] Exception inserting entry %d", i);
+            if (failed > 10) break;
+        }
+    }
+
+    g_poolEntriesAdded = injected;
+    g_poolInjected = (injected > 0);
+
+    if (g_poolInjected) {
+        Log("[CombatLog-Pool]  [ OK ] Injected %d entries into free list (%d failed)",
+            injected, failed);
+    } else {
+        Log("[CombatLog-Pool]  [FAIL] Could not inject any entries");
+        mi_free(g_poolMemory);
+        g_poolMemory = nullptr;
+    }
+
+    return g_poolInjected;
 }
 
 // ================================================================
@@ -193,12 +341,28 @@ bool Init() {
     Log("[CombatLog]  Build 12340");
     Log("[CombatLog] ====================================");
 
+    // Resolve functions
     if (!IsExecutable(Addr::CombatLogClearEntries)) {
-        Log("[CombatLog] CombatLogClearEntries not found — aborting");
+        Log("[CombatLog] CombatLogClearEntries not found");
         return false;
     }
     g_clearEntries = (ClearEntries_fn)Addr::CombatLogClearEntries;
 
+    if (IsExecutable(Addr::EntryInit)) {
+        g_entryInit = (EntryInit_fn)Addr::EntryInit;
+        Log("[CombatLog]  EntryInit:       0x%08X  OK", (unsigned)Addr::EntryInit);
+    } else {
+        Log("[CombatLog]  EntryInit:       FAILED");
+    }
+
+    if (IsExecutable(Addr::FreeListInsert)) {
+        g_freeListInsert = (FreeListInsert_fn)Addr::FreeListInsert;
+        Log("[CombatLog]  FreeListInsert:  0x%08X  OK", (unsigned)Addr::FreeListInsert);
+    } else {
+        Log("[CombatLog]  FreeListInsert:  FAILED");
+    }
+
+    // Try retention patch
     int retResult = TryPatchRetention();
     if (retResult == 1) {
         Log("[CombatLog]  [ OK ] Retention time (%d -> %d sec)",
@@ -210,8 +374,15 @@ bool Init() {
         g_retentionGaveUp = true;
     }
 
-    Log("[CombatLog]  [ OK ] Periodic clear (every %d frames, safe)",
-        CLEAR_INTERVAL_FRAMES);
+    Log("[CombatLog]  [ OK ] Periodic clear (every %d frames)", CLEAR_INTERVAL_FRAMES);
+
+    if (g_entryInit && g_freeListInsert) {
+        Log("[CombatLog]  [WAIT] Entry pool (%d entries, %d KB) — deferred to main thread",
+            POOL_ENTRY_COUNT, POOL_TOTAL_BYTES / 1024);
+    } else {
+        Log("[CombatLog]  [SKIP] Entry pool — missing functions");
+    }
+
     Log("[CombatLog] ====================================");
 
     g_initialized = true;
@@ -248,6 +419,12 @@ void OnFrame(DWORD mainThreadId) {
         }
     }
 
+    // Inject pool once (after retention is patched = CVar system ready)
+    if (!g_poolInjected && g_retentionPatched && g_entryInit && g_freeListInsert) {
+        Log("[CombatLog-Pool] Attempting pool injection...");
+        InjectPool();
+    }
+
     // Periodic clear of processed entries
     g_clearCounter++;
     if (g_clearCounter >= CLEAR_INTERVAL_FRAMES) {
@@ -265,9 +442,25 @@ void Shutdown() {
         g_retentionPatched = false;
     }
 
-    Log("[CombatLog] Shutdown. Total clears: %d", g_totalClears);
+    // NOTE: We do NOT free the pool memory here.
+    // The entries are in the engine's free list — freeing them
+    // would corrupt the linked list and crash.
+    // The memory will be freed when the process exits.
+
+    Log("[CombatLog] Shutdown. Clears: %d, Pool: %s (%d entries)",
+        g_totalClears,
+        g_poolInjected ? "ACTIVE" : "inactive",
+        g_poolEntriesAdded);
 
     g_initialized = false;
+}
+
+PoolStats GetPoolStats() {
+    PoolStats s = {};
+    s.poolSize   = POOL_ENTRY_COUNT;
+    s.poolUsed   = g_poolEntriesAdded;
+    s.poolActive = g_poolInjected;
+    return s;
 }
 
 } // namespace CombatLogOpt
