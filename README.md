@@ -82,17 +82,16 @@ This is **not** a magic FPS doubler. Think of it like replacing an HDD with an S
 
 ---
 
-## 🔧 Recommended Optimization Ecosystem
+## 🔧 Recommended Combo
 
-For maximum client performance, use all three of my optimization projects together:
+For maximum optimization, use this DLL together with the **[!LuaBoost](https://github.com/suprepupre/LuaBoost)** addon:
 
 | Layer | Tool | What It Does |
 |-------|------|--------------|
-| **C / Engine** | **wow_optimize.dll** | Faster memory allocator (mimalloc), network optimization (TCP_NODELAY), precision timers, Lua GC from C, combat log pool fix. |
-| **Lua / Runtime** | [!LuaBoost](https://github.com/suprepupre/LuaBoost) | Smart GC, SpeedyLoad, UI Thrashing Protection, table pool, throttle API. |
-| **Lua / Source** | [LuaBoost Localizer](https://github.com/suprepupre/luaboost-localizer) | Automatic global-to-local (`local GetTime = GetTime`) optimizer utility for all your downloaded addons. Run it once in your AddOns folder. |
+| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix + pool |
+| **Lua / Addons** | !LuaBoost addon | Incremental GC, SpeedyLoad, table pool, throttle API, GUI |
 
-When the DLL and !LuaBoost addon are both installed, they communicate automatically. The DLL handles GC stepping from C (zero Lua overhead), and the addon handles combat awareness and GUI.
+When both are installed, the DLL handles Lua allocator replacement, GC stepping from C (zero Lua overhead), and combat log buffering. The addon provides the GUI, combat awareness, idle detection, SpeedyLoad, and runtime function optimizations.
 
 > ⚠️ **Do NOT use [SmartGC](https://github.com/suprepupre/SmartGC) together with !LuaBoost** — SmartGC has been merged into LuaBoost. Using both will cause conflicts.
 
@@ -235,6 +234,8 @@ Addon writes → Lua globals (on events):
 DLL reads addon globals per-frame from the Sleep hook (main thread).
 ```
 
+> **Why not `lua_pushcclosure`?** WoW validates C function pointers passed to Lua. If the pointer is outside Wow.exe's code section, WoW crashes with `Fatal condition: Invalid function pointer`. The DLL creates pure Lua wrapper functions via `FrameScript_Execute` instead — these are safe.
+
 ---
 
 ## 📊 Combat Log Optimizer
@@ -242,6 +243,26 @@ DLL reads addon globals per-frame from the Sleep hook (main thread).
 ### The Problem
 
 In 25-man raids (ICC, RS) with addons like DBM, WeakAuras, and Skada running simultaneously, the combat log loses events. Damage meters show incomplete data, often called "combat log breaks." Additionally, heavy AoE combat causes micro-stutters from hundreds of heap allocations per second.
+
+### How WoW's Combat Log Works
+
+```
+Active List:  HEAD → [entry1] → [entry2] → ... → [entryN]
+                      oldest                       newest
+                         ↑                            ↑
+                    may be recycled              CA1394 (Lua pending)
+
+Free List:    HEAD → [recycled1] → [recycled2] → ...
+```
+
+Events are stored as a linked list. Each entry is 0x78 bytes (120 bytes) with timestamp, GUIDs, spell info, and event flags. When a new event arrives:
+
+1. Check free list → reuse a recycled node
+2. Free list empty → check if oldest entry expired (age > retention × 1000ms)
+3. Expired → **recycle it** (even if Lua hasn't processed it!)
+4. Not expired → allocate new node from heap (**SLOW**)
+
+Step 3 is the data loss bug. Step 4 is the micro-stutter source.
 
 ### The Fix (3 Layers)
 
@@ -270,6 +291,15 @@ With pool (wow_optimize v1.5.0):
   After use: entries return to free list via normal recycling
            → Pool entries are reused indefinitely
 ```
+
+### Memory Impact
+
+Pool: 4096 × 120 bytes = 480 KB (one-time allocation, never freed).
+Retention: at 500 events/sec × 120 bytes × 1800 sec = ~103 MB worst case. In practice much less because the periodic cleanup frees processed entries continuously.
+
+### Replacing CombatLogFix Addon
+
+If you use the CombatLogFix addon (from KPack or standalone), you can **remove it**. The DLL does the same job from C level without any Lua overhead.
 
 ---
 
