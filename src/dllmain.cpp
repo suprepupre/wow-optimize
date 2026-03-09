@@ -167,20 +167,22 @@ static void PreciseSleep(double milliseconds) {
     LARGE_INTEGER li;
     QueryPerformanceCounter(&li);
     double start = (double)li.QuadPart / g_sleepFreq;
-    double current = start;
 
     while (true) {
-        double elapsed = current - start;
-        if (milliseconds <= elapsed)
+        QueryPerformanceCounter(&li);
+        double elapsed = (double)li.QuadPart / g_sleepFreq - start;
+
+        if (elapsed >= milliseconds)
             return;
 
-        if (milliseconds - elapsed > 2.0)
-            orig_Sleep(1);
-        else
-            _mm_pause();
+        double remaining = milliseconds - elapsed;
 
-        QueryPerformanceCounter(&li);
-        current = (double)li.QuadPart / g_sleepFreq;
+        if (remaining > 2.0)
+            orig_Sleep(1);          // OS sleep — releases CPU fully
+        else if (remaining > 0.3)
+            SwitchToThread();       // yield quantum but stay runnable
+        else
+            _mm_pause();            // sub-microsecond spin only for final approach
     }
 }
 
