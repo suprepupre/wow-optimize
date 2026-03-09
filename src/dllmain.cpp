@@ -5,6 +5,7 @@
 #include <psapi.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <tlhelp32.h>
 #include <cstdio>
 #include <cstring>
@@ -224,11 +225,12 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
     int savedError = WSAGetLastError();
 
     if (result == 0 || savedError == WSAEWOULDBLOCK) {
-        // 1. Disable Nagle (send immediately)
+
+        // ── 1. Disable Nagle (send immediately) ──
         BOOL nodelay = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
-        // 2. Disable Delayed ACK (acknowledge immediately)
+        // ── 2. Disable Delayed ACK (acknowledge immediately) ──
         DWORD ackFreq = 1;
         DWORD bytesReturned = 0;
         int ackResult = WSAIoctl(
@@ -240,25 +242,60 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
             NULL, NULL
         );
 
-        // 3. QoS: mark packets as low-delay interactive traffic
-        //    IPTOS_LOWDELAY (0x10) = DSCP CS2 expedited forwarding
-        //    Routers with QoS enabled will prioritize these packets
-        //    over bulk traffic (streaming, downloads, torrents)
-        //    Harmless if router ignores TOS — field is simply unused
-        int tos = 0x10; // IPTOS_LOWDELAY
+        // ── 3. QoS: low-delay interactive traffic ──
+        int tos = 0x10;
         int tosResult = setsockopt(s, IPPROTO_IP, IP_TOS,
                                    (const char*)&tos, sizeof(tos));
 
-        // 4. Send buffer sizing
+        // ── 4. Buffer sizing ──
+        // Send buffer: 32 KB (enough for WoW's small packets)
+        // Receive buffer: 64 KB (server sends more data than client,
+        //   especially in 25-man raids with combat log + aura updates)
+        // Default Windows SO_RCVBUF is 8 KB — too small, causes
+        //   TCP window scaling issues and receive-side bottleneck
         int sendbuf = 32768;
+        int recvbuf = 65536;
         setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sendbuf, sizeof(sendbuf));
+        int rcvResult = setsockopt(s, SOL_SOCKET, SO_RCVBUF,
+                                   (const char*)&recvbuf, sizeof(recvbuf));
 
-        // Log all results
-        Log("Socket %d: NODELAY%s TOS=0x%02X%s SNDBUF=32K",
+        // ── 5. Fast keepalive — detect dead connections in 15 sec ──
+        // Default Windows keepalive: 2 HOURS before first probe
+        // That means: if connection silently dies (NAT timeout, ISP drop),
+        //   WoW sits frozen for up to 2 hours before detecting disconnect.
+        //
+        // Our config:
+        //   keepalivetime     = 10000ms (10 sec idle before first probe)
+        //   keepaliveinterval = 1000ms  (1 sec between probes)
+        //   Windows sends 10 probes by default before giving up
+        //   Total detection time: 10 + (10 * 1) = 20 seconds max
+        //
+        // SIO_KEEPALIVE_VALS is available on all Windows versions (XP+)
+
+        tcp_keepalive ka;
+        ka.onoff             = 1;
+        ka.keepalivetime     = 10000;  // 10 sec idle → first probe
+        ka.keepaliveinterval = 1000;   // 1 sec between probes
+        DWORD kaBytes = 0;
+        int kaResult = WSAIoctl(
+            s,
+            SIO_KEEPALIVE_VALS,
+            &ka, sizeof(ka),
+            NULL, 0,
+            &kaBytes,
+            NULL, NULL
+        );
+
+        // ── Log everything ──
+        Log("Socket %d: NODELAY%s TOS=0x%02X%s SNDBUF=%dK RCVBUF=%dK%s KA=%s",
             (int)s,
             (ackResult == 0) ? " ACK_FREQ=1" : "",
             tos,
-            (tosResult != 0) ? "(fail)" : "");
+            (tosResult != 0) ? "(fail)" : "",
+            sendbuf / 1024,
+            recvbuf / 1024,
+            (rcvResult != 0) ? "(fail)" : "",
+            (kaResult == 0) ? "10s/1s" : "fail");
     }
 
     WSASetLastError(savedError);
@@ -273,7 +310,7 @@ static bool InstallNetworkHooks() {
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_connect, (void**)&orig_connect) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
-    Log("Network hook: ACTIVE (NODELAY + ACK_FREQ + QoS + buffer tuning)");
+    Log("Network hook: ACTIVE (NODELAY + ACK_FREQ + QoS + buffers + keepalive)");
     return true;
 }
 
