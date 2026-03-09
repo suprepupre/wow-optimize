@@ -903,8 +903,22 @@ void OnMainThreadSleep(DWORD mainThreadId) {
         return;
     }
 
-    ReadAddonStateFromLua(Api.L);
-    ProcessGCRequests(Api.L);
+    // Read addon state every 16 frames (~4-5 reads/sec at 60fps)
+    // Combat/idle/loading state changes at most a few times per minute
+    // No need to poll 9 Lua API calls every single frame
+    static int addonReadCounter = 0;
+    if ((++addonReadCounter & 15) == 0) {
+        ReadAddonStateFromLua(Api.L);
+    }
+
+    // GC requests from addon checked every 4 frames
+    // Addon sets LUABOOST_DLL_GC_REQUEST on burst events (boss kill etc)
+    // 4-frame delay = ~66ms at 60fps — imperceptible
+    static int gcRequestCounter = 0;
+    if ((++gcRequestCounter & 3) == 0) {
+        ProcessGCRequests(Api.L);
+    }
+
     StepGC(Api.L);
 
     if ((State.statsUpdateCounter & 63) == 0) {
