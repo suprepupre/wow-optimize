@@ -315,33 +315,113 @@ static bool InstallNetworkHooks() {
 }
 
 // ================================================================
-// 4. MPQ Handle Tracking
+// 4. MPQ Handle Tracking (O(1) hash lookup)
 // ================================================================
-static HANDLE g_mpqHandles[256] = {};
-static int    g_mpqHandleCount = 0;
-static CRITICAL_SECTION g_mpqHandleLock;
+
+// Old: linear scan of 256-element array on EVERY ReadFile call
+// New: open-addressing hash table — O(1) average lookup
+// Key insight: HANDLE values are always aligned to 4 bytes,
+//   so we shift right by 2 for better hash distribution
+
+static constexpr int MPQ_HASH_SIZE = 512; // power of 2, load factor < 0.5
+static constexpr int MPQ_HASH_MASK = MPQ_HASH_SIZE - 1;
+
+struct MpqHashEntry {
+    HANDLE handle;
+    bool   occupied;
+};
+
+static MpqHashEntry g_mpqHash[MPQ_HASH_SIZE] = {};
+static int          g_mpqHandleCount = 0;
+static SRWLOCK      g_mpqLock = SRWLOCK_INIT;
+
+static inline int MpqSlot(HANDLE h) {
+    // HANDLE values are multiples of 4, shift for distribution
+    return (int)(((uintptr_t)h >> 2) & MPQ_HASH_MASK);
+}
 
 static void TrackMpqHandle(HANDLE h) {
-    EnterCriticalSection(&g_mpqHandleLock);
-    if (g_mpqHandleCount < 256) g_mpqHandles[g_mpqHandleCount++] = h;
-    LeaveCriticalSection(&g_mpqHandleLock);
+    AcquireSRWLockExclusive(&g_mpqLock);
+
+    int slot = MpqSlot(h);
+    for (int i = 0; i < MPQ_HASH_SIZE; i++) {
+        int idx = (slot + i) & MPQ_HASH_MASK;
+        if (!g_mpqHash[idx].occupied) {
+            g_mpqHash[idx].handle = h;
+            g_mpqHash[idx].occupied = true;
+            g_mpqHandleCount++;
+            break;
+        }
+        if (g_mpqHash[idx].handle == h) {
+            break; // already tracked
+        }
+    }
+
+    ReleaseSRWLockExclusive(&g_mpqLock);
 }
 
 static bool IsMpqHandle(HANDLE h) {
-    EnterCriticalSection(&g_mpqHandleLock);
-    for (int i = 0; i < g_mpqHandleCount; i++) {
-        if (g_mpqHandles[i] == h) { LeaveCriticalSection(&g_mpqHandleLock); return true; }
+    AcquireSRWLockShared(&g_mpqLock);
+
+    int slot = MpqSlot(h);
+    bool found = false;
+    for (int i = 0; i < MPQ_HASH_SIZE; i++) {
+        int idx = (slot + i) & MPQ_HASH_MASK;
+        if (!g_mpqHash[idx].occupied) {
+            break; // empty slot = not found
+        }
+        if (g_mpqHash[idx].handle == h) {
+            found = true;
+            break;
+        }
     }
-    LeaveCriticalSection(&g_mpqHandleLock);
-    return false;
+
+    ReleaseSRWLockShared(&g_mpqLock);
+    return found;
 }
 
 static void UntrackMpqHandle(HANDLE h) {
-    EnterCriticalSection(&g_mpqHandleLock);
-    for (int i = 0; i < g_mpqHandleCount; i++) {
-        if (g_mpqHandles[i] == h) { g_mpqHandles[i] = g_mpqHandles[--g_mpqHandleCount]; break; }
+    AcquireSRWLockExclusive(&g_mpqLock);
+
+    int slot = MpqSlot(h);
+    for (int i = 0; i < MPQ_HASH_SIZE; i++) {
+        int idx = (slot + i) & MPQ_HASH_MASK;
+        if (!g_mpqHash[idx].occupied) {
+            break; // not found
+        }
+        if (g_mpqHash[idx].handle == h) {
+            // Tombstone removal: rehash subsequent entries
+            g_mpqHash[idx].occupied = false;
+            g_mpqHash[idx].handle = NULL;
+            g_mpqHandleCount--;
+
+            // Rehash chain after deleted slot
+            int next = (idx + 1) & MPQ_HASH_MASK;
+            while (g_mpqHash[next].occupied) {
+                HANDLE rh = g_mpqHash[next].handle;
+                g_mpqHash[next].occupied = false;
+                g_mpqHash[next].handle = NULL;
+                g_mpqHandleCount--;
+
+                // Re-insert
+                int rs = MpqSlot(rh);
+                for (int j = 0; j < MPQ_HASH_SIZE; j++) {
+                    int ri = (rs + j) & MPQ_HASH_MASK;
+                    if (!g_mpqHash[ri].occupied) {
+                        g_mpqHash[ri].handle = rh;
+                        g_mpqHash[ri].occupied = true;
+                        g_mpqHandleCount++;
+                        break;
+                    }
+                }
+
+                next = (next + 1) & MPQ_HASH_MASK;
+            }
+            break;
+        }
     }
-    LeaveCriticalSection(&g_mpqHandleLock);
+
+    ReleaseSRWLockExclusive(&g_mpqLock);
 }
 
 // ================================================================
@@ -738,7 +818,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     if (MH_Initialize() != MH_OK) { Log("FATAL: MinHook initialization failed"); LogClose(); return 1; }
     Log("MinHook initialized");
 
-    InitializeCriticalSection(&g_mpqHandleLock);
     InitializeCriticalSection(&g_cacheLock);
     g_csInitialized = true;
 
@@ -822,7 +901,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             }
             if (g_csInitialized) {
                 DeleteCriticalSection(&g_cacheLock);
-                DeleteCriticalSection(&g_mpqHandleLock);
             }
             Log("wow_optimize.dll unloaded");
             LogClose();
