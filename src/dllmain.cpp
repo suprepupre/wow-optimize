@@ -205,21 +205,62 @@ static bool InstallSleepHook() {
 }
 
 // ================================================================
-// 3. TCP_NODELAY
+// 3. TCP_NODELAY + Immediate ACK
 // ================================================================
+
+// Windows Delayed ACK control — ACK every packet immediately
+// Default: Windows waits for 2nd TCP segment or 200ms timer before ACKing
+// Result: server sees "slow" client → throttles data → added latency
+// Fix: ACK frequency = 1 → instant ACK → server sends data without delay
+#ifndef SIO_TCP_SET_ACK_FREQUENCY
+#define SIO_TCP_SET_ACK_FREQUENCY _WSAIOW(IOC_VENDOR, 23)
+#endif
+
 typedef int (WINAPI* connect_fn)(SOCKET, const struct sockaddr*, int);
 static connect_fn orig_connect = nullptr;
 
 static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int namelen) {
     int result = orig_connect(s, name, namelen);
     int savedError = WSAGetLastError();
+
     if (result == 0 || savedError == WSAEWOULDBLOCK) {
+        // ── 1. Disable Nagle's algorithm ──
+        // Nagle batches small writes into one packet (adds up to 200ms delay)
+        // TCP_NODELAY = send every write immediately
         BOOL nodelay = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+
+        // ── 2. Disable Delayed ACK ──
+        // This is the big one. Forces Windows to ACK every incoming TCP segment
+        // immediately instead of waiting 200ms or for a second packet.
+        // Combined with TCP_NODELAY, this eliminates both send AND receive delay.
+        //
+        // Available: Windows Vista / Server 2008+
+        // On older systems: WSAIoctl returns SOCKET_ERROR — harmless, just skip
+        DWORD ackFreq = 1; // ACK every single packet
+        DWORD bytesReturned = 0;
+        int ackResult = WSAIoctl(
+            s,
+            SIO_TCP_SET_ACK_FREQUENCY,
+            &ackFreq, sizeof(ackFreq),
+            NULL, 0,
+            &bytesReturned,
+            NULL, NULL
+        );
+
+        // ── 3. Send buffer ──
         int sendbuf = 32768;
         setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sendbuf, sizeof(sendbuf));
-        Log("TCP_NODELAY set on socket %d", (int)s);
+
+        // Log with ACK status
+        if (ackResult == 0) {
+            Log("Socket %d: TCP_NODELAY + ACK_FREQ=1 + SNDBUF=32K", (int)s);
+        } else {
+            Log("Socket %d: TCP_NODELAY + SNDBUF=32K (ACK_FREQ unsupported, err=%d)",
+                (int)s, WSAGetLastError());
+        }
     }
+
     WSASetLastError(savedError);
     return result;
 }
@@ -232,7 +273,7 @@ static bool InstallNetworkHooks() {
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_connect, (void**)&orig_connect) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
-    Log("Network hook: ACTIVE (TCP_NODELAY on all connections)");
+    Log("Network hook: ACTIVE (TCP_NODELAY + ACK_FREQ + buffer tuning)");
     return true;
 }
 
