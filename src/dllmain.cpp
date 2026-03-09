@@ -224,20 +224,12 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
     int savedError = WSAGetLastError();
 
     if (result == 0 || savedError == WSAEWOULDBLOCK) {
-        // ── 1. Disable Nagle's algorithm ──
-        // Nagle batches small writes into one packet (adds up to 200ms delay)
-        // TCP_NODELAY = send every write immediately
+        // 1. Disable Nagle (send immediately)
         BOOL nodelay = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
-        // ── 2. Disable Delayed ACK ──
-        // This is the big one. Forces Windows to ACK every incoming TCP segment
-        // immediately instead of waiting 200ms or for a second packet.
-        // Combined with TCP_NODELAY, this eliminates both send AND receive delay.
-        //
-        // Available: Windows Vista / Server 2008+
-        // On older systems: WSAIoctl returns SOCKET_ERROR — harmless, just skip
-        DWORD ackFreq = 1; // ACK every single packet
+        // 2. Disable Delayed ACK (acknowledge immediately)
+        DWORD ackFreq = 1;
         DWORD bytesReturned = 0;
         int ackResult = WSAIoctl(
             s,
@@ -248,17 +240,25 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
             NULL, NULL
         );
 
-        // ── 3. Send buffer ──
+        // 3. QoS: mark packets as low-delay interactive traffic
+        //    IPTOS_LOWDELAY (0x10) = DSCP CS2 expedited forwarding
+        //    Routers with QoS enabled will prioritize these packets
+        //    over bulk traffic (streaming, downloads, torrents)
+        //    Harmless if router ignores TOS — field is simply unused
+        int tos = 0x10; // IPTOS_LOWDELAY
+        int tosResult = setsockopt(s, IPPROTO_IP, IP_TOS,
+                                   (const char*)&tos, sizeof(tos));
+
+        // 4. Send buffer sizing
         int sendbuf = 32768;
         setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sendbuf, sizeof(sendbuf));
 
-        // Log with ACK status
-        if (ackResult == 0) {
-            Log("Socket %d: TCP_NODELAY + ACK_FREQ=1 + SNDBUF=32K", (int)s);
-        } else {
-            Log("Socket %d: TCP_NODELAY + SNDBUF=32K (ACK_FREQ unsupported, err=%d)",
-                (int)s, WSAGetLastError());
-        }
+        // Log all results
+        Log("Socket %d: NODELAY%s TOS=0x%02X%s SNDBUF=32K",
+            (int)s,
+            (ackResult == 0) ? " ACK_FREQ=1" : "",
+            tos,
+            (tosResult != 0) ? "(fail)" : "");
     }
 
     WSASetLastError(savedError);
@@ -273,7 +273,7 @@ static bool InstallNetworkHooks() {
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_connect, (void**)&orig_connect) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
-    Log("Network hook: ACTIVE (TCP_NODELAY + ACK_FREQ + buffer tuning)");
+    Log("Network hook: ACTIVE (NODELAY + ACK_FREQ + QoS + buffer tuning)");
     return true;
 }
 
