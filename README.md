@@ -460,6 +460,13 @@ wow-optimize/
 
 ---
 
+
+## ⭐ Reviews
+
+See what other players say: [**Reviews & Testimonials**](../../discussions/10)
+
+Used wow_optimize or LuaBoost? [**Leave a review!**](../../discussions/10)
+
 ## 📜 License
 
 MIT License — use, modify, and distribute freely. See [LICENSE](LICENSE) for full text.
