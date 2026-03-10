@@ -208,112 +208,147 @@ static bool InstallSleepHook() {
 }
 
 // ================================================================
-// 3. TCP_NODELAY + Immediate ACK
+// 3. TCP_NODELAY + Immediate ACK + QoS + Keepalive
 // ================================================================
 
-// Windows Delayed ACK control — ACK every packet immediately
-// Default: Windows waits for 2nd TCP segment or 200ms timer before ACKing
-// Result: server sees "slow" client → throttles data → added latency
-// Fix: ACK frequency = 1 → instant ACK → server sends data without delay
 #ifndef SIO_TCP_SET_ACK_FREQUENCY
 #define SIO_TCP_SET_ACK_FREQUENCY _WSAIOW(IOC_VENDOR, 23)
 #endif
 
 typedef int (WINAPI* connect_fn)(SOCKET, const struct sockaddr*, int);
+typedef int (WINAPI* send_fn)(SOCKET, const char*, int, int);
+
 static connect_fn orig_connect = nullptr;
+static send_fn    orig_send    = nullptr;
+
+// Track sockets that need post-connect optimization
+static SOCKET g_pendingSockets[64] = {};
+static int    g_pendingCount = 0;
+static SRWLOCK g_pendingLock = SRWLOCK_INIT;
+
+static void AddPendingSocket(SOCKET s) {
+    AcquireSRWLockExclusive(&g_pendingLock);
+    if (g_pendingCount < 64) {
+        // Check not already tracked
+        for (int i = 0; i < g_pendingCount; i++) {
+            if (g_pendingSockets[i] == s) {
+                ReleaseSRWLockExclusive(&g_pendingLock);
+                return;
+            }
+        }
+        g_pendingSockets[g_pendingCount++] = s;
+    }
+    ReleaseSRWLockExclusive(&g_pendingLock);
+}
+
+static bool RemovePendingSocket(SOCKET s) {
+    AcquireSRWLockExclusive(&g_pendingLock);
+    for (int i = 0; i < g_pendingCount; i++) {
+        if (g_pendingSockets[i] == s) {
+            g_pendingSockets[i] = g_pendingSockets[--g_pendingCount];
+            ReleaseSRWLockExclusive(&g_pendingLock);
+            return true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_pendingLock);
+    return false;
+}
+
+static void OptimizeSocket(SOCKET s, const char* trigger) {
+    int applied = 0;
+    int failed  = 0;
+
+    // 1. Disable Nagle
+    BOOL nodelay = TRUE;
+    if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay)) == 0)
+        applied++;
+
+    // 2. Disable Delayed ACK
+    DWORD ackFreq = 1;
+    DWORD bytesReturned = 0;
+    if (WSAIoctl(s, SIO_TCP_SET_ACK_FREQUENCY, &ackFreq, sizeof(ackFreq),
+                 NULL, 0, &bytesReturned, NULL, NULL) == 0)
+        applied++;
+    else
+        failed++;
+
+    // 3. QoS Low Delay
+    int tos = 0x10;
+    if (setsockopt(s, IPPROTO_IP, IP_TOS, (const char*)&tos, sizeof(tos)) == 0)
+        applied++;
+    else
+        failed++;
+
+    // 4. Buffer sizing
+    int sendbuf = 32768;
+    int recvbuf = 65536;
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sendbuf, sizeof(sendbuf));
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char*)&recvbuf, sizeof(recvbuf));
+    applied += 2;
+
+    // 5. Fast keepalive
+    tcp_keepalive ka;
+    ka.onoff             = 1;
+    ka.keepalivetime     = 10000;
+    ka.keepaliveinterval = 1000;
+    DWORD kaBytes = 0;
+    if (WSAIoctl(s, SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+                 NULL, 0, &kaBytes, NULL, NULL) == 0)
+        applied++;
+    else
+        failed++;
+
+    Log("Socket %d [%s]: %d applied, %d failed (NODELAY+ACK+QoS+BUF+KA)",
+        (int)s, trigger, applied, failed);
+}
 
 static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int namelen) {
     int result = orig_connect(s, name, namelen);
     int savedError = WSAGetLastError();
 
-    if (result == 0 || savedError == WSAEWOULDBLOCK) {
-
-        // ── 1. Disable Nagle (send immediately) ──
+    if (result == 0) {
+        // Synchronous connect succeeded — optimize immediately
+        OptimizeSocket(s, "connect");
+    } else if (savedError == WSAEWOULDBLOCK) {
+        // Async connect — socket not ready yet, defer optimization
+        AddPendingSocket(s);
+        // Still set TCP_NODELAY — this one works even before handshake
         BOOL nodelay = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-
-        // ── 2. Disable Delayed ACK (acknowledge immediately) ──
-        DWORD ackFreq = 1;
-        DWORD bytesReturned = 0;
-        int ackResult = WSAIoctl(
-            s,
-            SIO_TCP_SET_ACK_FREQUENCY,
-            &ackFreq, sizeof(ackFreq),
-            NULL, 0,
-            &bytesReturned,
-            NULL, NULL
-        );
-
-        // ── 3. QoS: low-delay interactive traffic ──
-        int tos = 0x10;
-        int tosResult = setsockopt(s, IPPROTO_IP, IP_TOS,
-                                   (const char*)&tos, sizeof(tos));
-
-        // ── 4. Buffer sizing ──
-        // Send buffer: 32 KB (enough for WoW's small packets)
-        // Receive buffer: 64 KB (server sends more data than client,
-        //   especially in 25-man raids with combat log + aura updates)
-        // Default Windows SO_RCVBUF is 8 KB — too small, causes
-        //   TCP window scaling issues and receive-side bottleneck
-        int sendbuf = 32768;
-        int recvbuf = 65536;
-        setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sendbuf, sizeof(sendbuf));
-        int rcvResult = setsockopt(s, SOL_SOCKET, SO_RCVBUF,
-                                   (const char*)&recvbuf, sizeof(recvbuf));
-
-        // ── 5. Fast keepalive — detect dead connections in 15 sec ──
-        // Default Windows keepalive: 2 HOURS before first probe
-        // That means: if connection silently dies (NAT timeout, ISP drop),
-        //   WoW sits frozen for up to 2 hours before detecting disconnect.
-        //
-        // Our config:
-        //   keepalivetime     = 10000ms (10 sec idle before first probe)
-        //   keepaliveinterval = 1000ms  (1 sec between probes)
-        //   Windows sends 10 probes by default before giving up
-        //   Total detection time: 10 + (10 * 1) = 20 seconds max
-        //
-        // SIO_KEEPALIVE_VALS is available on all Windows versions (XP+)
-
-        tcp_keepalive ka;
-        ka.onoff             = 1;
-        ka.keepalivetime     = 10000;  // 10 sec idle → first probe
-        ka.keepaliveinterval = 1000;   // 1 sec between probes
-        DWORD kaBytes = 0;
-        int kaResult = WSAIoctl(
-            s,
-            SIO_KEEPALIVE_VALS,
-            &ka, sizeof(ka),
-            NULL, 0,
-            &kaBytes,
-            NULL, NULL
-        );
-
-        // ── Log everything ──
-        Log("Socket %d: NODELAY%s TOS=0x%02X%s SNDBUF=%dK RCVBUF=%dK%s KA=%s",
-            (int)s,
-            (ackResult == 0) ? " ACK_FREQ=1" : "",
-            tos,
-            (tosResult != 0) ? "(fail)" : "",
-            sendbuf / 1024,
-            recvbuf / 1024,
-            (rcvResult != 0) ? "(fail)" : "",
-            (kaResult == 0) ? "10s/1s" : "fail");
     }
 
     WSASetLastError(savedError);
     return result;
 }
 
+static int WINAPI hooked_send(SOCKET s, const char* buf, int len, int flags) {
+    // If this socket was pending optimization, apply now
+    // send() is only called after TCP handshake completes
+    if (RemovePendingSocket(s)) {
+        OptimizeSocket(s, "send");
+    }
+    return orig_send(s, buf, len, flags);
+}
+
 static bool InstallNetworkHooks() {
     HMODULE h = GetModuleHandleA("ws2_32.dll");
     if (!h) h = LoadLibraryA("ws2_32.dll");
     if (!h) return false;
-    void* p = (void*)GetProcAddress(h, "connect");
-    if (!p) return false;
-    if (MH_CreateHook(p, (void*)hooked_connect, (void**)&orig_connect) != MH_OK) return false;
-    if (MH_EnableHook(p) != MH_OK) return false;
-    Log("Network hook: ACTIVE (NODELAY + ACK_FREQ + QoS + buffers + keepalive)");
-    return true;
+
+    void* pConnect = (void*)GetProcAddress(h, "connect");
+    void* pSend    = (void*)GetProcAddress(h, "send");
+    if (!pConnect) return false;
+
+    int ok = 0;
+
+    if (MH_CreateHook(pConnect, (void*)hooked_connect, (void**)&orig_connect) == MH_OK)
+        if (MH_EnableHook(pConnect) == MH_OK) ok++;
+
+    if (pSend && MH_CreateHook(pSend, (void*)hooked_send, (void**)&orig_send) == MH_OK)
+        if (MH_EnableHook(pSend) == MH_OK) ok++;
+
+    Log("Network hook: ACTIVE (%d/2 hooks, NODELAY+ACK+QoS+BUF+KA, deferred mode)", ok);
+    return ok > 0;
 }
 
 // ================================================================
@@ -869,7 +904,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Sleep hook (frame pacing)",   sleepOk     ? " OK " : "FAIL");
     Log("  [%s] GetTickCount (precision)",    tickOk      ? " OK " : "FAIL");
     Log("  [%s] CriticalSection (spin lock)", csOk        ? " OK " : "FAIL");
-    Log("  [%s] TCP_NODELAY (network)",       netOk       ? " OK " : "FAIL");
+    Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk     ? " OK " : "FAIL");
     Log("  [%s] CreateFile (sequential I/O)", fileOk      ? " OK " : "FAIL");
     Log("  [%s] ReadFile (MPQ read-ahead)",   readOk      ? " OK " : "FAIL");
     Log("  [%s] CloseHandle (cache cleanup)", closeOk     ? " OK " : "FAIL");
