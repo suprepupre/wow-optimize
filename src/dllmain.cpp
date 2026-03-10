@@ -929,6 +929,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             CloseHandle(CreateThread(NULL, 0, MainThread, NULL, 0, NULL));
             break;
         case DLL_PROCESS_DETACH:
+            if (reserved != NULL) {
+                // Process is terminating — all memory will be freed by OS.
+                // Do NOT touch game memory, hooks, or other DLLs.
+                // Lua VM, WoW heap, and hooked DLLs may already be destroyed.
+                // Just log and exit.
+                Log("wow_optimize.dll: process terminating, skipping cleanup");
+                LogClose();
+                break;
+            }
+
+            // Dynamic FreeLibrary — safe to clean up
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();
             MH_DisableHook(MH_ALL_HOOKS);
@@ -936,10 +947,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
                 if (g_readCache[i].buffer) { mi_free(g_readCache[i].buffer); g_readCache[i].buffer = nullptr; }
             }
-            if (g_csInitialized) {
-                DeleteCriticalSection(&g_cacheLock);
-            }
-            Log("wow_optimize.dll unloaded");
+            Log("wow_optimize.dll unloaded (clean)");
             LogClose();
             break;
     }
