@@ -54,6 +54,8 @@ static int     g_retentionCheckCounter = 0;
 static double  g_qpcFreqMs         = 0.0;
 static double  g_lastClearTime     = 0.0;
 static int     g_totalClears       = 0;
+static bool    g_clInCombat        = false;
+static bool    g_clIsIdle          = false;
 
 static ClearEntries_fn g_clearEntries = nullptr;
 
@@ -124,9 +126,10 @@ static int TryPatchRetention() {
 // ================================================================
 
 static double GetClearIntervalMs() {
-    return 1000.0;
+    if (g_clInCombat) return 500.0;   // Combat: high event rate, clear often
+    if (g_clIsIdle)   return 3000.0;  // Idle: nothing happening, save CPU
+    return 1000.0;                     // Normal: balanced
 }
-
 static void TryClearProcessedEntries(double nowMs) {
     if (nowMs - g_lastClearTime < GetClearIntervalMs()) return;
     g_lastClearTime = nowMs;
@@ -163,7 +166,7 @@ bool Init() {
     int ret = TryPatchRetention();
     if (ret == 1) Log("[CombatLog]  [ OK ] Retention patched (1800s)");
 
-    Log("[CombatLog]  [ OK ] Guaranteed Clear (every 1 sec)");
+    Log("[CombatLog]  [ OK ] Adaptive Clear (500ms combat / 1s normal / 3s idle)");
 
     g_initialized = true;
     return true;
@@ -205,6 +208,11 @@ void Shutdown() {
 PoolStats GetPoolStats() {
     PoolStats s = { 0, 0, false };
     return s;
+}
+
+void SetCombatState(bool inCombat, bool isIdle) {
+    g_clInCombat = inCombat;
+    g_clIsIdle   = isIdle;
 }
 
 } // namespace CombatLogOpt

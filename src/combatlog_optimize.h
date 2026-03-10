@@ -26,6 +26,7 @@ struct PoolStats {
 };
 
 PoolStats GetPoolStats();
+void SetCombatState(bool inCombat, bool isIdle);
 
 } // namespace CombatLogOpt
 

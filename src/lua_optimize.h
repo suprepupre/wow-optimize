@@ -45,6 +45,8 @@ struct Stats {
 };
 
 Stats GetStats();
+bool GetCombatState();
+bool GetIdleState();
 
 } // namespace LuaOpt
 
