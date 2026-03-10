@@ -5,7 +5,6 @@
 //
 //  1. Retention time increase (300 -> 1800 sec)
 //  2. Periodic CombatLogClearEntries from C level
-//  3. Pre-allocated entry pool (eliminates heap alloc during combat)
 // ================================================================
 
 #ifndef COMBATLOG_OPTIMIZE_H
@@ -21,9 +20,9 @@ void OnFrame(DWORD mainThreadId);
 void Shutdown();
 
 struct PoolStats {
-    int  poolSize;        // Total pre-allocated entries
-    int  poolUsed;        // Entries currently in free list
-    bool poolActive;      // Pool was successfully injected
+    int  poolSize;
+    int  poolUsed;
+    bool poolActive;
 };
 
 PoolStats GetPoolStats();

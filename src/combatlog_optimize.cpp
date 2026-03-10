@@ -2,18 +2,16 @@
 //  Combat Log Buffer Optimizer — Implementation
 //  WoW 3.3.5a build 12340 (Warmane)
 //
-//  Three-layer fix for combat log issues:
+//  Two-layer fix for combat log issues:
 //
 //  Layer 1: Retention increase (300 -> 1800 sec)
-//  Layer 2: Pre-allocated entry pool (eliminates heap alloc)
-//  Layer 3: Guaranteed Periodic Clear (fixes the break bug)
+//  Layer 2: Guaranteed Periodic Clear (fixes the break bug)
 // ================================================================
 
 #include "combatlog_optimize.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
-#include <mimalloc.h>
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -24,19 +22,8 @@ extern "C" void Log(const char* fmt, ...);
 namespace Addr {
     static constexpr uintptr_t CVar_RetentionPtr     = 0x00BD09F0;
     static constexpr uintptr_t ActiveListHead        = 0x00ADB97C;
-    static constexpr uintptr_t FreeListManager       = 0x00ADB980; 
-    static constexpr uintptr_t FreeListHead          = 0x00ADB984; 
-    static constexpr uintptr_t FreeListIndicator     = 0x00ADB988; 
-    static constexpr uintptr_t PendingEntry          = 0x00CA1394;
-    static constexpr uintptr_t ProcessingEntry       = 0x00CA1390;
-    static constexpr uintptr_t CurrentTime           = 0x00CD76AC;
-    static constexpr uintptr_t CombatLogClearEntries = 0x00751120;
-    static constexpr uintptr_t EntryInit             = 0x0074D920; 
-    static constexpr uintptr_t FreeListInsert        = 0x0086E200; 
-    static constexpr uintptr_t StringVtable          = 0x009EAA04; 
+    static constexpr uintptr_t CombatLogClearEntries  = 0x00751120;
 }
-
-static constexpr int ENTRY_SIZE = 0x78;
 
 // ================================================================
 //  Configuration
@@ -44,23 +31,13 @@ static constexpr int ENTRY_SIZE = 0x78;
 
 static constexpr int TARGET_RETENTION_SEC    = 1800;
 static constexpr int RETENTION_CHECK_FRAMES  = 600;
-static constexpr int MAX_RETENTION_RETRIES   = 600;
 static constexpr int CVAR_INT_OFFSET         = 0x30;
-
-// Layer 2: Pool config
-static constexpr int POOL_ENTRY_COUNT        = 4096;
-static constexpr int POOL_TOTAL_BYTES        = POOL_ENTRY_COUNT * ENTRY_SIZE;
-
-// Layer 3: Clear config (real time, not frames)
-static constexpr double CLEAR_INTERVAL_MS    = 1000.0; // Clear every 1 second
 
 // ================================================================
 //  Function Types
 // ================================================================
 
-typedef int  (__cdecl *ClearEntries_fn)();
-typedef void (__thiscall *EntryInit_fn)(void* thisPtr);
-typedef void (__thiscall *FreeListInsert_fn)(void* manager, void* entry);
+typedef int (__cdecl *ClearEntries_fn)();
 
 // ================================================================
 //  State
@@ -74,17 +51,11 @@ static bool    g_retentionGaveUp   = false;
 static int     g_retentionRetries  = 0;
 static int     g_retentionCheckCounter = 0;
 
-static uint8_t* g_poolMemory       = nullptr;
-static bool     g_poolInjected     = false;
-static int      g_poolEntriesAdded = 0;
-
 static double  g_qpcFreqMs         = 0.0;
 static double  g_lastClearTime     = 0.0;
 static int     g_totalClears       = 0;
 
-static ClearEntries_fn   g_clearEntries   = nullptr;
-static EntryInit_fn      g_entryInit      = nullptr;
-static FreeListInsert_fn g_freeListInsert = nullptr;
+static ClearEntries_fn g_clearEntries = nullptr;
 
 // ================================================================
 //  Helpers
@@ -149,64 +120,21 @@ static int TryPatchRetention() {
 }
 
 // ================================================================
-//  Layer 2: Entry Pool
+//  Layer 2: Guaranteed Clear
 // ================================================================
 
-static bool InitializeEntry(uint8_t* entry) {
-    __try {
-        memset(entry, 0, ENTRY_SIZE);
-        *(uintptr_t*)(entry + 0x00) = 0; 
-        *(uintptr_t*)(entry + 0x04) = 0; 
-        *(uintptr_t*)(entry + 0x48) = Addr::StringVtable;
-        *(uintptr_t*)(entry + 0x4C) = 0; 
-        g_entryInit((void*)entry);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+static double GetClearIntervalMs() {
+    return 1000.0;
 }
-
-static bool InjectPool() {
-    if (g_poolInjected) return true;
-    if (!g_entryInit || !g_freeListInsert) return false;
-    if (!IsReadable(Addr::FreeListManager)) return false;
-
-    g_poolMemory = (uint8_t*)mi_calloc(POOL_ENTRY_COUNT, ENTRY_SIZE);
-    if (!g_poolMemory) return false;
-
-    int injected = 0;
-    for (int i = 0; i < POOL_ENTRY_COUNT; i++) {
-        uint8_t* entry = g_poolMemory + (i * ENTRY_SIZE);
-        if (!InitializeEntry(entry)) continue;
-        __try {
-            g_freeListInsert((void*)Addr::FreeListManager, (void*)entry);
-            injected++;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-    }
-
-    g_poolEntriesAdded = injected;
-    g_poolInjected = (injected > 0);
-    return g_poolInjected;
-}
-
-// ================================================================
-//  Layer 3: Guaranteed Clear
-//
-//  This fixes the actual bug. We call clear on a strict wall-clock
-//  timer, and we DO NOT check `pending != 0`. 
-//  Checking `pending` is what prevented vanilla WoW from fixing itself
-//  when the pointer got stuck.
-// ================================================================
 
 static void TryClearProcessedEntries(double nowMs) {
-    if (nowMs - g_lastClearTime < CLEAR_INTERVAL_MS) return;
+    if (nowMs - g_lastClearTime < GetClearIntervalMs()) return;
     g_lastClearTime = nowMs;
 
     __try {
-        // Only verify the list isn't totally broken
         uintptr_t head = *(uintptr_t*)Addr::ActiveListHead;
         if (!head || (head & 1)) return;
 
-        // FORCE CLEAR regardless of pending pointer.
-        // This instantly un-sticks WA and other addons.
         g_clearEntries();
         g_totalClears++;
     }
@@ -221,7 +149,7 @@ namespace CombatLogOpt {
 
 bool Init() {
     Log("[CombatLog] ====================================");
-    Log("[CombatLog]  Combat Log Optimizer v2 (Guaranteed Clear)");
+    Log("[CombatLog]  Combat Log Optimizer (Retention + Clear)");
     Log("[CombatLog]  Build 12340");
     Log("[CombatLog] ====================================");
 
@@ -229,13 +157,12 @@ bool Init() {
     QueryPerformanceFrequency(&freq);
     g_qpcFreqMs = (double)freq.QuadPart / 1000.0;
 
-    if (IsExecutable(Addr::CombatLogClearEntries)) g_clearEntries = (ClearEntries_fn)Addr::CombatLogClearEntries;
-    if (IsExecutable(Addr::EntryInit)) g_entryInit = (EntryInit_fn)Addr::EntryInit;
-    if (IsExecutable(Addr::FreeListInsert)) g_freeListInsert = (FreeListInsert_fn)Addr::FreeListInsert;
+    if (IsExecutable(Addr::CombatLogClearEntries))
+        g_clearEntries = (ClearEntries_fn)Addr::CombatLogClearEntries;
 
     int ret = TryPatchRetention();
     if (ret == 1) Log("[CombatLog]  [ OK ] Retention patched (1800s)");
-    
+
     Log("[CombatLog]  [ OK ] Guaranteed Clear (every 1 sec)");
 
     g_initialized = true;
@@ -263,10 +190,6 @@ void OnFrame(DWORD mainThreadId) {
         if (ReadRetention() != TARGET_RETENTION_SEC) WriteRetention(TARGET_RETENTION_SEC);
     }
 
-    if (!g_poolInjected && g_retentionPatched) {
-        InjectPool();
-    }
-
     if (g_clearEntries) {
         TryClearProcessedEntries(nowMs);
     }
@@ -275,12 +198,12 @@ void OnFrame(DWORD mainThreadId) {
 void Shutdown() {
     if (!g_initialized) return;
     if (g_retentionPatched) WriteRetention(g_origRetention);
-    Log("[CombatLog] Shutdown. Clears: %d, Pool: %d", g_totalClears, g_poolEntriesAdded);
+    Log("[CombatLog] Shutdown. Clears: %d", g_totalClears);
     g_initialized = false;
 }
 
 PoolStats GetPoolStats() {
-    PoolStats s = { POOL_ENTRY_COUNT, g_poolEntriesAdded, g_poolInjected };
+    PoolStats s = { 0, 0, false };
     return s;
 }
 
