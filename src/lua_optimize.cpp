@@ -1023,12 +1023,4 @@ Stats GetStats() {
     return s;
 }
 
-bool GetCombatState() {
-    return Config.inCombat;
-}
-
-bool GetIdleState() {
-    return Config.isIdle;
-}
-
 } // namespace LuaOpt

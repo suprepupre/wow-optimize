@@ -23,6 +23,7 @@ namespace Addr {
     static constexpr uintptr_t CVar_RetentionPtr     = 0x00BD09F0;
     static constexpr uintptr_t ActiveListHead        = 0x00ADB97C;
     static constexpr uintptr_t CombatLogClearEntries  = 0x00751120;
+//    static constexpr uintptr_t PendingEntry          = 0x00CA1394;
 }
 
 // ================================================================
@@ -54,8 +55,8 @@ static int     g_retentionCheckCounter = 0;
 static double  g_qpcFreqMs         = 0.0;
 static double  g_lastClearTime     = 0.0;
 static int     g_totalClears       = 0;
-static bool    g_clInCombat        = false;
-static bool    g_clIsIdle          = false;
+// static bool    g_clInCombat        = false;
+// static bool    g_clIsIdle          = false;
 
 static ClearEntries_fn g_clearEntries = nullptr;
 
@@ -125,13 +126,10 @@ static int TryPatchRetention() {
 //  Layer 2: Guaranteed Clear
 // ================================================================
 
-static double GetClearIntervalMs() {
-    if (g_clInCombat) return 500.0;   // Combat: high event rate, clear often
-    if (g_clIsIdle)   return 3000.0;  // Idle: nothing happening, save CPU
-    return 1000.0;                     // Normal: balanced
-}
+
 static void TryClearProcessedEntries(double nowMs) {
-    if (nowMs - g_lastClearTime < GetClearIntervalMs()) return;
+
+    if (nowMs - g_lastClearTime < 1000.0) return;
     g_lastClearTime = nowMs;
 
     __try {
@@ -166,7 +164,7 @@ bool Init() {
     int ret = TryPatchRetention();
     if (ret == 1) Log("[CombatLog]  [ OK ] Retention patched (1800s)");
 
-    Log("[CombatLog]  [ OK ] Adaptive Clear (500ms combat / 1s normal / 3s idle)");
+    Log("[CombatLog]  [ OK ] Retention 1800s + Clear every 1s (no pending check)");
 
     g_initialized = true;
     return true;
@@ -208,11 +206,6 @@ void Shutdown() {
 PoolStats GetPoolStats() {
     PoolStats s = { 0, 0, false };
     return s;
-}
-
-void SetCombatState(bool inCombat, bool isIdle) {
-    g_clInCombat = inCombat;
-    g_clIsIdle   = isIdle;
 }
 
 } // namespace CombatLogOpt

@@ -191,7 +191,6 @@ static void WINAPI hooked_Sleep(DWORD ms) {
 
     if (ms <= 3 && g_mainThreadId != 0) {
         LuaOpt::OnMainThreadSleep(g_mainThreadId);
-        CombatLogOpt::SetCombatState(LuaOpt::GetCombatState(), LuaOpt::GetIdleState());
         CombatLogOpt::OnFrame(g_mainThreadId);
     }
 
