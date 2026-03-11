@@ -133,25 +133,72 @@ static struct {
 } State;
 
 // ================================================================
-//  Memory Validation
+//  Memory Validation with Cache
+//  VirtualQuery is a syscall — expensive to call repeatedly.
+//  WoW's code/data addresses don't change at runtime.
+//  Cache results for known addresses.
 // ================================================================
+
+struct MemCacheEntry {
+    uintptr_t addr;
+    bool      executable;
+    bool      readable;
+    bool      valid;
+};
+
+static constexpr int MEM_CACHE_SIZE = 32;
+static constexpr int MEM_CACHE_MASK = MEM_CACHE_SIZE - 1;
+static MemCacheEntry g_memCache[MEM_CACHE_SIZE] = {};
+
+static int MemCacheSlot(uintptr_t addr) {
+    return (int)((addr >> 4) & MEM_CACHE_MASK);
+}
+
+static MemCacheEntry* MemCacheLookup(uintptr_t addr) {
+    int slot = MemCacheSlot(addr);
+    if (g_memCache[slot].valid && g_memCache[slot].addr == addr) {
+        return &g_memCache[slot];
+    }
+    return nullptr;
+}
+
+static void MemCacheStore(uintptr_t addr, bool executable, bool readable) {
+    int slot = MemCacheSlot(addr);
+    g_memCache[slot].addr       = addr;
+    g_memCache[slot].executable = executable;
+    g_memCache[slot].readable   = readable;
+    g_memCache[slot].valid      = true;
+}
+
+static void QueryAndCache(uintptr_t addr) {
+    bool exec = false;
+    bool read = false;
+
+    MEMORY_BASIC_INFORMATION mbi;
+    if (addr != 0 && VirtualQuery((void*)addr, &mbi, sizeof(mbi)) != 0 && mbi.State == MEM_COMMIT) {
+        exec = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+        read = (mbi.Protect & PAGE_NOACCESS) == 0 &&
+               (mbi.Protect & PAGE_GUARD) == 0;
+    }
+
+    MemCacheStore(addr, exec, read);
+}
 
 static bool IsExecutableMemory(uintptr_t addr) {
     if (addr == 0) return false;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    return (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+    MemCacheEntry* cached = MemCacheLookup(addr);
+    if (cached) return cached->executable;
+    QueryAndCache(addr);
+    return MemCacheLookup(addr)->executable;
 }
 
 static bool IsReadableMemory(uintptr_t addr) {
     if (addr == 0) return false;
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    return (mbi.Protect & PAGE_NOACCESS) == 0 &&
-           (mbi.Protect & PAGE_GUARD) == 0;
+    MemCacheEntry* cached = MemCacheLookup(addr);
+    if (cached) return cached->readable;
+    QueryAndCache(addr);
+    return MemCacheLookup(addr)->readable;
 }
 
 // ================================================================
