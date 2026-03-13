@@ -11,9 +11,9 @@ Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threadi
 
 ## ⭐ Reviews
 
-See what other players say: [**Reviews & Testimonials**](../../discussions/categories/reviews-testimonials)
+See what other players say: [**Reviews & Testimonials**](https://github.com/suprepupre/wow-optimize/discussions/10)
 
-Used wow_optimize or LuaBoost? [**Leave a review!**](./../discussion/categories/reviews-testimonials)
+Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepupre/wow-optimize/discussions/10)
 
 ---
 
