@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdint>
 #include <intrin.h>
+#include "ui_cache.h"
 
 #include "MinHook.h"
 #include <mimalloc.h>
@@ -896,6 +897,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool combatLogOk = CombatLogOpt::Init();
 
     Log("");
+    Log("--- UI Cache ---");
+    bool uiCacheOk = UICache::Init();
+
+    Log("");
     Log("========================================");
     Log("  Initialization complete");
     Log("========================================");
@@ -915,6 +920,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [ OK ] FPS cap removal (200 -> 999)");
     Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
+    Log("  [%s] FontString SetText cache",    uiCacheOk   ? " OK " : "SKIP");
 
     return 0;
 }
@@ -940,6 +946,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             }
 
             // Dynamic FreeLibrary — safe to clean up
+            UICache::Shutdown();            
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();
             MH_DisableHook(MH_ALL_HOOKS);
