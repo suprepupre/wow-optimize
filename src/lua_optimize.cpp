@@ -133,72 +133,25 @@ static struct {
 } State;
 
 // ================================================================
-//  Memory Validation with Cache
-//  VirtualQuery is a syscall — expensive to call repeatedly.
-//  WoW's code/data addresses don't change at runtime.
-//  Cache results for known addresses.
+//  Memory Validation
 // ================================================================
-
-struct MemCacheEntry {
-    uintptr_t addr;
-    bool      executable;
-    bool      readable;
-    bool      valid;
-};
-
-static constexpr int MEM_CACHE_SIZE = 32;
-static constexpr int MEM_CACHE_MASK = MEM_CACHE_SIZE - 1;
-static MemCacheEntry g_memCache[MEM_CACHE_SIZE] = {};
-
-static int MemCacheSlot(uintptr_t addr) {
-    return (int)((addr >> 4) & MEM_CACHE_MASK);
-}
-
-static MemCacheEntry* MemCacheLookup(uintptr_t addr) {
-    int slot = MemCacheSlot(addr);
-    if (g_memCache[slot].valid && g_memCache[slot].addr == addr) {
-        return &g_memCache[slot];
-    }
-    return nullptr;
-}
-
-static void MemCacheStore(uintptr_t addr, bool executable, bool readable) {
-    int slot = MemCacheSlot(addr);
-    g_memCache[slot].addr       = addr;
-    g_memCache[slot].executable = executable;
-    g_memCache[slot].readable   = readable;
-    g_memCache[slot].valid      = true;
-}
-
-static void QueryAndCache(uintptr_t addr) {
-    bool exec = false;
-    bool read = false;
-
-    MEMORY_BASIC_INFORMATION mbi;
-    if (addr != 0 && VirtualQuery((void*)addr, &mbi, sizeof(mbi)) != 0 && mbi.State == MEM_COMMIT) {
-        exec = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
-        read = (mbi.Protect & PAGE_NOACCESS) == 0 &&
-               (mbi.Protect & PAGE_GUARD) == 0;
-    }
-
-    MemCacheStore(addr, exec, read);
-}
 
 static bool IsExecutableMemory(uintptr_t addr) {
     if (addr == 0) return false;
-    MemCacheEntry* cached = MemCacheLookup(addr);
-    if (cached) return cached->executable;
-    QueryAndCache(addr);
-    return MemCacheLookup(addr)->executable;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
 static bool IsReadableMemory(uintptr_t addr) {
     if (addr == 0) return false;
-    MemCacheEntry* cached = MemCacheLookup(addr);
-    if (cached) return cached->readable;
-    QueryAndCache(addr);
-    return MemCacheLookup(addr)->readable;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & PAGE_NOACCESS) == 0 &&
+           (mbi.Protect & PAGE_GUARD) == 0;
 }
 
 // ================================================================
@@ -726,7 +679,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.6.1");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.6.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -737,7 +690,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '1.6.1' "
+            "LUABOOST_DLL_VERSION = '1.6.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -932,7 +885,9 @@ void OnMainThreadSleep(DWORD mainThreadId) {
 
         if (g_luaAllocReplaced) {
             LogLuaAllocStats();
-            RestoreLuaAllocator();
+            // Do NOT call RestoreLuaAllocator() here.
+            // Old global_State was freed by lua_close().
+            // Writing to freed memory corrupts heap → Error #132.
         }
         ResetAllocStats();
 

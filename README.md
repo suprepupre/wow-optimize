@@ -1,5 +1,5 @@
 
-# 🚀 wow_optimize v1.6.1 BY SUPREMATIST
+# 🚀 wow_optimize v1.6.2 BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 
@@ -40,14 +40,14 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](./../discussion/categories/
 
 ---
 
-## 🆕 What's New in v1.6.1
+## 1.6.2 (Hotfix)
 
-| Feature | Description |
-|---------|-------------|
-| **VirtualQuery Cache** | Memory validation syscalls cached in hash table. Eliminates ~30 redundant syscalls during init and repeated calls during runtime. |
-| **Adaptive Combat Log Clear** | Clear interval adjusts to game state: 500ms in combat (high event rate), 1s normal, 3s idle. Synced from Lua addon state. |
+| Change | Description |
+|--------|-------------|
+| **Fix Error #132 on /logout** | Removed combat log entry pool — HeapAlloc entries crash when WoW calls SMemFree on them during logout. SMemFree expects its own metadata header before each pointer. |
+| **Reverted to 2-layer combat log fix** | Retention (1800s) + Periodic Clear only. No entry pool. |
 
-### Previous (v1.6.0)
+### Previous (v1.6.0-1)
 
 | Feature | Description |
 |---------|-------------|
