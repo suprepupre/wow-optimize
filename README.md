@@ -1,4 +1,4 @@
-# 🚀 wow_optimize v1.7.0 BY SUPREMATIST
+# 🚀 wow_optimize v1.7.1 BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 
@@ -37,7 +37,8 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 | 14 | **FPS Cap Removal** | Raises hardcoded 200 FPS limit to 999 |
 | 15 | **Lua VM GC Optimizer** | 4-tier per-frame GC stepping from C (loading/combat/idle/normal) |
 | 16 | **Combat Log Optimizer** | Prevents combat log data loss in raids (retention + periodic cleanup) |
-| 17 | **FontString:SetText Cache** | **NEW** — Skips redundant SetText calls at C level (taint-free) |
+| 17 | **UI Widget Cache** | Skips redundant FontString:SetText, StatusBar:SetValue/SetMinMaxValues/SetStatusBarColor at C level (taint-free, auto-discovered) |
+| 18 | **FontString:SetText Cache** | **NEW** — Skips redundant SetText calls at C level (taint-free) |
 
 ---
 
@@ -45,9 +46,9 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 
 | Feature | Description |
 |---------|-------------|
-| **FontString:SetText Cache** | Hooks `FontString:SetText` at the C function level. Caches FNV-1a text hash per widget — if the new text is identical to the cached value, the engine call is skipped entirely. **50-80% skip rate** in crowded areas. 100% taint-free (invisible to Lua). |
-| **Auto-Discovery** | SetText function address found automatically by scanning WoW's method tables at startup — no hardcoded UI addresses needed. |
-| **Fix Error #132 on /logout** | Removed combat log entry pool (HeapAlloc entries crash when SMemFree expects its own metadata). Removed RestoreLuaAllocator on state change (writes to freed global_State). |
+| **UI Widget Cache (4 hooks)** | Hooks `FontString:SetText`, `StatusBar:SetValue`, `StatusBar:SetMinMaxValues`, `StatusBar:SetStatusBarColor` at C function level. Caches argument hashes per widget — identical calls skip engine entirely. **50-80% skip rate** in crowded areas. |
+| **Auto-Discovery** | All UI function addresses found automatically by scanning WoW's method tables at startup — zero hardcoded UI addresses. |
+| **Fix Error #132 on /logout** | Removed combat log entry pool and RestoreLuaAllocator on state change. |
 
 ### Previous (v1.6.0)
 
@@ -101,7 +102,7 @@ For maximum optimization, use this DLL together with the **[!LuaBoost](https://g
 
 | Layer | Tool | What It Does |
 |-------|------|--------------|
-| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix, **SetText cache** |
+| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix, **UI widget cache (4 hooks)** |
 | **Lua / Addons** | !LuaBoost addon | Incremental GC, SpeedyLoad, table pool, throttle API, UI Thrashing Protection (StatusBar), Event Profiler, OnUpdate Dispatcher, GUI |
 
 When both are installed, the DLL handles Lua allocator replacement, GC stepping from C (zero Lua overhead), network optimization, combat log buffering, and **FontString:SetText caching**. The addon provides the GUI, combat awareness, idle detection, SpeedyLoad, and StatusBar thrashing protection.
@@ -226,11 +227,31 @@ DLL reads addon globals every ~16 frames from the Sleep hook (main thread).
 
 ---
 
-## 🎨 FontString:SetText Cache (NEW in v1.7.0)
+## 🎨 UI Widget Cache (NEW in v1.7.0)
 
 ### The Problem
 
-In crowded areas, addons call `FontString:SetText()` thousands of times per second — nameplates, unit frames, damage meters, chat frames. Most calls set the **same text** that's already displayed, but WoW's engine processes each call fully (text measurement, layout, render update).
+In crowded areas, addons call UI update functions thousands of times per second — nameplates, unit frames, health bars, damage meters. Most calls set the **same value** that's already displayed, but WoW's engine processes each call fully.
+
+### What's Hooked (4 methods, all taint-free)
+
+| Method | Cache Key | Skip Condition |
+|--------|-----------|----------------|
+| `FontString:SetText` | FNV-1a text hash | Same text string |
+| `StatusBar:SetValue` | Float bits | Same numeric value |
+| `StatusBar:SetMinMaxValues` | Combined min+max hash | Same min and max |
+| `StatusBar:SetStatusBarColor` | Combined RGBA hash | Same color values |
+
+All addresses auto-discovered at startup by scanning method tables — verified by matching 10+ neighboring FontString/StatusBar method names.
+
+### Why This Is Safe
+
+| Concern | Answer |
+|---------|--------|
+| **Taint?** | Zero. Hooks C functions directly — invisible to Lua taint tracker. |
+| **Wrong widget?** | Auto-discovery requires 3+ matching neighbor methods before accepting. |
+| **MinMax change?** | SetMinMaxValues invalidates SetValue cache for that widget. |
+| **Thread safety?** | All hooks run on main thread only (same as all UI code). |
 
 ### The Fix
 
@@ -360,7 +381,7 @@ wow-optimize/
 │   ├── lua_optimize.h           # Lua optimizer interface
 │   ├── combatlog_optimize.cpp   # Combat log optimizer (retention + periodic cleanup)
 │   ├── combatlog_optimize.h     # Combat log optimizer interface
-│   ├── ui_cache.cpp             # FontString:SetText cache (auto-discovered)
+│   ├── ui_cache.cpp             # UI widget cache (SetText + StatusBar, auto-discovered)
 │   ├── ui_cache.h               # UI cache interface
 │   ├── wow_loader.cpp           # Universal auto-loader executable
 │   ├── version_proxy.cpp        # Auto-loader (version.dll proxy)
