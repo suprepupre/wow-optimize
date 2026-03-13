@@ -13,16 +13,17 @@ extern "C" void Log(const char* fmt, ...);
 // ================================================================
 
 typedef struct lua_State lua_State;
+typedef double lua_Number;
 
-// lua_tolstring(L, idx, &len) — returns string + length
 typedef const char* (__cdecl *fn_lua_tolstring)(lua_State* L, int index, size_t* len);
-static fn_lua_tolstring api_tolstring = (fn_lua_tolstring)0x0084E0E0;
+typedef void*       (__cdecl *fn_lua_touserdata)(lua_State* L, int index);
+typedef lua_Number  (__cdecl *fn_lua_tonumber)(lua_State* L, int index);
+typedef int         (__cdecl *fn_lua_gettop)(lua_State* L);
 
-// WoW's internal function that extracts C++ object pointer from userdata
-// For userdata: returns *(void**)(Udata + 0x14) = the C++ object pointer
-// Perfect as a unique per-widget cache key
-typedef void* (__cdecl *fn_lua_getwidget)(lua_State* L, int index);
-static fn_lua_getwidget api_getwidget = (fn_lua_getwidget)0x0084E150;
+static fn_lua_tolstring   api_tolstring  = (fn_lua_tolstring)0x0084E0E0;
+static fn_lua_touserdata  api_getwidget  = (fn_lua_touserdata)0x0084E150;
+static fn_lua_tonumber    api_tonumber   = (fn_lua_tonumber)0x0084E030;
+static fn_lua_gettop      api_gettop     = (fn_lua_gettop)0x0084DBD0;
 
 // ================================================================
 //  FNV-1a Hash
@@ -37,58 +38,101 @@ static inline uint32_t FNV1a(const char* str, size_t len) {
     return hash;
 }
 
+// Float-to-bits for hashing doubles
+static inline uint32_t DoubleBits(double val) {
+    // Truncate to float precision — avoids false misses from
+    // tiny floating point differences (e.g. 0.999999 vs 1.0)
+    float f = (float)val;
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    return bits;
+}
+
 // ================================================================
-//  Widget Text Cache — open-addressing hash table
+//  Widget Cache — shared by all hooks
 //
-//  Key:   C++ widget pointer (unique per FontString)
-//  Value: FNV-1a hash of last SetText argument
+//  Key:   (widget_ptr << 3) | method_id
+//  Value: hash of arguments
 //
-//  Stale entries are harmless — they get overwritten when
-//  the slot is needed for a new widget.
+//  method_id:
+//    0 = SetText
+//    1 = SetValue
+//    2 = SetMinMaxValues
+//    3 = SetStatusBarColor
 // ================================================================
 
-static constexpr int CACHE_SIZE = 4096;
-static constexpr int CACHE_MASK = CACHE_SIZE - 1;
+static constexpr int METHOD_SETTEXT          = 0;
+static constexpr int METHOD_SETVALUE         = 1;
+static constexpr int METHOD_SETMINMAX        = 2;
+static constexpr int METHOD_SETBARCOLOR      = 3;
+
+static constexpr int CACHE_SIZE  = 8192;
+static constexpr int CACHE_MASK  = CACHE_SIZE - 1;
 static constexpr int CACHE_PROBE = 8;
 
 struct CacheEntry {
-    uintptr_t widget;
-    uint32_t  textHash;
+    uint64_t  key;
+    uint32_t  hash;
     bool      occupied;
 };
 
 static CacheEntry g_cache[CACHE_SIZE] = {};
-static volatile long g_statsSkipped = 0;
-static volatile long g_statsPassed  = 0;
-static bool          g_active       = false;
-static uintptr_t     g_setTextAddr  = 0;
 
-static inline int CacheSlot(uintptr_t widget) {
-    return (int)((widget >> 3) & CACHE_MASK);
+static inline uint64_t MakeKey(uintptr_t widget, int method) {
+    return ((uint64_t)widget << 3) | (uint64_t)method;
 }
 
-static bool CheckAndUpdate(uintptr_t widget, uint32_t hash) {
-    int slot = CacheSlot(widget);
+static inline int CacheSlot(uint64_t key) {
+    uint32_t k = (uint32_t)(key >> 3) ^ (uint32_t)(key);
+    return (int)((k >> 3) & CACHE_MASK);
+}
+
+static bool CheckAndUpdate(uint64_t key, uint32_t hash) {
+    int slot = CacheSlot(key);
     for (int i = 0; i < CACHE_PROBE; i++) {
         int idx = (slot + i) & CACHE_MASK;
         if (!g_cache[idx].occupied) {
-            g_cache[idx].widget   = widget;
-            g_cache[idx].textHash = hash;
+            g_cache[idx].key  = key;
+            g_cache[idx].hash = hash;
             g_cache[idx].occupied = true;
-            return false; // new entry — pass through
+            return false;
         }
-        if (g_cache[idx].widget == widget) {
-            if (g_cache[idx].textHash == hash)
-                return true; // SKIP — same text
-            g_cache[idx].textHash = hash;
-            return false; // changed — pass through
+        if (g_cache[idx].key == key) {
+            if (g_cache[idx].hash == hash) return true; // SKIP
+            g_cache[idx].hash = hash;
+            return false;
         }
     }
-    return false; // table full — pass through
+    return false;
+}
+
+static void InvalidateWidget(uintptr_t widget, int method) {
+    uint64_t key = MakeKey(widget, method);
+    int slot = CacheSlot(key);
+    for (int i = 0; i < CACHE_PROBE; i++) {
+        int idx = (slot + i) & CACHE_MASK;
+        if (!g_cache[idx].occupied) break;
+        if (g_cache[idx].key == key) {
+            g_cache[idx].hash = 0;
+            break;
+        }
+    }
 }
 
 // ================================================================
-//  Auto-Discovery: Find Script_FontStringSetText
+//  Stats
+// ================================================================
+
+struct MethodStats {
+    volatile long skipped;
+    volatile long passed;
+};
+
+static MethodStats g_stats[4] = {};
+static bool g_active = false;
+
+// ================================================================
+//  Auto-Discovery
 // ================================================================
 
 static bool IsExec(uintptr_t addr) {
@@ -103,50 +147,45 @@ static bool IsValidString(uintptr_t addr, uintptr_t base, size_t modSize) {
     if (addr < base || addr >= base + modSize) return false;
     __try {
         const char* s = (const char*)addr;
-        // Must be short readable ASCII string
         for (int i = 0; i < 64; i++) {
             if (s[i] == '\0') return (i > 0);
             if (s[i] < 0x20 || s[i] > 0x7E) return false;
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     return false;
 }
 
-static uintptr_t DiscoverSetTextAddress() {
-    HMODULE hWow = GetModuleHandleA(NULL);
-    if (!hWow) return 0;
+struct DiscoverResult {
+    uintptr_t funcAddr;
+    int       matchCount;
+};
 
-    MODULEINFO modInfo;
-    if (!GetModuleInformation(GetCurrentProcess(), hWow, &modInfo, sizeof(modInfo)))
-        return 0;
+static DiscoverResult DiscoverMethod(
+    const char* methodName,
+    const char** neighborMethods,
+    int requiredMatches,
+    uintptr_t base, size_t size)
+{
+    DiscoverResult result = { 0, 0 };
+    size_t nameLen = strlen(methodName);
 
-    uintptr_t base = (uintptr_t)hWow;
-    size_t size = modInfo.SizeOfImage;
+    // Step 1: Find all instances of the method name string
+    uintptr_t stringAddrs[32];
+    int numStrings = 0;
 
-    Log("[UICache] Scanning Wow.exe (base=0x%08X, size=%u) for FontString methods...",
-        (unsigned)base, (unsigned)size);
-
-    // Step 1: Find all "SetText\0" strings
-    uintptr_t setTextStrings[32];
-    int numFound = 0;
-
-    for (size_t i = 0; i < size - 8 && numFound < 32; i++) {
-        if (memcmp((void*)(base + i), "SetText\0", 8) == 0) {
-            setTextStrings[numFound++] = base + i;
+    for (size_t i = 0; i < size - nameLen - 1 && numStrings < 32; i++) {
+        if (memcmp((void*)(base + i), methodName, nameLen + 1) == 0) {
+            stringAddrs[numStrings++] = base + i;
         }
     }
 
-    Log("[UICache] Found %d 'SetText' strings", numFound);
-    if (numFound == 0) return 0;
+    if (numStrings == 0) return result;
 
-    // Step 2: For each string, find references in method tables
-    for (int si = 0; si < numFound; si++) {
-        uintptr_t strAddr = setTextStrings[si];
+    // Step 2: Find references in method tables
+    for (int si = 0; si < numStrings; si++) {
+        uintptr_t strAddr = stringAddrs[si];
 
-        // Scan for dwords pointing to this string
         for (size_t i = 0; i < size - 16; i += 4) {
             uintptr_t refAddr = base + i;
 
@@ -155,31 +194,18 @@ static uintptr_t DiscoverSetTextAddress() {
             }
             __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
 
-            // Found reference at refAddr
-            // Try strides 8 and 12 (common method table entry sizes)
             int strides[] = { 8, 12 };
-
             for (int s = 0; s < 2; s++) {
                 int stride = strides[s];
 
-                // The function pointer should be at refAddr + 4
                 uintptr_t funcPtr = 0;
                 __try { funcPtr = *(uintptr_t*)(refAddr + 4); }
                 __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
 
                 if (!IsExec(funcPtr)) continue;
 
-                // Verify: check neighboring entries for FontString methods
-                int fontStringMatches = 0;
-                const char* fontStringMethods[] = {
-                    "GetText", "SetFont", "SetTextColor",
-                    "SetTextHeight", "GetStringWidth",
-                    "SetAlpha", "GetAlpha", "SetJustifyH",
-                    "SetShadowOffset", "SetShadowColor",
-                    NULL
-                };
-
-                for (int j = -15; j <= 15; j++) {
+                int matches = 0;
+                for (int j = -20; j <= 20; j++) {
                     if (j == 0) continue;
                     uintptr_t entryAddr = refAddr + j * stride;
                     if (entryAddr < base || entryAddr + stride > base + size) continue;
@@ -191,9 +217,9 @@ static uintptr_t DiscoverSetTextAddress() {
                     if (!IsValidString(namePtr, base, size)) continue;
 
                     __try {
-                        for (int k = 0; fontStringMethods[k]; k++) {
-                            if (strcmp((const char*)namePtr, fontStringMethods[k]) == 0) {
-                                fontStringMatches++;
+                        for (int k = 0; neighborMethods[k]; k++) {
+                            if (strcmp((const char*)namePtr, neighborMethods[k]) == 0) {
+                                matches++;
                                 break;
                             }
                         }
@@ -201,79 +227,193 @@ static uintptr_t DiscoverSetTextAddress() {
                     __except (EXCEPTION_EXECUTE_HANDLER) {}
                 }
 
-                if (fontStringMatches >= 3) {
-                    Log("[UICache] FontString method table found!");
-                    Log("[UICache]   String ref at:  0x%08X", (unsigned)refAddr);
-                    Log("[UICache]   Function at:    0x%08X", (unsigned)funcPtr);
-                    Log("[UICache]   Stride:         %d bytes", stride);
-                    Log("[UICache]   Nearby matches: %d FontString methods", fontStringMatches);
-                    return funcPtr;
+                if (matches >= requiredMatches && matches > result.matchCount) {
+                    result.funcAddr   = funcPtr;
+                    result.matchCount = matches;
                 }
             }
         }
     }
 
-    Log("[UICache] FontString::SetText not found in method tables");
-    return 0;
+    return result;
 }
 
 // ================================================================
-//  Hook: Script_FontStringSetText
-//
-//  Original: int __cdecl Script_FontStringSetText(lua_State* L)
-//
-//  Lua stack:
-//    1 = self (FontString userdata)
-//    2 = text (string or nil)
-//
+//  Hook: FontString:SetText
 // ================================================================
 
-typedef int (__cdecl *SetText_fn)(lua_State* L);
-static SetText_fn orig_SetText = nullptr;
+typedef int (__cdecl *ScriptFunc_fn)(lua_State* L);
+
+static ScriptFunc_fn orig_SetText = nullptr;
+static uintptr_t     addr_SetText = 0;
 
 static int __cdecl Hooked_SetText(lua_State* L) {
     __try {
-        // Get C++ widget pointer from arg 1
         void* widget = api_getwidget(L, 1);
-        if (!widget) {
-            InterlockedIncrement(&g_statsPassed);
-            return orig_SetText(L);
-        }
+        if (!widget) goto passthrough_text;
 
-        // Get text string from arg 2
         size_t textLen = 0;
         const char* text = api_tolstring(L, 2, &textLen);
 
         if (!text || textLen == 0) {
-            // SetText(nil) or SetText("") — always pass through
-            // Invalidate cache for this widget
-            int slot = CacheSlot((uintptr_t)widget);
-            for (int i = 0; i < CACHE_PROBE; i++) {
-                int idx = (slot + i) & CACHE_MASK;
-                if (g_cache[idx].occupied && g_cache[idx].widget == (uintptr_t)widget) {
-                    g_cache[idx].textHash = 0;
-                    break;
-                }
-                if (!g_cache[idx].occupied) break;
-            }
-            InterlockedIncrement(&g_statsPassed);
-            return orig_SetText(L);
+            InvalidateWidget((uintptr_t)widget, METHOD_SETTEXT);
+            goto passthrough_text;
         }
 
-        // Hash text and check cache
         uint32_t hash = FNV1a(text, textLen);
-
-        if (CheckAndUpdate((uintptr_t)widget, hash)) {
-            InterlockedIncrement(&g_statsSkipped);
-            return 0; // SKIP — identical text
+        if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETTEXT), hash)) {
+            InterlockedIncrement(&g_stats[METHOD_SETTEXT].skipped);
+            return 0;
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // On any exception, just call original
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+passthrough_text:
+    InterlockedIncrement(&g_stats[METHOD_SETTEXT].passed);
+    return orig_SetText(L);
+}
+
+// ================================================================
+//  Hook: StatusBar:SetValue
+//
+//  Lua stack:
+//    1 = self (StatusBar userdata)
+//    2 = value (number)
+// ================================================================
+
+static ScriptFunc_fn orig_SetValue = nullptr;
+static uintptr_t     addr_SetValue = 0;
+
+static int __cdecl Hooked_SetValue(lua_State* L) {
+    __try {
+        void* widget = api_getwidget(L, 1);
+        if (!widget) goto passthrough_value;
+
+        lua_Number value = api_tonumber(L, 2);
+        uint32_t hash = DoubleBits(value);
+
+        if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETVALUE), hash)) {
+            InterlockedIncrement(&g_stats[METHOD_SETVALUE].skipped);
+            return 0;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+passthrough_value:
+    InterlockedIncrement(&g_stats[METHOD_SETVALUE].passed);
+    return orig_SetValue(L);
+}
+
+// ================================================================
+//  Hook: StatusBar:SetMinMaxValues
+//
+//  Lua stack:
+//    1 = self
+//    2 = min (number)
+//    3 = max (number)
+//
+//  When min/max change, invalidate SetValue cache for this widget
+//  (same value might now fill a different percentage)
+// ================================================================
+
+static ScriptFunc_fn orig_SetMinMax = nullptr;
+static uintptr_t     addr_SetMinMax = 0;
+
+static int __cdecl Hooked_SetMinMax(lua_State* L) {
+    __try {
+        void* widget = api_getwidget(L, 1);
+        if (!widget) goto passthrough_minmax;
+
+        lua_Number lo = api_tonumber(L, 2);
+        lua_Number hi = api_tonumber(L, 3);
+
+        // Combine both values into one hash
+        uint32_t h1 = DoubleBits(lo);
+        uint32_t h2 = DoubleBits(hi);
+        uint32_t hash = h1 ^ (h2 * 0x9E3779B9);
+
+        if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETMINMAX), hash)) {
+            InterlockedIncrement(&g_stats[METHOD_SETMINMAX].skipped);
+            return 0;
+        }
+
+        // Min/max changed — invalidate SetValue cache
+        InvalidateWidget((uintptr_t)widget, METHOD_SETVALUE);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+passthrough_minmax:
+    InterlockedIncrement(&g_stats[METHOD_SETMINMAX].passed);
+    return orig_SetMinMax(L);
+}
+
+// ================================================================
+//  Hook: StatusBar:SetStatusBarColor
+//
+//  Lua stack:
+//    1 = self
+//    2 = r (number)
+//    3 = g (number)
+//    4 = b (number)
+//    5 = a (number, optional)
+// ================================================================
+
+static ScriptFunc_fn orig_SetBarColor = nullptr;
+static uintptr_t     addr_SetBarColor = 0;
+
+static int __cdecl Hooked_SetBarColor(lua_State* L) {
+    __try {
+        void* widget = api_getwidget(L, 1);
+        if (!widget) goto passthrough_color;
+
+        int nargs = api_gettop(L);
+
+        lua_Number r = api_tonumber(L, 2);
+        lua_Number g = api_tonumber(L, 3);
+        lua_Number b = api_tonumber(L, 4);
+        lua_Number a = (nargs >= 5) ? api_tonumber(L, 5) : 1.0;
+
+        uint32_t hash = DoubleBits(r) ^ (DoubleBits(g) * 0x9E3779B9)
+                      ^ (DoubleBits(b) * 0x517CC1B7) ^ (DoubleBits(a) * 0x85EBCA6B);
+
+        if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETBARCOLOR), hash)) {
+            InterlockedIncrement(&g_stats[METHOD_SETBARCOLOR].skipped);
+            return 0;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+passthrough_color:
+    InterlockedIncrement(&g_stats[METHOD_SETBARCOLOR].passed);
+    return orig_SetBarColor(L);
+}
+
+// ================================================================
+//  Hook Installation Helper
+// ================================================================
+
+static bool InstallHook(const char* name, uintptr_t addr,
+                        void* hookFn, void** origFn)
+{
+    if (addr == 0) {
+        Log("[UICache]   %-25s NOT FOUND", name);
+        return false;
     }
 
-    InterlockedIncrement(&g_statsPassed);
-    return orig_SetText(L);
+    MH_STATUS status = MH_CreateHook((void*)addr, hookFn, origFn);
+    if (status != MH_OK) {
+        Log("[UICache]   %-25s MH_CreateHook failed (%d)", name, (int)status);
+        return false;
+    }
+
+    status = MH_EnableHook((void*)addr);
+    if (status != MH_OK) {
+        Log("[UICache]   %-25s MH_EnableHook failed (%d)", name, (int)status);
+        return false;
+    }
+
+    Log("[UICache]   %-25s 0x%08X  [ OK ]", name, (unsigned)addr);
+    return true;
 }
 
 // ================================================================
@@ -284,40 +424,81 @@ namespace UICache {
 
 bool Init() {
     Log("[UICache] ====================================");
-    Log("[UICache]  FontString:SetText Cache (auto-discover)");
+    Log("[UICache]  UI Widget Cache (auto-discover)");
     Log("[UICache] ====================================");
 
-    // Auto-discover the SetText function address
-    g_setTextAddr = DiscoverSetTextAddress();
+    HMODULE hWow = GetModuleHandleA(NULL);
+    if (!hWow) return false;
 
-    if (g_setTextAddr == 0) {
-        Log("[UICache] DISABLED — could not find SetText address");
+    MODULEINFO modInfo;
+    if (!GetModuleInformation(GetCurrentProcess(), hWow, &modInfo, sizeof(modInfo)))
         return false;
-    }
 
-    // Hook with MinHook
-    MH_STATUS status = MH_CreateHook(
-        (void*)g_setTextAddr,
-        (void*)Hooked_SetText,
-        (void**)&orig_SetText
-    );
+    uintptr_t base = (uintptr_t)hWow;
+    size_t size = modInfo.SizeOfImage;
 
-    if (status != MH_OK) {
-        Log("[UICache] MH_CreateHook failed (status %d)", (int)status);
-        return false;
-    }
+    Log("[UICache] Scanning Wow.exe (0x%08X, %u bytes)...",
+        (unsigned)base, (unsigned)size);
 
-    status = MH_EnableHook((void*)g_setTextAddr);
-    if (status != MH_OK) {
-        Log("[UICache] MH_EnableHook failed (status %d)", (int)status);
+    // --- FontString:SetText ---
+    const char* fontStringNeighbors[] = {
+        "GetText", "SetFont", "SetTextColor", "SetTextHeight",
+        "GetStringWidth", "SetAlpha", "GetAlpha", "SetJustifyH",
+        "SetShadowOffset", "SetShadowColor", "SetFormattedText",
+        NULL
+    };
+
+    DiscoverResult dr = DiscoverMethod("SetText", fontStringNeighbors, 3, base, size);
+    addr_SetText = dr.funcAddr;
+    if (dr.funcAddr)
+        Log("[UICache]   FontString:SetText   found (matched %d neighbors)", dr.matchCount);
+
+    // --- StatusBar:SetValue ---
+    const char* statusBarNeighbors[] = {
+        "SetMinMaxValues", "GetMinMaxValues", "SetStatusBarColor",
+        "SetStatusBarTexture", "GetStatusBarTexture", "GetValue",
+        "SetOrientation", "GetOrientation", "SetRotatesTexture",
+        "SetFillStyle",
+        NULL
+    };
+
+    dr = DiscoverMethod("SetValue", statusBarNeighbors, 3, base, size);
+    addr_SetValue = dr.funcAddr;
+    if (dr.funcAddr)
+        Log("[UICache]   StatusBar:SetValue   found (matched %d neighbors)", dr.matchCount);
+
+    // --- StatusBar:SetMinMaxValues ---
+    dr = DiscoverMethod("SetMinMaxValues", statusBarNeighbors, 3, base, size);
+    addr_SetMinMax = dr.funcAddr;
+    if (dr.funcAddr)
+        Log("[UICache]   StatusBar:SetMinMax  found (matched %d neighbors)", dr.matchCount);
+
+    // --- StatusBar:SetStatusBarColor ---
+    dr = DiscoverMethod("SetStatusBarColor", statusBarNeighbors, 3, base, size);
+    addr_SetBarColor = dr.funcAddr;
+    if (dr.funcAddr)
+        Log("[UICache]   StatusBar:SetBarClr  found (matched %d neighbors)", dr.matchCount);
+
+    // Install hooks
+    Log("[UICache] Installing hooks...");
+
+    int hooked = 0;
+    if (InstallHook("FontString:SetText",       addr_SetText,    (void*)Hooked_SetText,    (void**)&orig_SetText))    hooked++;
+    if (InstallHook("StatusBar:SetValue",        addr_SetValue,   (void*)Hooked_SetValue,   (void**)&orig_SetValue))   hooked++;
+    if (InstallHook("StatusBar:SetMinMaxValues", addr_SetMinMax,  (void*)Hooked_SetMinMax,  (void**)&orig_SetMinMax))  hooked++;
+    if (InstallHook("StatusBar:SetStatusBarColor", addr_SetBarColor, (void*)Hooked_SetBarColor, (void**)&orig_SetBarColor)) hooked++;
+
+    if (hooked == 0) {
+        Log("[UICache] No hooks installed — DISABLED");
         return false;
     }
 
     g_active = true;
 
-    Log("[UICache]  Hook:  0x%08X -> Hooked_SetText", (unsigned)g_setTextAddr);
-    Log("[UICache]  Cache: %d slots, FNV-1a hash, %d-probe", CACHE_SIZE, CACHE_PROBE);
-    Log("[UICache]  Taint: SAFE (C-level hook, invisible to Lua)");
+    Log("[UICache] ====================================");
+    Log("[UICache]  Hooks: %d/4 active", hooked);
+    Log("[UICache]  Cache: %d slots, FNV-1a + float-bits hash", CACHE_SIZE);
+    Log("[UICache]  Taint: SAFE (C-level hooks, invisible to Lua)");
     Log("[UICache]  [ OK ] ACTIVE");
     Log("[UICache] ====================================");
 
@@ -327,20 +508,48 @@ bool Init() {
 void Shutdown() {
     if (!g_active) return;
 
-    MH_DisableHook((void*)g_setTextAddr);
+    if (addr_SetText)    MH_DisableHook((void*)addr_SetText);
+    if (addr_SetValue)   MH_DisableHook((void*)addr_SetValue);
+    if (addr_SetMinMax)  MH_DisableHook((void*)addr_SetMinMax);
+    if (addr_SetBarColor) MH_DisableHook((void*)addr_SetBarColor);
+
     g_active = false;
 
-    long total = g_statsSkipped + g_statsPassed;
-    Log("[UICache] Shutdown. Skipped: %ld, Passed: %ld (%.1f%% skip rate)",
-        g_statsSkipped, g_statsPassed,
-        total > 0 ? (double)g_statsSkipped / total * 100.0 : 0.0);
+    const char* names[] = { "SetText", "SetValue", "SetMinMax", "SetBarColor" };
+
+    Log("[UICache] Shutdown:");
+    long totalSkipped = 0, totalPassed = 0;
+
+    for (int i = 0; i < 4; i++) {
+        long sk = g_stats[i].skipped;
+        long ps = g_stats[i].passed;
+        long total = sk + ps;
+        totalSkipped += sk;
+        totalPassed  += ps;
+
+        if (total > 0) {
+            Log("[UICache]   %-12s  skipped: %ld  passed: %ld  (%.1f%% skip)",
+                names[i], sk, ps, (double)sk / total * 100.0);
+        }
+    }
+
+    long grandTotal = totalSkipped + totalPassed;
+    if (grandTotal > 0) {
+        Log("[UICache]   TOTAL         skipped: %ld  passed: %ld  (%.1f%% skip)",
+            totalSkipped, totalPassed,
+            (double)totalSkipped / grandTotal * 100.0);
+    }
 }
 
 Stats GetStats() {
     Stats s;
-    s.skipped = g_statsSkipped;
-    s.passed  = g_statsPassed;
-    s.active  = g_active;
+    s.skipped = 0;
+    s.passed  = 0;
+    for (int i = 0; i < 4; i++) {
+        s.skipped += g_stats[i].skipped;
+        s.passed  += g_stats[i].passed;
+    }
+    s.active = g_active;
     return s;
 }
 
