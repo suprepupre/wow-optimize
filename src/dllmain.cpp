@@ -433,7 +433,8 @@ static void UntrackMpqHandle(HANDLE h) {
 
             // Rehash chain after deleted slot
             int next = (idx + 1) & MPQ_HASH_MASK;
-            while (g_mpqHash[next].occupied) {
+            int rehashLimit = MPQ_HASH_SIZE;
+            while (g_mpqHash[next].occupied && rehashLimit-- > 0) {
                 HANDLE rh = g_mpqHash[next].handle;
                 g_mpqHash[next].occupied = false;
                 g_mpqHash[next].handle = NULL;
@@ -832,14 +833,43 @@ static void TryRemoveFPSCap() {
     if (!hWow) return;
     MODULEINFO modInfo;
     if (!GetModuleInformation(GetCurrentProcess(), hWow, &modInfo, sizeof(modInfo))) return;
+
+    // BUGFIX: scan for CMP EAX, 200 then verify next byte is a conditional jump
     const uint8_t pat[] = { 0x3D, 0xC8, 0x00, 0x00, 0x00 };
-    uintptr_t addr = FindPattern((uintptr_t)hWow, modInfo.SizeOfImage, pat, "xxxxx");
+    uintptr_t base = (uintptr_t)hWow;
+    size_t size = modInfo.SizeOfImage;
+    uintptr_t addr = 0;
+    uintptr_t searchFrom = base;
+
+    while (searchFrom < base + size) {
+        uintptr_t found = FindPattern(searchFrom, base + size - searchFrom, pat, "xxxxx");
+        if (!found) break;
+
+        // Verify: instruction after CMP should be a conditional jump
+        uint8_t b = *(uint8_t*)(found + 5);
+        if (b == 0x7E || b == 0x7F) {
+            // JLE or JG short — valid FPS cap pattern
+            addr = found;
+            break;
+        }
+        if (b == 0x0F) {
+            uint8_t b2 = *(uint8_t*)(found + 6);
+            if (b2 == 0x8E || b2 == 0x8F) {
+                // JLE or JG near — valid FPS cap pattern
+                addr = found;
+                break;
+            }
+        }
+
+        searchFrom = found + 1;
+    }
+
     if (addr) {
         DWORD old;
         if (VirtualProtect((void*)(addr + 1), 4, PAGE_EXECUTE_READWRITE, &old)) {
             *(uint32_t*)(addr + 1) = 999;
             VirtualProtect((void*)(addr + 1), 4, old, &old);
-            Log("FPS cap: changed from 200 to 999");
+            Log("FPS cap: changed from 200 to 999 at 0x%08X", (unsigned)addr);
         }
     } else {
         Log("FPS cap: signature not found (may be a different build)");
