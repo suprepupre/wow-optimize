@@ -159,12 +159,6 @@ static Sleep_fn orig_Sleep = nullptr;
 static double g_sleepFreq = 0.0;
 
 static void PreciseSleep(double milliseconds) {
-    if (!g_sleepFreq) {
-        LARGE_INTEGER li;
-        QueryPerformanceFrequency(&li);
-        g_sleepFreq = (double)li.QuadPart / 1000.0;
-    }
-
     LARGE_INTEGER li;
     QueryPerformanceCounter(&li);
     double start = (double)li.QuadPart / g_sleepFreq;
@@ -179,11 +173,11 @@ static void PreciseSleep(double milliseconds) {
         double remaining = milliseconds - elapsed;
 
         if (remaining > 2.0)
-            orig_Sleep(1);          // OS sleep — releases CPU fully
+            orig_Sleep(1);
         else if (remaining > 0.3)
-            SwitchToThread();       // yield quantum but stay runnable
+            SwitchToThread();
         else
-            _mm_pause();            // sub-microsecond spin only for final approach
+            _mm_pause();
     }
 }
 
@@ -200,6 +194,10 @@ static void WINAPI hooked_Sleep(DWORD ms) {
 }
 
 static bool InstallSleepHook() {
+    LARGE_INTEGER li;
+    QueryPerformanceFrequency(&li);
+    g_sleepFreq = (double)li.QuadPart / 1000.0;
+
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Sleep");
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_Sleep, (void**)&orig_Sleep) != MH_OK) return false;
@@ -476,6 +474,7 @@ struct ReadCache {
 static const int   MAX_CACHED_HANDLES = 16;
 static const DWORD READ_AHEAD_SIZE    = 64 * 1024;
 static ReadCache   g_readCache[MAX_CACHED_HANDLES] = {};
+static int         g_cacheEvictIndex = 0;               
 static CRITICAL_SECTION g_cacheLock;
 static bool g_cacheInitialized = false;
 static bool g_csInitialized    = false;
@@ -486,7 +485,9 @@ static ReadCache* FindCache(HANDLE h) {
     return nullptr;
 }
 
+
 static ReadCache* AllocCache(HANDLE h) {
+
     for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
         if (!g_readCache[i].active) {
             g_readCache[i].handle = h;
@@ -496,10 +497,14 @@ static ReadCache* AllocCache(HANDLE h) {
             return &g_readCache[i];
         }
     }
-    g_readCache[0].handle = h;
-    g_readCache[0].validBytes = 0;
-    g_readCache[0].active = true;
-    return &g_readCache[0];
+
+    int idx = g_cacheEvictIndex;
+    g_cacheEvictIndex = (g_cacheEvictIndex + 1) % MAX_CACHED_HANDLES;
+    g_readCache[idx].handle = h;
+    if (!g_readCache[idx].buffer) g_readCache[idx].buffer = (uint8_t*)mi_malloc(READ_AHEAD_SIZE);
+    g_readCache[idx].validBytes = 0;
+    g_readCache[idx].active = true;
+    return &g_readCache[idx];
 }
 
 static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
