@@ -884,7 +884,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     LogOpen();
     Log("========================================");
-    Log("  wow_optimize.dll v1.7.1 BY SUPREMATIST");
+    Log("  wow_optimize.dll v1.7.2 BY SUPREMATIST");
     Log("  PID: %lu", GetCurrentProcessId());
     Log("========================================");
 

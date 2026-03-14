@@ -1,4 +1,4 @@
-# 🚀 wow_optimize v1.7.1 BY SUPREMATIST
+# 🚀 wow_optimize v1.7.2 BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 

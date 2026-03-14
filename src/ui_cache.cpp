@@ -63,9 +63,10 @@ static constexpr int METHOD_SETTEXTURE      = 5;
 static constexpr int METHOD_SETALPHA        = 6;
 static constexpr int NUM_METHODS            = 7;
 
-static constexpr int CACHE_SIZE  = 8192;
+// BUGFIX #7: 32768 slots (128KB) — room for 2000+ widgets × 7 methods
+static constexpr int CACHE_SIZE  = 32768;
 static constexpr int CACHE_MASK  = CACHE_SIZE - 1;
-static constexpr int CACHE_PROBE = 8;
+static constexpr int CACHE_PROBE = 4;   // lower probe depth OK at lower load factor
 
 struct CacheEntry {
     uint64_t  key;
@@ -79,9 +80,14 @@ static inline uint64_t MakeKey(uintptr_t widget, int method) {
     return ((uint64_t)widget << 4) | (uint64_t)method;
 }
 
+
+// BUGFIX #8: murmur-style finalizer for better avalanche
 static inline int CacheSlot(uint64_t key) {
     uint32_t k = (uint32_t)(key >> 4) ^ (uint32_t)(key);
-    return (int)((k >> 3) & CACHE_MASK);
+    k ^= k >> 16;
+    k *= 0x45d9f3b;
+    k ^= k >> 16;
+    return (int)(k & CACHE_MASK);
 }
 
 static bool CheckAndUpdate(uint64_t key, uint32_t hash) {
@@ -100,6 +106,11 @@ static bool CheckAndUpdate(uint64_t key, uint32_t hash) {
             return false;
         }
     }
+    // BUGFIX #6: all probe slots occupied by other keys — evict last slot
+    int evict = (slot + CACHE_PROBE - 1) & CACHE_MASK;
+    g_cache[evict].key  = key;
+    g_cache[evict].hash = hash;
+    g_cache[evict].occupied = true;
     return false;
 }
 
