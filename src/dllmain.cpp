@@ -11,11 +11,15 @@
 #include <cstring>
 #include <cstdint>
 #include <intrin.h>
+#include "ui_cache.h"
 
 #include "MinHook.h"
 #include <mimalloc.h>
 #include "lua_optimize.h"
 #include "combatlog_optimize.h"
+#include "spell_cache.h"
+#include "api_cache.h"
+#include "render_optimize.h"
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -193,6 +197,8 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         LuaOpt::OnMainThreadSleep(g_mainThreadId);
         CombatLogOpt::SetCombatState(LuaOpt::GetCombatState(), LuaOpt::GetIdleState());
         CombatLogOpt::OnFrame(g_mainThreadId);
+        SpellCache::NewFrame();
+        APICache::NewFrame();
     }
 
     if (ms <= 3) { PreciseSleep((double)ms); return; }
@@ -581,6 +587,11 @@ static DWORD WINAPI hooked_GetTickCount(void) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     double elapsed = (double)(now.QuadPart - g_qpcStart.QuadPart) / g_qpcFreq.QuadPart;
+
+    if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
+        RenderOpt::OnFrame();
+    }
+
     return g_tickStart + (DWORD)(elapsed * 1000.0);
 }
 
@@ -917,6 +928,24 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
 
+    Log("");
+    Log("--- Spell Cache ---");
+    bool spellCacheOk = SpellCache::Init();
+
+
+    Log("");
+    Log("--- API Cache ---");
+    bool apiCacheOk = APICache::Init();
+
+
+    Log("");
+    Log("--- Render Optimization ---");
+    bool renderOk = RenderOpt::Init();
+
+    Log("  [%s] GetSpellInfo cache",          spellCacheOk ? " OK " : "SKIP");
+    Log("  [%s] API call dedup cache",        apiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] Render optimization",      renderOk     ? " OK " : "SKIP");
+
     return 0;
 }
 
@@ -939,6 +968,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 LogClose();
                 break;
             }
+
+            SpellCache::Shutdown();
+            APICache::Shutdown();
+            RenderOpt::Shutdown();
 
             // Dynamic FreeLibrary — safe to clean up
             CombatLogOpt::Shutdown();
