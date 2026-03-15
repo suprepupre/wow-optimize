@@ -189,7 +189,6 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         CombatLogOpt::OnFrame(g_mainThreadId);
     }
 
-    if (ms <= 3) { PreciseSleep((double)ms); return; }
     orig_Sleep(ms);
 }
 
