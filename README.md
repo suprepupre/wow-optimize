@@ -1,8 +1,8 @@
-# 🚀 wow_optimize v1.7.2 BY SUPREMATIST
+# 🚀 wow_optimize v1.8.0 BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 
-Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threading, frame pacing, Lua VM, combat log buffer, and UI widget updates — all through a single injectable DLL.
+Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threading, Lua VM, combat log buffer, and UI widget updates — all through a single injectable DLL.
 
 > ⚠️ **Disclaimer:** This project is provided as-is for educational purposes. DLL injection may violate the Terms of Service of private servers. **No ban has been reported**, but **use at your own risk.** The author is not responsible for any consequences including but not limited to account suspensions.
 
@@ -14,7 +14,6 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
 
 Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepupre/wow-optimize/discussions/10)
 
-
 ---
 
 ## ✨ Features
@@ -23,7 +22,7 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 |---|---------|--------------|
 | 1 | **mimalloc Allocator** | Replaces msvcr80/ucrtbase `malloc`/`free` with Microsoft's modern allocator |
 | 2 | **Lua VM Allocator** | Replaces WoW's internal Lua pool allocator with mimalloc |
-| 3 | **Sleep Hook** | Precise frame pacing via QPC busy-wait (eliminates Sleep jitter) |
+| 3 | **Sleep Hook** | Drives per-frame Lua GC stepping and combat log cleanup |
 | 4 | **Full Network Stack** | TCP_NODELAY + Immediate ACK + QoS + Buffer tuning + Fast Keepalive |
 | 5 | **GetTickCount Hook** | QPC-based microsecond precision (better internal timers) |
 | 6 | **CriticalSection Spin** | Adds spin count to all locks (fewer context switches) |
@@ -37,29 +36,32 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 | 14 | **FPS Cap Removal** | Raises hardcoded 200 FPS limit to 999 |
 | 15 | **Lua VM GC Optimizer** | 4-tier per-frame GC stepping from C (loading/combat/idle/normal) |
 | 16 | **Combat Log Optimizer** | Prevents combat log data loss in raids (retention + periodic cleanup) |
-| 17 | **UI Widget Cache** | Skips redundant FontString:SetText, StatusBar:SetValue/SetMinMaxValues/SetStatusBarColor at C level (taint-free, auto-discovered) |
-| 18 | **FontString:SetText Cache** | **NEW** — Skips redundant SetText calls at C level (taint-free) |
+| 17 | **UI Widget Cache** | Skips redundant UI widget updates at C level (10 hooks, taint-free) |
+| 18 | **GC Step Sync** | Reads step sizes from LuaBoost addon — GUI controls DLL behavior |
 
 ---
 
-## 🆕 What's New in v1.7.0
+## 🆕 What's New in v1.8.0
 
 | Feature | Description |
 |---------|-------------|
-| **UI Widget Cache (4 hooks)** | Hooks `FontString:SetText`, `StatusBar:SetValue`, `StatusBar:SetMinMaxValues`, `StatusBar:SetStatusBarColor` at C function level. Caches argument hashes per widget — identical calls skip engine entirely. **50-80% skip rate** in crowded areas. |
-| **Auto-Discovery** | All UI function addresses found automatically by scanning WoW's method tables at startup — zero hardcoded UI addresses. |
-| **Fix Error #132 on /logout** | Removed combat log entry pool and RestoreLuaAllocator on state change. |
+| **3 new UI Cache hooks** | `Region:SetWidth`, `Region:SetHeight`, `Texture:SetVertexColor` — called every frame by health bars, cast bars, and nameplates. Total: **10 hooked methods**. |
+| **UI Cache stats to Lua** | Skip rate, skipped/passed counts exposed via `LuaBoostC_GetUIStats()`. Visible in addon with `/lb` and `/lb gc`. |
+| **GC Step Sync** | DLL reads step sizes from addon globals (`LUABOOST_ADDON_STEP_*`). Addon GUI becomes single source of truth for GC tuning. |
+| **Larger UI cache** | 8192 → 32768 slots (128KB). Handles 2000+ widgets × 10 methods without overflow. |
+| **Better cache hash** | Murmur-style finalizer replaces simple XOR — better distribution, fewer collisions. |
+| **Cache probe eviction** | When all probe slots are occupied, evicts last slot instead of silently failing. |
 
-### Previous (v1.6.0)
+### v1.7.2 Bugfixes (included)
 
-| Feature | Description |
-|---------|-------------|
-| **Full Network Latency Stack** | SIO_TCP_SET_ACK_FREQUENCY=1, IP_TOS LOWDELAY, SO_RCVBUF 64KB, TCP Keepalive 10s/1s, deferred socket optimization via send() hook |
-| **O(1) MPQ Handle Lookup** | Hash table replaces O(n) linear scan for ReadFile cache |
-| **SRWLock for ReadFile Cache** | Concurrent reads on cache hits |
-| **Smarter PreciseSleep** | SwitchToThread() for 0.3-2ms range — less idle CPU |
-| **Lua State Read Throttle** | DLL→Lua API calls reduced from ~900/sec to ~124/sec |
-| **Safe DLL Unload** | Fixed Error #132 on game exit |
+| Fix | Description |
+|-----|-------------|
+| **ReadFile cache eviction** | Was always evicting slot 0 — now round-robin across all 16 slots. |
+| **Sleep timer race condition** | QPC frequency initialized before hook activation — prevents torn read on 32-bit double. |
+| **FPS cap false positive** | Pattern scan now verifies conditional jump after `CMP EAX, 200`. |
+| **MPQ hash infinite loop** | Safety bound on backward-shift deletion in hash table. |
+| **Frame counter reset** | Addon poll counters reset on `/reload` and shutdown. |
+| **PreciseSleep disabled** | QPC busy-wait caused damage meter desync — reverted to OS Sleep for compatibility. |
 
 ---
 
@@ -71,14 +73,13 @@ This is **not** a magic FPS doubler. Think of it like replacing an HDD with an S
 
 - ✅ Fewer random micro-stutters (especially Lua GC stalls)
 - ✅ More stable minimum FPS (less variance between frames)
-- ✅ Smoother frame pacing (no more Sleep jitter)
 - ✅ Less lag degradation over long sessions (2+ hours)
 - ✅ Lower network latency — spells feel more responsive
 - ✅ Faster disconnect detection — 20 sec instead of 2+ hours
 - ✅ Faster zone loading
 - ✅ Reduced lag spikes on boss kills and dungeon queue pops
 - ✅ No more broken damage meters in 25-man raids
-- ✅ **Smoother UI in crowded areas** (SetText cache, v1.7.0)
+- ✅ **Smoother UI in crowded areas** (10 widget cache hooks)
 
 ### You WON'T notice
 
@@ -102,10 +103,10 @@ For maximum optimization, use this DLL together with the **[!LuaBoost](https://g
 
 | Layer | Tool | What It Does |
 |-------|------|--------------|
-| **C / Engine** | wow\_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix, **UI widget cache (4 hooks)** |
-| **Lua / Addons** | !LuaBoost addon | Incremental GC, SpeedyLoad, table pool, throttle API, UI Thrashing Protection (StatusBar), Event Profiler, OnUpdate Dispatcher, GUI |
+| **C / Engine** | wow_optimize.dll | Faster memory, I/O, network, timers, Lua allocator + GC from C, combat log fix, **UI widget cache (10 hooks)** |
+| **Lua / Addons** | !LuaBoost addon | GC step sync to DLL, SpeedyLoad, table pool, throttle API, UI cache stats display, Event Profiler, FPS Monitor, GUI |
 
-When both are installed, the DLL handles Lua allocator replacement, GC stepping from C (zero Lua overhead), network optimization, combat log buffering, and **FontString:SetText caching**. The addon provides the GUI, combat awareness, idle detection, SpeedyLoad, and StatusBar thrashing protection.
+When both are installed, the DLL handles Lua allocator replacement, GC stepping from C using step sizes from the addon GUI, network optimization, combat log buffering, and UI widget caching. The addon provides the GUI, combat awareness, idle detection, SpeedyLoad, and diagnostics.
 
 > ⚠️ **Do NOT use SmartGC together with !LuaBoost** — SmartGC has been merged into LuaBoost. Using both will cause conflicts.
 
@@ -177,13 +178,14 @@ Check `Logs/wow_optimize.log` — all lines should show `[ OK ]`.
 
 ```
 [02:42:28.155] ========================================
-[02:42:28.155]   wow_optimize.dll v1.7.0 BY SUPREMATIST
+[02:42:28.155]   wow_optimize.dll v1.8.0 BY SUPREMATIST
 [02:42:28.155]   PID: 13088
 [02:42:28.155] ========================================
 [02:42:28.183] >>> ALLOCATOR: mimalloc ACTIVE <<<
-[02:42:28.197] Sleep hook: ACTIVE (frame pacing + Lua GC + combat log)
+[02:42:28.197] Sleep hook: ACTIVE (Lua GC + combat log)
 [02:42:28.254] Network hook: ACTIVE (2/2 hooks, NODELAY+ACK+QoS+BUF+KA)
 [02:42:28.340] [CombatLog]  [ OK ] Guaranteed Clear (every 1 sec)
+[02:42:28.543] [UICache]  Hooks: 10/10 active
 [02:42:28.543] [UICache]  [ OK ] ACTIVE
 [02:42:38.789] [LuaOpt]  >>> ALLOCATOR REPLACED <<<
 [02:42:39.100] Socket 10952 [send]: 7 applied, 0 failed
@@ -213,36 +215,58 @@ The DLL replaces the frealloc function pointer in Lua's global_State:
 - stepmul=300 (collect faster, default 200)
 - Auto-GC stopped — manual per-frame stepping only
 
+### GC Step Sync (NEW in v1.8.0)
+
+When LuaBoost addon is installed, the DLL reads step sizes from Lua globals every ~16 frames:
+
+```
+Addon writes → Lua globals (on settings change):
+  LUABOOST_ADDON_STEP_NORMAL, LUABOOST_ADDON_STEP_COMBAT,
+  LUABOOST_ADDON_STEP_IDLE, LUABOOST_ADDON_STEP_LOADING
+
+DLL reads → applies to per-frame GC stepping
+```
+
+This means the addon GUI is the single source of truth for GC tuning — slider changes take effect within ~250ms.
+
 ### DLL ↔ Addon Communication
 
 ```
 DLL writes → Lua globals (every ~64 frames):
-  LUABOOST_DLL_LOADED, LUABOOST_DLL_MEM_KB, LUABOOST_DLL_GC_STEPS, etc.
+  LUABOOST_DLL_LOADED, LUABOOST_DLL_MEM_KB, LUABOOST_DLL_GC_STEPS,
+  LUABOOST_DLL_UICACHE_SKIPPED, LUABOOST_DLL_UICACHE_PASSED, etc.
 
 Addon writes → Lua globals (on events):
-  LUABOOST_ADDON_COMBAT, LUABOOST_ADDON_IDLE, LUABOOST_ADDON_LOADING
+  LUABOOST_ADDON_COMBAT, LUABOOST_ADDON_IDLE, LUABOOST_ADDON_LOADING,
+  LUABOOST_ADDON_STEP_NORMAL, LUABOOST_ADDON_STEP_COMBAT, etc.
 
 DLL reads addon globals every ~16 frames from the Sleep hook (main thread).
 ```
 
 ---
 
-## 🎨 UI Widget Cache (NEW in v1.7.0)
+## 🎨 UI Widget Cache
 
 ### The Problem
 
 In crowded areas, addons call UI update functions thousands of times per second — nameplates, unit frames, health bars, damage meters. Most calls set the **same value** that's already displayed, but WoW's engine processes each call fully.
 
-### What's Hooked (4 methods, all taint-free)
+### What's Hooked (10 methods, all taint-free)
 
 | Method | Cache Key | Skip Condition |
 |--------|-----------|----------------|
 | `FontString:SetText` | FNV-1a text hash | Same text string |
+| `FontString:SetTextColor` | Combined RGBA hash | Same color values |
 | `StatusBar:SetValue` | Float bits | Same numeric value |
 | `StatusBar:SetMinMaxValues` | Combined min+max hash | Same min and max |
 | `StatusBar:SetStatusBarColor` | Combined RGBA hash | Same color values |
+| `Texture:SetTexture` | FNV-1a path / float ID | Same texture |
+| `Texture:SetVertexColor` | Combined RGBA hash | Same color values |
+| `Region:SetAlpha` | Float bits | Same alpha value |
+| `Region:SetWidth` | Float bits | Same width value |
+| `Region:SetHeight` | Float bits | Same height value |
 
-All addresses auto-discovered at startup by scanning method tables — verified by matching 10+ neighboring FontString/StatusBar method names.
+All addresses auto-discovered at startup by scanning method tables — verified by matching 3+ neighboring method names.
 
 ### Why This Is Safe
 
@@ -252,25 +276,7 @@ All addresses auto-discovered at startup by scanning method tables — verified 
 | **Wrong widget?** | Auto-discovery requires 3+ matching neighbor methods before accepting. |
 | **MinMax change?** | SetMinMaxValues invalidates SetValue cache for that widget. |
 | **Thread safety?** | All hooks run on main thread only (same as all UI code). |
-
-### The Fix
-
-The DLL hooks WoW's internal C function for `FontString:SetText` (auto-discovered at startup by scanning method tables). For each call:
-
-1. Extract the C++ widget pointer from the Lua userdata (unique per FontString)
-2. Compute FNV-1a hash of the new text string
-3. Compare with cached hash for this widget
-4. **If identical → skip the engine call entirely**
-5. If different → update cache and call original
-
-### Why This Is Safe
-
-| Concern | Answer |
-|---------|--------|
-| **Taint?** | Zero taint. Hooks the C function directly — Lua's taint tracker only monitors Lua-level metatable changes. This is invisible to it. |
-| **Wrong widget type?** | Auto-discovery verifies 10+ FontString-specific methods (`GetText`, `SetFont`, `SetTextColor`, etc.) before accepting the address. |
-| **Stale cache?** | Cache uses weak-key semantics: when widgets are recycled, old entries are naturally overwritten. `SetText(nil)` explicitly invalidates. |
-| **Thread safety?** | Hook runs on main thread only (same as all Lua/UI code in WoW). |
+| **Stale cache?** | Cache uses 32768 slots with murmur hash — naturally evicts old entries. |
 
 ### Performance
 
@@ -347,7 +353,7 @@ DLL_PROCESS_DETACH with reserved == NULL (FreeLibrary):
 
 ### Anti-Cheat (Warden)
 
-**No bans have been reported.** The DLL only hooks system-level functions (`malloc`, `free`, `Sleep`, `connect`, `send`, `ReadFile`), calls Lua GC API for performance tuning, patches combat log retention, and caches UI widget text to skip redundant calls.
+**No bans have been reported.** The DLL only hooks system-level functions (`malloc`, `free`, `Sleep`, `connect`, `send`, `ReadFile`), calls Lua GC API for performance tuning, patches combat log retention, and caches UI widget values to skip redundant calls.
 
 ### System Requirements
 
@@ -381,7 +387,7 @@ wow-optimize/
 │   ├── lua_optimize.h           # Lua optimizer interface
 │   ├── combatlog_optimize.cpp   # Combat log optimizer (retention + periodic cleanup)
 │   ├── combatlog_optimize.h     # Combat log optimizer interface
-│   ├── ui_cache.cpp             # UI widget cache (SetText + StatusBar, auto-discovered)
+│   ├── ui_cache.cpp             # UI widget cache (10 hooks, auto-discovered)
 │   ├── ui_cache.h               # UI cache interface
 │   ├── wow_loader.cpp           # Universal auto-loader executable
 │   ├── version_proxy.cpp        # Auto-loader (version.dll proxy)

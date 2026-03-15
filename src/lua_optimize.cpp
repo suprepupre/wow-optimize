@@ -1,4 +1,5 @@
 #include "lua_optimize.h"
+#include "ui_cache.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -628,6 +629,19 @@ static int ReadLuaGlobal_Bool(lua_State* L, const char* name) {
     return val;
 }
 
+static double ReadLuaGlobal_Number(lua_State* L, const char* name, double fallback) {
+    if (!Api.lua_getfield || !Api.lua_type || !Api.lua_tonumber || !Api.lua_settop)
+        return fallback;
+    Api.lua_getfield(L, LUA_GLOBALSINDEX, name);
+    if (Api.lua_type(L, -1) != 3) {
+        Api.lua_settop(L, -2);
+        return fallback;
+    }
+    double val = Api.lua_tonumber(L, -1);
+    Api.lua_settop(L, -2);
+    return val;
+}
+
 // ================================================================
 //  Read Addon State from Lua Globals
 // ================================================================
@@ -646,6 +660,16 @@ static void ReadAddonStateFromLua(lua_State* L) {
                 State.lastModeName, currentMode, GetCurrentStepKB());
             State.lastModeName = currentMode;
         }
+
+        double n;
+        n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_NORMAL", -1);
+        if (n >= 1) Config.normalStepKB = (int)n;
+        n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_COMBAT", -1);
+        if (n >= 0) Config.combatStepKB = (int)n;
+        n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_IDLE", -1);
+        if (n >= 1) Config.idleStepKB = (int)n;
+        n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_LOADING", -1);
+        if (n >= 1) Config.loadingStepKB = (int)n;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -670,6 +694,11 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE",   State.gcOptimized);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC",   g_luaAllocReplaced);
         WriteLuaGlobal_String(L, "LUABOOST_DLL_GC_MODE",     GetGCModeName());
+
+        UICache::Stats uiStats = UICache::GetStats();
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UICACHE_SKIPPED", (double)uiStats.skipped);
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UICACHE_PASSED",  (double)uiStats.passed);
+        WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_UICACHE_ACTIVE",  uiStats.active);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -682,7 +711,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.7.2");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.8.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -693,7 +722,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '1.7.2' "
+            "LUABOOST_DLL_VERSION = '1.8.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -730,6 +759,13 @@ static void SetupLuaInterface(lua_State* L) {
 
             "function LuaBoostC_GCCollect() "
             "  LUABOOST_DLL_GC_REQUEST = -1 "
+            "end "
+
+            "function LuaBoostC_GetUIStats() "
+            "  return "
+            "    LUABOOST_DLL_UICACHE_SKIPPED or 0, "
+            "    LUABOOST_DLL_UICACHE_PASSED or 0, "
+            "    LUABOOST_DLL_UICACHE_ACTIVE or false "
             "end ",
             "LuaOpt", 0
         );
