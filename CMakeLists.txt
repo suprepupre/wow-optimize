@@ -31,12 +31,6 @@ add_library(wow_optimize SHARED
     src/combatlog_optimize.h
     src/ui_cache.cpp
     src/ui_cache.h
-    src/spell_cache.cpp
-    src/spell_cache.h
-    src/api_cache.cpp
-    src/api_cache.h
-    src/render_optimize.cpp
-    src/render_optimize.h
 )
 
 target_link_libraries(wow_optimize PRIVATE
@@ -49,7 +43,7 @@ target_link_libraries(wow_optimize PRIVATE
 target_include_directories(wow_optimize PRIVATE
     ${minhook_SOURCE_DIR}/include
     ${mimalloc_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src   
 )
 
 set_target_properties(wow_optimize PROPERTIES
