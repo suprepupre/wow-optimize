@@ -408,6 +408,7 @@ static int __cdecl Hooked_SetTexture(lua_State* L) {
         void* widget = api_getwidget(L, 1);
         if (!widget) goto pass_texture;
 
+        int nargs = api_gettop(L);
         int argType = api_type(L, 2);
         uint32_t hash;
 
@@ -420,9 +421,15 @@ static int __cdecl Hooked_SetTexture(lua_State* L) {
             }
             hash = FNV1a(path, len);
         } else if (argType == LUA_TNUMBER) {
-            hash = DoubleBits(api_tonumber(L, 2));
+            if (nargs >= 4) {
+                hash = DoubleBits(api_tonumber(L, 2))
+                     ^ (DoubleBits(api_tonumber(L, 3)) * 0x9E3779B9)
+                     ^ (DoubleBits(api_tonumber(L, 4)) * 0x517CC1B7)
+                     ^ (DoubleBits(nargs >= 5 ? api_tonumber(L, 5) : 1.0) * 0x85EBCA6B);
+            } else {
+                hash = DoubleBits(api_tonumber(L, 2));
+            }
         } else {
-            // nil or other — clear texture, always pass through
             InvalidateWidget((uintptr_t)widget, METHOD_SETTEXTURE);
             goto pass_texture;
         }
