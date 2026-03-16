@@ -316,10 +316,10 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
 }
 
 static int WINAPI hooked_send(SOCKET s, const char* buf, int len, int flags) {
-    // If this socket was pending optimization, apply now
-    // send() is only called after TCP handshake completes
     if (RemovePendingSocket(s)) {
+        int savedError = WSAGetLastError();
         OptimizeSocket(s, "send");
+        WSASetLastError(savedError);
     }
     return orig_send(s, buf, len, flags);
 }
