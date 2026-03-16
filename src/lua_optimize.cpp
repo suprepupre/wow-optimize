@@ -136,6 +136,13 @@ static struct {
 
 static int g_addonReadCounter = 0;
 static int g_gcRequestCounter = 0;
+static int g_lastSyncNormal = -1;
+static int g_lastSyncCombat = -1;
+static int g_lastSyncIdle = -1;
+static int g_lastSyncLoading = -1;
+
+static double g_smoothedGcMs = 0.5;
+static LARGE_INTEGER g_gcPerfFreq = {};
 
 // ================================================================
 //  Memory Validation
@@ -577,26 +584,69 @@ static int GetCurrentStepKB() {
 static void StepGC(lua_State* L) {
     if (!State.gcOptimized || !Api.lua_gc) return;
 
+    if (g_gcPerfFreq.QuadPart == 0) {
+        QueryPerformanceFrequency(&g_gcPerfFreq);
+    }
+
     int stepKB = GetCurrentStepKB();
+
+    LARGE_INTEGER before, after;
+    QueryPerformanceCounter(&before);
 
     __try {
         int done = Api.lua_gc(L, LUA_GCSTEP, stepKB);
         State.gcStepsTotal++;
-
         if (done) {
             State.fullCollects++;
-        }
-
-        State.statsUpdateCounter++;
-        if ((State.statsUpdateCounter & 63) == 0) {
-            int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
-            int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
-            State.luaMemoryKB = kb + (b / 1024.0);
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("[LuaOpt] EXCEPTION in GC step — disabling");
         State.gcOptimized = false;
+        return;
+    }
+
+    QueryPerformanceCounter(&after);
+    double gcMs = (double)(after.QuadPart - before.QuadPart) * 1000.0 / (double)g_gcPerfFreq.QuadPart;
+    g_smoothedGcMs = g_smoothedGcMs * 0.95 + gcMs * 0.05;
+
+    if (g_smoothedGcMs > 2.0) {
+        if (Config.isLoading) {
+            if (Config.loadingStepKB > 32) Config.loadingStepKB -= 16;
+        } else if (Config.inCombat) {
+            if (Config.combatStepKB > 4) Config.combatStepKB -= 2;
+        } else if (Config.isIdle) {
+            if (Config.idleStepKB > 16) Config.idleStepKB -= 8;
+        } else {
+            if (Config.normalStepKB > 8) Config.normalStepKB -= 4;
+        }
+    } else if (g_smoothedGcMs < 0.6) {
+        if (Config.isLoading) {
+            if (Config.loadingStepKB < 512) Config.loadingStepKB += 8;
+        } else if (Config.inCombat) {
+            if (Config.combatStepKB < 30) Config.combatStepKB += 1;
+        } else if (Config.isIdle) {
+            if (Config.idleStepKB < 300) Config.idleStepKB += 4;
+        } else {
+            if (Config.normalStepKB < 128) Config.normalStepKB += 2;
+        }
+    }
+
+    State.statsUpdateCounter++;
+    if ((State.statsUpdateCounter & 63) == 0) {
+        int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
+        int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
+        State.luaMemoryKB = kb + (b / 1024.0);
+    }
+
+    if (State.luaMemoryKB > 200 * 1024) {
+        Api.lua_gc(L, LUA_GCCOLLECT, 0);
+        State.fullCollects++;
+        Log("[LuaOpt] EMERGENCY GC: memory was %.1f MB", State.luaMemoryKB / 1024.0);
+        int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
+        int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
+        State.luaMemoryKB = kb + (b / 1024.0);
+        Log("[LuaOpt] After emergency GC: %.1f MB", State.luaMemoryKB / 1024.0);
     }
 }
 
@@ -672,13 +722,25 @@ static void ReadAddonStateFromLua(lua_State* L) {
 
         double n;
         n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_NORMAL", -1);
-        if (n >= 1) Config.normalStepKB = (int)n;
+        if (n >= 1 && (int)n != g_lastSyncNormal) {
+            g_lastSyncNormal = (int)n;
+            Config.normalStepKB = (int)n;
+        }
         n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_COMBAT", -1);
-        if (n >= 0) Config.combatStepKB = (int)n;
+        if (n >= 0 && (int)n != g_lastSyncCombat) {
+            g_lastSyncCombat = (int)n;
+            Config.combatStepKB = (int)n;
+        }
         n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_IDLE", -1);
-        if (n >= 1) Config.idleStepKB = (int)n;
+        if (n >= 1 && (int)n != g_lastSyncIdle) {
+            g_lastSyncIdle = (int)n;
+            Config.idleStepKB = (int)n;
+        }
         n = ReadLuaGlobal_Number(L, "LUABOOST_ADDON_STEP_LOADING", -1);
-        if (n >= 1) Config.loadingStepKB = (int)n;
+        if (n >= 1 && (int)n != g_lastSyncLoading) {
+            g_lastSyncLoading = (int)n;
+            Config.loadingStepKB = (int)n;
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -703,6 +765,7 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE",   State.gcOptimized);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC",   g_luaAllocReplaced);
         WriteLuaGlobal_String(L, "LUABOOST_DLL_GC_MODE",     GetGCModeName());
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_GC_MS",       g_smoothedGcMs);
 
         UICache::Stats uiStats = UICache::GetStats();
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_UICACHE_SKIPPED", (double)uiStats.skipped);
@@ -720,7 +783,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.8.0");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.9.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -731,7 +794,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '1.8.0' "
+            "LUABOOST_DLL_VERSION = '1.9.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -953,6 +1016,11 @@ void OnMainThreadSleep(DWORD mainThreadId) {
         SetupLuaInterface(Api.L);
         g_addonReadCounter = 0;
         g_gcRequestCounter = 0;
+        g_lastSyncNormal = -1;
+        g_lastSyncCombat = -1;
+        g_lastSyncIdle = -1;
+        g_lastSyncLoading = -1;
+        g_smoothedGcMs = 0.5;
         return;
     }
 
