@@ -133,14 +133,8 @@ static void TryClearProcessedEntries(double nowMs) {
     if (nowMs - g_lastClearTime < GetClearIntervalMs()) return;
     g_lastClearTime = nowMs;
 
-    __try {
-        uintptr_t head = *(uintptr_t*)Addr::ActiveListHead;
-        if (!head || (head & 1)) return;
-
-        g_clearEntries();
-        g_totalClears++;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_clearEntries();
+    g_totalClears++;
 }
 
 // ================================================================
