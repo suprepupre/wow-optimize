@@ -18,6 +18,7 @@ namespace CombatLogOpt {
 bool Init();
 void OnFrame(DWORD mainThreadId);
 void Shutdown();
+void SetCombat(bool active);
 
 struct PoolStats {
     int  poolSize;

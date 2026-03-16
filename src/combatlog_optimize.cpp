@@ -32,6 +32,7 @@ namespace Addr {
 static constexpr int TARGET_RETENTION_SEC    = 1800;
 static constexpr int RETENTION_CHECK_FRAMES  = 600;
 static constexpr int CVAR_INT_OFFSET         = 0x30;
+static bool g_combatActive = false;
 
 // ================================================================
 //  Function Types
@@ -124,7 +125,8 @@ static int TryPatchRetention() {
 // ================================================================
 
 static double GetClearIntervalMs() {
-    return 1000.0;
+    if (g_combatActive) return 10000.0;
+    return 5000.0;
 }
 
 static void TryClearProcessedEntries(double nowMs) {
@@ -163,7 +165,7 @@ bool Init() {
     int ret = TryPatchRetention();
     if (ret == 1) Log("[CombatLog]  [ OK ] Retention patched (1800s)");
 
-    Log("[CombatLog]  [ OK ] Guaranteed Clear (every 1 sec)");
+    Log("[CombatLog]  [ OK ] Guaranteed Clear (5s normal, 10s combat)");
 
     g_initialized = true;
     return true;
@@ -193,6 +195,10 @@ void OnFrame(DWORD mainThreadId) {
     if (g_clearEntries) {
         TryClearProcessedEntries(nowMs);
     }
+}
+
+void SetCombat(bool active) {
+    g_combatActive = active;
 }
 
 void Shutdown() {

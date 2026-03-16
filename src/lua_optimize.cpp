@@ -1,4 +1,5 @@
 #include "lua_optimize.h"
+#include "combatlog_optimize.h"
 #include "ui_cache.h"
 #include <cstdio>
 #include <cstring>
@@ -650,7 +651,11 @@ static void ReadAddonStateFromLua(lua_State* L) {
     if (!Api.lua_getfield || !Api.lua_toboolean || !Api.lua_settop) return;
 
     __try {
+        bool wasCombat = Config.inCombat;
         Config.inCombat  = (ReadLuaGlobal_Bool(L, "LUABOOST_ADDON_COMBAT")  != 0);
+        if (Config.inCombat != wasCombat) {
+            CombatLogOpt::SetCombat(Config.inCombat);
+        }
         Config.isIdle    = (ReadLuaGlobal_Bool(L, "LUABOOST_ADDON_IDLE")    != 0);
         Config.isLoading = (ReadLuaGlobal_Bool(L, "LUABOOST_ADDON_LOADING") != 0);
 
