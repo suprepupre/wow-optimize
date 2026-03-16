@@ -308,11 +308,7 @@ static int WINAPI hooked_connect(SOCKET s, const struct sockaddr* name, int name
         // Synchronous connect succeeded — optimize immediately
         OptimizeSocket(s, "connect");
     } else if (savedError == WSAEWOULDBLOCK) {
-        // Async connect — socket not ready yet, defer optimization
         AddPendingSocket(s);
-        // Still set TCP_NODELAY — this one works even before handshake
-        BOOL nodelay = TRUE;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
     }
 
     WSASetLastError(savedError);
