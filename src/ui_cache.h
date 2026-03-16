@@ -8,6 +8,7 @@ namespace UICache {
 
 bool Init();
 void Shutdown();
+void ClearCache();
 
 struct Stats {
     long skipped;

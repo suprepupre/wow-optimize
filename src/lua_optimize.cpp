@@ -657,7 +657,11 @@ static void ReadAddonStateFromLua(lua_State* L) {
             CombatLogOpt::SetCombat(Config.inCombat);
         }
         Config.isIdle    = (ReadLuaGlobal_Bool(L, "LUABOOST_ADDON_IDLE")    != 0);
+        bool wasLoading = Config.isLoading;
         Config.isLoading = (ReadLuaGlobal_Bool(L, "LUABOOST_ADDON_LOADING") != 0);
+        if (Config.isLoading && !wasLoading) {
+            UICache::ClearCache();
+        }
 
         const char* currentMode = GetGCModeName();
         if (currentMode != State.lastModeName) {
@@ -942,6 +946,7 @@ void OnMainThreadSleep(DWORD mainThreadId) {
         State.statsUpdateCounter = 0;
         State.lastModeName = "unknown";
 
+        UICache::ClearCache();
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);

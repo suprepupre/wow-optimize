@@ -695,6 +695,12 @@ bool Init() {
     return true;
 }
 
+void ClearCache() {
+    if (!g_active) return;
+    memset(g_cache, 0, sizeof(g_cache));
+}
+
+
 void Shutdown() {
     if (!g_active) return;
 
