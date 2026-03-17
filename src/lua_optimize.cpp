@@ -1,6 +1,7 @@
 #include "lua_optimize.h"
 #include "combatlog_optimize.h"
 #include "ui_cache.h"
+#include "api_cache.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -771,6 +772,11 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_UICACHE_SKIPPED", (double)uiStats.skipped);
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_UICACHE_PASSED",  (double)uiStats.passed);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_UICACHE_ACTIVE",  uiStats.active);
+
+        ApiCache::Stats apiStats = ApiCache::GetStats();
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_HITS",   (double)apiStats.hits);
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_MISSES", (double)apiStats.misses);
+        WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_APICACHE_ACTIVE", apiStats.active);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -783,7 +789,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.10.0");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "2.0.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -794,7 +800,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '1.10.0' "
+            "LUABOOST_DLL_VERSION = '2.0.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -838,6 +844,12 @@ static void SetupLuaInterface(lua_State* L) {
             "    LUABOOST_DLL_UICACHE_SKIPPED or 0, "
             "    LUABOOST_DLL_UICACHE_PASSED or 0, "
             "    LUABOOST_DLL_UICACHE_ACTIVE or false "
+            "end "
+            "function LuaBoostC_GetApiStats() "
+            "  return "
+            "    LUABOOST_DLL_APICACHE_HITS or 0, "
+            "    LUABOOST_DLL_APICACHE_MISSES or 0, "
+            "    LUABOOST_DLL_APICACHE_ACTIVE or false "
             "end ",
             "LuaOpt", 0
         );

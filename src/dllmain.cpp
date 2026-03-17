@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <intrin.h>
 #include "ui_cache.h"
+#include "api_cache.h"
 
 #include "MinHook.h"
 #include <mimalloc.h>
@@ -260,6 +261,7 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         }
         g_lastSleepTime = now;
 
+        ApiCache::OnNewFrame();
         LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
     }
@@ -954,7 +956,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     LogOpen();
     Log("========================================");
-    Log("  wow_optimize.dll v1.10.0 BY SUPREMATIST");
+    Log("  wow_optimize.dll v2.0.0 BY SUPREMATIST");
     Log("  PID: %lu", GetCurrentProcessId());
     Log("========================================");
 
@@ -1006,6 +1008,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool uiCacheOk = UICache::Init();
 
     Log("");
+    Log("--- API Cache ---");
+    bool apiCacheOk = ApiCache::Init();
+
+    Log("");
     Log("========================================");
     Log("  Initialization complete");
     Log("========================================");
@@ -1026,6 +1032,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
     Log("  [%s] FontString SetText cache",    uiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] UI widget cache",             uiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] API result cache (9 funcs)",  apiCacheOk  ? " OK " : "SKIP");
 
     return 0;
 }
@@ -1054,6 +1062,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             }
 
             // Dynamic FreeLibrary — safe to clean up
+            ApiCache::Shutdown();            
             UICache::Shutdown();            
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();
