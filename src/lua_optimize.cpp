@@ -254,37 +254,37 @@ static void*        g_origLuaAllocUD = nullptr;
 static uintptr_t    g_globalStateAddr = 0;
 static bool         g_luaAllocReplaced = false;
 
-static volatile LONG g_luaAllocStats_malloc = 0;
-static volatile LONG g_luaAllocStats_free = 0;
-static volatile LONG g_luaAllocStats_realloc = 0;
-static volatile LONG g_luaAllocStats_freeLegacy = 0;
-static volatile LONG g_luaAllocStats_reallocMigrate = 0;
+static long g_luaAllocStats_malloc = 0;
+static long g_luaAllocStats_free = 0;
+static long g_luaAllocStats_realloc = 0;
+static long g_luaAllocStats_freeLegacy = 0;
+static long g_luaAllocStats_reallocMigrate = 0;
 
 static void* __cdecl MimallocLuaAlloc(void* ud, void* ptr, size_t osize, size_t nsize) {
     if (nsize == 0) {
         if (ptr) {
             if (mi_is_in_heap_region(ptr)) {
                 mi_free(ptr);
-                InterlockedIncrement(&g_luaAllocStats_free);
+                g_luaAllocStats_free++;
             } else {
                 g_origLuaAlloc(g_origLuaAllocUD, ptr, osize, 0);
-                InterlockedIncrement(&g_luaAllocStats_freeLegacy);
+                g_luaAllocStats_freeLegacy++;
             }
         }
         return NULL;
     }
 
     if (ptr == NULL) {
-        InterlockedIncrement(&g_luaAllocStats_malloc);
+        g_luaAllocStats_malloc++;
         return mi_malloc(nsize);
     }
 
     if (mi_is_in_heap_region(ptr)) {
-        InterlockedIncrement(&g_luaAllocStats_realloc);
+        g_luaAllocStats_realloc++;
         return mi_realloc(ptr, nsize);
     }
 
-    InterlockedIncrement(&g_luaAllocStats_reallocMigrate);
+    g_luaAllocStats_reallocMigrate++;
     void* newPtr = mi_malloc(nsize);
     if (newPtr) {
         size_t copySize = (osize < nsize) ? osize : nsize;
@@ -783,7 +783,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.9.0");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "1.10.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -794,7 +794,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '1.9.0' "
+            "LUABOOST_DLL_VERSION = '1.10.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -974,7 +974,7 @@ bool PrepareFromWorkerThread() {
     return true;
 }
 
-void OnMainThreadSleep(DWORD mainThreadId) {
+void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
     if (GetCurrentThreadId() != mainThreadId) return;
 
     LONG state = g_luaInitState;
@@ -1027,21 +1027,26 @@ void OnMainThreadSleep(DWORD mainThreadId) {
     // Read addon state every 16 frames (~4-5 reads/sec at 60fps)
     // Combat/idle/loading state changes at most a few times per minute
     // No need to poll 9 Lua API calls every single frame
-    if ((++g_addonReadCounter & 15) == 0) {
+    bool slowFrame = (frameMs > 33.0);
+    bool verySlowFrame = (frameMs > 50.0);
+
+    if (!slowFrame && (++g_addonReadCounter & 15) == 0) {
         ReadAddonStateFromLua(Api.L);
     }
 
-    if ((++g_gcRequestCounter & 3) == 0) {
+    if (!verySlowFrame && (++g_gcRequestCounter & 3) == 0) {
         ProcessGCRequests(Api.L);
     }
 
-    StepGC(Api.L);
+    if (!verySlowFrame) {
+        StepGC(Api.L);
+    }
 
-    if ((State.statsUpdateCounter & 63) == 0) {
+    if (!slowFrame && (State.statsUpdateCounter & 63) == 0) {
         UpdateLuaStats(Api.L);
     }
 
-    if (g_luaAllocReplaced && (State.statsUpdateCounter & 4095) == 0) {
+    if (!slowFrame && g_luaAllocReplaced && (State.statsUpdateCounter & 4095) == 0) {
         LogLuaAllocStats();
     }
 }

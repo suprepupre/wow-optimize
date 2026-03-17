@@ -135,8 +135,8 @@ static void InvalidateWidget(uintptr_t widget, int method) {
 // ================================================================
 
 struct MethodStats {
-    volatile long skipped;
-    volatile long passed;
+    long skipped;
+    long passed;
 };
 
 static MethodStats g_stats[NUM_METHODS] = {};
@@ -282,14 +282,14 @@ static int __cdecl Hooked_SetText(lua_State* L) {
         }
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETTEXT), FNV1a(text, textLen))) {
-            InterlockedIncrement(&g_stats[METHOD_SETTEXT].skipped);
+            g_stats[METHOD_SETTEXT].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_text:
-    InterlockedIncrement(&g_stats[METHOD_SETTEXT].passed);
+    g_stats[METHOD_SETTEXT].passed++;
     return orig_SetText(L);
 }
 
@@ -304,14 +304,14 @@ static int __cdecl Hooked_SetValue(lua_State* L) {
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETVALUE), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETVALUE].skipped);
+            g_stats[METHOD_SETVALUE].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_value:
-    InterlockedIncrement(&g_stats[METHOD_SETVALUE].passed);
+    g_stats[METHOD_SETVALUE].passed++;
     return orig_SetValue(L);
 }
 
@@ -328,7 +328,7 @@ static int __cdecl Hooked_SetMinMax(lua_State* L) {
                       ^ (DoubleBits(api_tonumber(L, 3)) * 0x9E3779B9);
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETMINMAX), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETMINMAX].skipped);
+            g_stats[METHOD_SETMINMAX].skipped++;
             return 0;
         }
         InvalidateWidget((uintptr_t)widget, METHOD_SETVALUE);
@@ -336,7 +336,7 @@ static int __cdecl Hooked_SetMinMax(lua_State* L) {
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_minmax:
-    InterlockedIncrement(&g_stats[METHOD_SETMINMAX].passed);
+    g_stats[METHOD_SETMINMAX].passed++;
     return orig_SetMinMax(L);
 }
 
@@ -356,14 +356,14 @@ static int __cdecl Hooked_SetBarColor(lua_State* L) {
                       ^ (DoubleBits(nargs >= 5 ? api_tonumber(L, 5) : 1.0) * 0x85EBCA6B);
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETBARCOLOR), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETBARCOLOR].skipped);
+            g_stats[METHOD_SETBARCOLOR].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_barcolor:
-    InterlockedIncrement(&g_stats[METHOD_SETBARCOLOR].passed);
+    g_stats[METHOD_SETBARCOLOR].passed++;
     return orig_SetBarColor(L);
 }
 
@@ -383,14 +383,14 @@ static int __cdecl Hooked_SetTextColor(lua_State* L) {
                       ^ (DoubleBits(nargs >= 5 ? api_tonumber(L, 5) : 1.0) * 0x85EBCA6B);
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETTEXTCOLOR), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETTEXTCOLOR].skipped);
+            g_stats[METHOD_SETTEXTCOLOR].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_textcolor:
-    InterlockedIncrement(&g_stats[METHOD_SETTEXTCOLOR].passed);
+    g_stats[METHOD_SETTEXTCOLOR].passed++;
     return orig_SetTextColor(L);
 }
 
@@ -435,14 +435,14 @@ static int __cdecl Hooked_SetTexture(lua_State* L) {
         }
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETTEXTURE), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETTEXTURE].skipped);
+            g_stats[METHOD_SETTEXTURE].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_texture:
-    InterlockedIncrement(&g_stats[METHOD_SETTEXTURE].passed);
+    g_stats[METHOD_SETTEXTURE].passed++;
     return orig_SetTexture(L);
 }
 
@@ -457,14 +457,14 @@ static int __cdecl Hooked_SetAlpha(lua_State* L) {
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETALPHA), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETALPHA].skipped);
+            g_stats[METHOD_SETALPHA].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_alpha:
-    InterlockedIncrement(&g_stats[METHOD_SETALPHA].passed);
+    g_stats[METHOD_SETALPHA].passed++;
     return orig_SetAlpha(L);
 }
 
@@ -479,14 +479,14 @@ static int __cdecl Hooked_SetWidth(lua_State* L) {
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETWIDTH), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETWIDTH].skipped);
+            g_stats[METHOD_SETWIDTH].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_width:
-    InterlockedIncrement(&g_stats[METHOD_SETWIDTH].passed);
+    g_stats[METHOD_SETWIDTH].passed++;
     return orig_SetWidth(L);
 }
 
@@ -501,14 +501,14 @@ static int __cdecl Hooked_SetHeight(lua_State* L) {
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETHEIGHT), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETHEIGHT].skipped);
+            g_stats[METHOD_SETHEIGHT].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_height:
-    InterlockedIncrement(&g_stats[METHOD_SETHEIGHT].passed);
+    g_stats[METHOD_SETHEIGHT].passed++;
     return orig_SetHeight(L);
 }
 
@@ -528,14 +528,14 @@ static int __cdecl Hooked_SetVertexColor(lua_State* L) {
                       ^ (DoubleBits(nargs >= 5 ? api_tonumber(L, 5) : 1.0) * 0x85EBCA6B);
 
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETVERTEXCOLOR), hash)) {
-            InterlockedIncrement(&g_stats[METHOD_SETVERTEXCOLOR].skipped);
+            g_stats[METHOD_SETVERTEXCOLOR].skipped++;
             return 0;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 
 pass_vertexcolor:
-    InterlockedIncrement(&g_stats[METHOD_SETVERTEXCOLOR].passed);
+    g_stats[METHOD_SETVERTEXCOLOR].passed++;
     return orig_SetVertexColor(L);
 }
 

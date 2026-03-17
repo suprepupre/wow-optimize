@@ -25,7 +25,7 @@ bool PrepareFromWorkerThread();
 // Call from hooked_Sleep on main thread.
 // First call: initializes GC + registers functions.
 // Subsequent: incremental GC step.
-void OnMainThreadSleep(DWORD mainThreadId);
+void OnMainThreadSleep(DWORD mainThreadId, double frameMs = 0.0);
 
 // Call on DLL unload.
 void Shutdown();

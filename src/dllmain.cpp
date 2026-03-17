@@ -22,31 +22,96 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // ================================================================
-// Logging
+// Logging — ring buffer + background thread
 // ================================================================
 static FILE* g_log = nullptr;
+
+static constexpr int LOG_RING_SIZE = 2048;
+static constexpr int LOG_RING_MASK = LOG_RING_SIZE - 1;
+
+struct LogEntry {
+    char text[512];
+    volatile LONG ready;
+};
+
+static LogEntry g_logRing[LOG_RING_SIZE] = {};
+static volatile LONG g_logWritePos = 0;
+static LONG g_logReadPos = 0;
+static HANDLE g_logEvent = NULL;
+static HANDLE g_logThread = NULL;
+static volatile bool g_logShutdown = false;
+
+static DWORD WINAPI LogThreadProc(LPVOID) {
+    while (!g_logShutdown) {
+        WaitForSingleObject(g_logEvent, 100);
+        if (!g_log) continue;
+
+        int flushed = 0;
+        while (g_logRing[g_logReadPos & LOG_RING_MASK].ready) {
+            int slot = g_logReadPos & LOG_RING_MASK;
+            fputs(g_logRing[slot].text, g_log);
+            InterlockedExchange(&g_logRing[slot].ready, 0);
+            g_logReadPos++;
+            flushed++;
+        }
+        if (flushed > 0) fflush(g_log);
+    }
+
+    while (g_logRing[g_logReadPos & LOG_RING_MASK].ready) {
+        int slot = g_logReadPos & LOG_RING_MASK;
+        if (g_log) fputs(g_logRing[slot].text, g_log);
+        InterlockedExchange(&g_logRing[slot].ready, 0);
+        g_logReadPos++;
+    }
+    if (g_log) fflush(g_log);
+    return 0;
+}
 
 static void LogOpen() {
     CreateDirectoryA("Logs", NULL);
     g_log = fopen("Logs\\wow_optimize.log", "w");
+    g_logShutdown = false;
+    g_logEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    g_logThread = CreateThread(NULL, 0, LogThreadProc, NULL, 0, NULL);
 }
 
 static void LogClose() {
+    g_logShutdown = true;
+    if (g_logEvent) SetEvent(g_logEvent);
+    if (g_logThread) {
+        WaitForSingleObject(g_logThread, 2000);
+        CloseHandle(g_logThread);
+        g_logThread = NULL;
+    }
+    if (g_logEvent) { CloseHandle(g_logEvent); g_logEvent = NULL; }
     if (g_log) { fclose(g_log); g_log = nullptr; }
 }
 
 extern "C" void Log(const char* fmt, ...) {
-    if (!g_log) return;
+    if (!g_logEvent) return;
+
+    LONG idx = InterlockedIncrement(&g_logWritePos) - 1;
+    int slot = idx & LOG_RING_MASK;
+
+    if (g_logRing[slot].ready) return;
+
     SYSTEMTIME st;
     GetLocalTime(&st);
-    fprintf(g_log, "[%02d:%02d:%02d.%03d] ",
-            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int offset = _snprintf(g_logRing[slot].text, 32, "[%02d:%02d:%02d.%03d] ",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
     va_list args;
     va_start(args, fmt);
-    vfprintf(g_log, fmt, args);
+    int msgLen = _vsnprintf(g_logRing[slot].text + offset, 510 - offset, fmt, args);
     va_end(args);
-    fprintf(g_log, "\n");
-    fflush(g_log);
+    if (msgLen < 0) msgLen = 510 - offset;
+    offset += msgLen;
+
+    g_logRing[slot].text[offset] = '\n';
+    g_logRing[slot].text[offset + 1] = '\0';
+
+    InterlockedExchange(&g_logRing[slot].ready, 1);
+    SetEvent(g_logEvent);
 }
 
 // ================================================================
@@ -181,11 +246,21 @@ static void PreciseSleep(double milliseconds) {
     }
 }
 
+static LARGE_INTEGER g_lastSleepTime = {};
+static double g_lastFrameMs = 0.0;
+
 static void WINAPI hooked_Sleep(DWORD ms) {
     if (ms == 0) { orig_Sleep(0); return; }
 
-    if (ms <= 3 && g_mainThreadId != 0) {
-        LuaOpt::OnMainThreadSleep(g_mainThreadId);
+    if (ms <= 3 && g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (g_lastSleepTime.QuadPart > 0 && g_sleepFreq > 0) {
+            g_lastFrameMs = (double)(now.QuadPart - g_lastSleepTime.QuadPart) / g_sleepFreq;
+        }
+        g_lastSleepTime = now;
+
+        LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
     }
 
@@ -879,7 +954,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     LogOpen();
     Log("========================================");
-    Log("  wow_optimize.dll v1.9.0 BY SUPREMATIST");
+    Log("  wow_optimize.dll v1.10.0 BY SUPREMATIST");
     Log("  PID: %lu", GetCurrentProcessId());
     Log("========================================");
 
@@ -966,12 +1041,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             break;
         case DLL_PROCESS_DETACH:
             if (reserved != NULL) {
-                // Process is terminating — all memory will be freed by OS.
-                // Do NOT touch game memory, hooks, or other DLLs.
-                // Lua VM, WoW heap, and hooked DLLs may already be destroyed.
-                // Just log and exit.
-                Log("wow_optimize.dll: process terminating, skipping cleanup");
-                LogClose();
+                if (g_log) {
+                    SYSTEMTIME st;
+                    GetLocalTime(&st);
+                    fprintf(g_log, "[%02d:%02d:%02d.%03d] wow_optimize.dll: process terminating, skipping cleanup\n",
+                        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+                    fflush(g_log);
+                    fclose(g_log);
+                    g_log = nullptr;
+                }
                 break;
             }
 
