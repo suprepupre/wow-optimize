@@ -1022,6 +1022,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         State.lastModeName = "unknown";
 
         UICache::ClearCache();
+        ApiCache::ClearCache();        
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);

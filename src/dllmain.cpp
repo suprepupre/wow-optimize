@@ -261,7 +261,6 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         }
         g_lastSleepTime = now;
 
-        ApiCache::OnNewFrame();
         LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
     }
