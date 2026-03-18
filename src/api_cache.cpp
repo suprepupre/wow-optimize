@@ -7,8 +7,7 @@
 extern "C" void Log(const char* fmt, ...);
 
 // ================================================================
-//  WoW API Result Cache — GetSpellInfo Permanent Cache
-//
+//  WoW API Result Cache — GetSpellInfo Time-Based Cache
 // ================================================================
 
 typedef struct lua_State lua_State;
@@ -49,6 +48,19 @@ static constexpr uintptr_t ADDR_GetSpellInfo = 0x00540A30;
 static ScriptFunc_fn orig_GetSpellInfo = nullptr;
 
 // ================================================================
+//  QPC timer for TTL
+// ================================================================
+
+static double g_qpcFreqMs = 0.0;
+static constexpr double CACHE_TTL_MS = 500.0;  // 0.5 seconds
+
+static inline double GetNowMs() {
+    LARGE_INTEGER li;
+    QueryPerformanceCounter(&li);
+    return (double)li.QuadPart / g_qpcFreqMs;
+}
+
+// ================================================================
 //  Cache
 // ================================================================
 
@@ -56,18 +68,18 @@ static constexpr int CACHE_SIZE    = 2048;
 static constexpr int CACHE_MASK    = CACHE_SIZE - 1;
 static constexpr int MAX_RETVALS   = 9;
 
-// Generic cached return value — handles string, number, boolean, nil
 struct CachedRetVal {
-    int    type;         // LUA_TSTRING, LUA_TNUMBER, LUA_TBOOLEAN, LUA_TNIL
-    double numVal;       // numbers and booleans (bool stored as 0.0/1.0)
-    char   strVal[96];   // strings (name max ~50, rank ~15, icon ~80)
+    int    type;
+    double numVal;
+    char   strVal[96];
 };
 
 struct SpellCacheEntry {
-    uint32_t     keyHash;   // spellId or FNV-1a of spell name
-    bool         valid;     // entry populated
-    int          retCount;  // original C function return value
-    int          pushed;    // actual values pushed (measured via gettop)
+    uint32_t     keyHash;
+    double       timestamp;    // QPC milliseconds when cached
+    bool         valid;
+    int          retCount;
+    int          pushed;
     CachedRetVal vals[MAX_RETVALS];
 };
 
@@ -96,14 +108,9 @@ static inline uint32_t HashStr(const char* s) {
 
 // ================================================================
 //  Hook: GetSpellInfo(spellId_or_name)
-//
-//  Returns: name, rank, icon, cost, isFunnel, powerType,
-//           castTime, minRange, maxRange  (9 values)
-//  Or: nothing (0 pushed) if spell doesn't exist
 // ================================================================
 
 static int __cdecl Hooked_GetSpellInfo(lua_State* L) {
-    // Compute cache key from argument 1
     uint32_t keyHash;
     int argType = lua_type_(L, 1);
 
@@ -119,39 +126,40 @@ static int __cdecl Hooked_GetSpellInfo(lua_State* L) {
 
     int slot = keyHash & CACHE_MASK;
     SpellCacheEntry* e = &g_cache[slot];
+    double now = GetNowMs();
 
-    // ---- Cache hit ----
-    if (e->valid && e->keyHash == keyHash) {
-        // Replay all cached values in original order
+    // ---- Cache hit: check key match AND time-based TTL ----
+    if (e->valid && e->keyHash == keyHash &&
+        (now - e->timestamp) < CACHE_TTL_MS)
+    {
         for (int i = 0; i < e->pushed; i++) {
             switch (e->vals[i].type) {
-                case LUA_TSTRING:  lua_pushstring_(L, e->vals[i].strVal);          break;
-                case LUA_TNUMBER:  lua_pushnumber_(L, e->vals[i].numVal);          break;
-                case LUA_TBOOLEAN: lua_pushboolean_(L, (int)e->vals[i].numVal);    break;
-                default:           lua_pushnil_(L);                                 break;
+                case LUA_TSTRING:  lua_pushstring_(L, e->vals[i].strVal);       break;
+                case LUA_TNUMBER:  lua_pushnumber_(L, e->vals[i].numVal);       break;
+                case LUA_TBOOLEAN: lua_pushboolean_(L, (int)e->vals[i].numVal); break;
+                default:           lua_pushnil_(L);                              break;
             }
         }
         g_hits++;
         return e->retCount;
     }
 
-    // ---- Cache miss — call original, capture results ----
+    // ---- Cache miss or expired — call original ----
     int topBefore = lua_gettop_(L);
     int ret = orig_GetSpellInfo(L);
     int topAfter = lua_gettop_(L);
     int pushed = topAfter - topBefore;
 
-    // Don't cache unexpected return counts
     if (pushed < 0 || pushed > MAX_RETVALS) {
         g_misses++;
         return ret;
     }
 
-    // Store in cache
-    e->keyHash  = keyHash;
-    e->valid    = true;
-    e->retCount = ret;
-    e->pushed   = pushed;
+    e->keyHash   = keyHash;
+    e->timestamp = now;
+    e->valid     = true;
+    e->retCount  = ret;
+    e->pushed    = pushed;
 
     for (int i = 0; i < pushed; i++) {
         int stackIdx = topBefore + 1 + i;
@@ -178,7 +186,6 @@ static int __cdecl Hooked_GetSpellInfo(lua_State* L) {
             case LUA_TBOOLEAN:
                 e->vals[i].numVal = (double)lua_toboolean_(L, stackIdx);
                 break;
-            // LUA_TNIL: defaults are fine
         }
     }
 
@@ -197,6 +204,11 @@ bool Init() {
     Log("[ApiCache]  WoW API Result Cache");
     Log("[ApiCache]  Build 12340");
     Log("[ApiCache] ====================================");
+
+    // Init QPC frequency
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    g_qpcFreqMs = (double)freq.QuadPart / 1000.0;
 
     MH_STATUS s = MH_CreateHook((void*)ADDR_GetSpellInfo,
                                  (void*)Hooked_GetSpellInfo,
@@ -220,7 +232,7 @@ bool Init() {
 
     Log("[ApiCache] ====================================");
     Log("[ApiCache]  Hooks: 1 active (GetSpellInfo)");
-    Log("[ApiCache]  Cache: %d-slot permanent (cleared on /reload)", CACHE_SIZE);
+    Log("[ApiCache]  Cache: %d slots, TTL %.0fms (QPC-based)", CACHE_SIZE, CACHE_TTL_MS);
     Log("[ApiCache]  [ OK ] ACTIVE");
     Log("[ApiCache] ====================================");
     return true;
@@ -239,8 +251,7 @@ void Shutdown() {
 }
 
 void OnNewFrame() {
-    // No-op — GetSpellInfo cache is permanent (not per-frame)
-    // Reserved for future event-based cache invalidation
+    // No-op — using QPC-based TTL, no frame counter needed
 }
 
 void ClearCache() {
