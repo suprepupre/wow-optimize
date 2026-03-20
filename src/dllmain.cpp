@@ -848,9 +848,9 @@ static void OptimizeThreads() {
     SYSTEM_INFO si; GetSystemInfo(&si);
     DWORD core = (si.dwNumberOfProcessors > 2) ? 1 : 0;
     SetThreadIdealProcessor(hMain, core);
-    SetThreadPriority(hMain, THREAD_PRIORITY_HIGHEST);
+    SetThreadPriority(hMain, THREAD_PRIORITY_ABOVE_NORMAL);
     CloseHandle(hMain);
-    Log("Main thread %lu: ideal core %lu, priority HIGHEST (of %lu cores)", mainTid, core, si.dwNumberOfProcessors);
+    Log("Main thread %lu: ideal core %lu, priority ABOVE_NORMAL (of %lu cores)", mainTid, core, si.dwNumberOfProcessors);
 }
 
 // ================================================================
@@ -938,9 +938,9 @@ static void TryRemoveFPSCap() {
     if (addr) {
         DWORD old;
         if (VirtualProtect((void*)(addr + 1), 4, PAGE_EXECUTE_READWRITE, &old)) {
-            *(uint32_t*)(addr + 1) = 999;
+            *(uint32_t*)(addr + 1) = 300;
             VirtualProtect((void*)(addr + 1), 4, old, &old);
-            Log("FPS cap: changed from 200 to 999 at 0x%08X", (unsigned)addr);
+            Log("FPS cap: changed from 200 to 300 at 0x%08X", (unsigned)addr);
         }
     } else {
         Log("FPS cap: signature not found (may be a different build)");
@@ -955,7 +955,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     LogOpen();
     Log("========================================");
-    Log("  wow_optimize.dll v2.0.0 BY SUPREMATIST");
+    Log("  wow_optimize.dll v2.0.1 BY SUPREMATIST");
     Log("  PID: %lu", GetCurrentProcessId());
     Log("========================================");
 
@@ -1027,12 +1027,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
     Log("  [ OK ] Process priority (Above Normal)");
-    Log("  [ OK ] FPS cap removal (200 -> 999)");
+    Log("  [ OK ] FPS cap removal (200 -> 300)");
     Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
-    Log("  [%s] FontString SetText cache",    uiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] UI widget cache",             uiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] API result cache (9 funcs)",  apiCacheOk  ? " OK " : "SKIP");
+    Log("  [%s] UI widget cache (10 hooks)",  uiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] API cache (GetSpellInfo)",    apiCacheOk  ? " OK " : "SKIP");
 
     return 0;
 }

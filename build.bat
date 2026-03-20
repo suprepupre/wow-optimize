@@ -1,15 +1,15 @@
 @echo off
 echo ============================================
-echo   wow_optimize v1.8.0 build script
+echo   wow_optimize v2.0.1 build script
 echo   Builds: wow_optimize.dll + version.dll
-echo   Requires: Visual Studio 2022 + CMake
+echo   Requires: Visual Studio 2026 + CMake
 echo ============================================
 echo.
 
 where cmake >nul 2>nul
 if errorlevel 1 (
     echo ERROR: CMake not found.
-    echo Install Visual Studio 2022 with "Desktop development with C++"
+    echo Install Visual Studio 2026 with "Desktop development with C++"
     pause
     exit /b 1
 )
@@ -18,7 +18,7 @@ if not exist build mkdir build
 cd build
 
 echo [1/3] Configuring (32-bit)...
-cmake -G "Visual Studio 17 2022" -A Win32 .. 2>&1
+cmake -G "Visual Studio 18 2026" -A Win32 .. 2>&1
 if errorlevel 1 (
     rd /s /q CMakeFiles
     del /q CMakeCache.txt
