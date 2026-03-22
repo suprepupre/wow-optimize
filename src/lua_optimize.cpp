@@ -582,8 +582,21 @@ static int GetCurrentStepKB() {
     return Config.normalStepKB;
 }
 
+static int g_loadingGraceFrames = 0;
+
 static void StepGC(lua_State* L) {
     if (!State.gcOptimized || !Api.lua_gc) return;
+
+    // Skip GC for first 30 frames after entering loading mode
+    // Zone transitions are fragile — Lua VM is in transitional state
+    if (Config.isLoading) {
+        if (g_loadingGraceFrames < 30) {
+            g_loadingGraceFrames++;
+            return;
+        }
+    } else {
+        g_loadingGraceFrames = 0;
+    }
 
     if (g_gcPerfFreq.QuadPart == 0) {
         QueryPerformanceFrequency(&g_gcPerfFreq);
@@ -623,13 +636,13 @@ static void StepGC(lua_State* L) {
         }
     } else if (g_smoothedGcMs < 0.6) {
         if (Config.isLoading) {
-            if (Config.loadingStepKB < 512) Config.loadingStepKB += 8;
+            if (Config.loadingStepKB < 300) Config.loadingStepKB += 8;
         } else if (Config.inCombat) {
-            if (Config.combatStepKB < 30) Config.combatStepKB += 1;
+            if (Config.combatStepKB < 24) Config.combatStepKB += 1;
         } else if (Config.isIdle) {
-            if (Config.idleStepKB < 300) Config.idleStepKB += 4;
+            if (Config.idleStepKB < 256) Config.idleStepKB += 4;
         } else {
-            if (Config.normalStepKB < 128) Config.normalStepKB += 2;
+            if (Config.normalStepKB < 100) Config.normalStepKB += 2;
         }
     }
 
@@ -640,7 +653,7 @@ static void StepGC(lua_State* L) {
         State.luaMemoryKB = kb + (b / 1024.0);
     }
 
-    if (State.luaMemoryKB > 200 * 1024) {
+    if (State.luaMemoryKB > 200 * 1024 && !Config.isLoading) {
         Api.lua_gc(L, LUA_GCCOLLECT, 0);
         State.fullCollects++;
         Log("[LuaOpt] EMERGENCY GC: memory was %.1f MB", State.luaMemoryKB / 1024.0);

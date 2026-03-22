@@ -271,7 +271,7 @@ static ScriptFunc_fn orig_SetVertexColor = nullptr;  static uintptr_t addr_SetVe
 static int __cdecl Hooked_SetText(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_text;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_text;
 
         size_t textLen = 0;
         const char* text = api_tolstring(L, 2, &textLen);
@@ -300,7 +300,7 @@ pass_text:
 static int __cdecl Hooked_SetValue(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_value;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_value;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETVALUE), hash)) {
@@ -322,7 +322,7 @@ pass_value:
 static int __cdecl Hooked_SetMinMax(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_minmax;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_minmax;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
                       ^ (DoubleBits(api_tonumber(L, 3)) * 0x9E3779B9);
@@ -347,7 +347,7 @@ pass_minmax:
 static int __cdecl Hooked_SetBarColor(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_barcolor;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_barcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
@@ -374,7 +374,7 @@ pass_barcolor:
 static int __cdecl Hooked_SetTextColor(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_textcolor;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_textcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
@@ -406,7 +406,7 @@ pass_textcolor:
 static int __cdecl Hooked_SetTexture(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_texture;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_texture;
 
         int nargs = api_gettop(L);
         int argType = api_type(L, 2);
@@ -453,7 +453,7 @@ pass_texture:
 static int __cdecl Hooked_SetAlpha(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_alpha;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_alpha;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETALPHA), hash)) {
@@ -475,7 +475,7 @@ pass_alpha:
 static int __cdecl Hooked_SetWidth(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_width;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_width;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETWIDTH), hash)) {
@@ -497,7 +497,7 @@ pass_width:
 static int __cdecl Hooked_SetHeight(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_height;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_height;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETHEIGHT), hash)) {
@@ -519,7 +519,7 @@ pass_height:
 static int __cdecl Hooked_SetVertexColor(lua_State* L) {
     __try {
         void* widget = api_getwidget(L, 1);
-        if (!widget) goto pass_vertexcolor;
+        if (!widget || (uintptr_t)widget < 0x10000) goto pass_vertexcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))

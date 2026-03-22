@@ -586,6 +586,8 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         nBytesToRead >= READ_AHEAD_SIZE)
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
+    __try {
+
     EnterCriticalSection(&g_cacheLock);
 
     LARGE_INTEGER currentPos, zero;
@@ -634,6 +636,12 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
 
     LeaveCriticalSection(&g_cacheLock);
     return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
+
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        // If anything crashes in cache logic, bypass cache entirely
+        __try { LeaveCriticalSection(&g_cacheLock); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
+    }
 }
 
 static bool InstallReadFileHook() {
