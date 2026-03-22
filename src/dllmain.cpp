@@ -1061,7 +1061,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
             // Dynamic FreeLibrary — safe to clean up
             ApiCache::Shutdown();            
-            UICache::Shutdown();            
+            UICache::Shutdown();                       
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();
             MH_DisableHook(MH_ALL_HOOKS);

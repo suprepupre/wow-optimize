@@ -777,6 +777,7 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_HITS",   (double)apiStats.hits);
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_MISSES", (double)apiStats.misses);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_APICACHE_ACTIVE", apiStats.active);
+ 
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -789,7 +790,7 @@ static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LOADED",    true);
-            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "2.0.0");
+            WriteLuaGlobal_String(L, "LUABOOST_DLL_VERSION",   "2.1.0");
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_GC_ACTIVE", State.gcOptimized);
             WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_LUA_ALLOC", g_luaAllocReplaced);
             Log("[LuaOpt] Set DLL globals via Lua API (no FrameScript)");
@@ -800,7 +801,7 @@ static void SetupLuaInterface(lua_State* L) {
     __try {
         Api.FrameScript_Execute(
             "LUABOOST_DLL_LOADED = true "
-            "LUABOOST_DLL_VERSION = '2.0.0' "
+            "LUABOOST_DLL_VERSION = '2.1.0' "
 
             "if LUABOOST_ADDON_COMBAT  == nil then LUABOOST_ADDON_COMBAT  = false end "
             "if LUABOOST_ADDON_IDLE    == nil then LUABOOST_ADDON_IDLE    = false end "
@@ -1022,7 +1023,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         State.lastModeName = "unknown";
 
         UICache::ClearCache();
-        ApiCache::ClearCache();        
+        ApiCache::ClearCache();
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);
@@ -1036,6 +1037,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         g_smoothedGcMs = 0.5;
         return;
     }
+
 
     // Read addon state every 16 frames (~4-5 reads/sec at 60fps)
     // Combat/idle/loading state changes at most a few times per minute
