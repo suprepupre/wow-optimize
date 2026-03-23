@@ -83,7 +83,7 @@ static constexpr int MAX_RETVALS   = 11;  // GetItemInfo returns up to 11
 struct CachedRetVal {
     int    type;
     double numVal;
-    char   strVal[128];  // item links can be ~100 chars
+    char   strVal[512];  // item links with gems/enchants can reach 200+ chars
 };
 
 struct CacheEntry {
@@ -146,11 +146,14 @@ static void CaptureReturnValues(lua_State* L, CacheEntry* e,
 
         switch (t) {
             case LUA_TSTRING: {
-                const char* s = lua_tolstring_(L, stackIdx, NULL);
-                if (s) {
-                    strncpy(e->vals[i].strVal, s, sizeof(e->vals[i].strVal) - 1);
-                    e->vals[i].strVal[sizeof(e->vals[i].strVal) - 1] = '\0';
+                size_t slen = 0;
+                const char* s = lua_tolstring_(L, stackIdx, &slen);
+                if (s && slen < sizeof(e->vals[i].strVal)) {
+                    memcpy(e->vals[i].strVal, s, slen);
+                    e->vals[i].strVal[slen] = '\0';
                 } else {
+                    // String is NULL or too long to cache — mark as nil
+                    // so we don't serve truncated data
                     e->vals[i].type = LUA_TNIL;
                 }
                 break;
@@ -270,12 +273,13 @@ static int __cdecl Hooked_GetItemInfo(lua_State* L) {
     int topAfter = lua_gettop_(L);
     int pushed = topAfter - topBefore;
 
-    // Only cache if something was returned (not nil/empty)
-    // This prevents permanently caching "item not loaded yet" responses
-    if (pushed > 0 && pushed <= MAX_RETVALS) {
-        // Extra check: first return value should be a string (item name)
-        // If it's nil, the item data isn't loaded yet — don't cache
-        if (lua_type_(L, topBefore + 1) == LUA_TSTRING) {
+    // Only cache if all expected data was returned
+    // GetItemInfo returns 11 values when item data is fully loaded
+    // Fewer values means partial data — don't cache
+    if (pushed >= 10 && pushed <= MAX_RETVALS) {
+        // Verify: first value = name (string), second value = link (string)
+        if (lua_type_(L, topBefore + 1) == LUA_TSTRING &&
+            lua_type_(L, topBefore + 2) == LUA_TSTRING) {
             CaptureReturnValues(L, e, keyHash, 0.0, ret, topBefore, pushed);
         }
     }

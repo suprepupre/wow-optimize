@@ -33,6 +33,8 @@ add_library(wow_optimize SHARED
     src/ui_cache.h
     src/api_cache.cpp
     src/api_cache.h
+    src/lua_fastpath.cpp
+    src/lua_fastpath.h
 )
 
 target_link_libraries(wow_optimize PRIVATE

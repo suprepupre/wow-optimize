@@ -13,6 +13,7 @@
 #include <intrin.h>
 #include "ui_cache.h"
 #include "api_cache.h"
+#include "lua_fastpath.h"
 
 #include "MinHook.h"
 #include <mimalloc.h>
@@ -1018,6 +1019,15 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- API Cache ---");
     bool apiCacheOk = ApiCache::Init();
 
+    bool fastPathOk = false;
+    Log("");
+    Log("--- Lua Fast Path ---");
+    __try {
+        fastPathOk = LuaFastPath::Init();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("[FastPath] EXCEPTION 0x%08X — SKIPPED", GetExceptionCode());
+    }
+
     Log("");
     Log("========================================");
     Log("  Initialization complete");
@@ -1040,6 +1050,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
     Log("  [%s] UI widget cache (10 hooks)",  uiCacheOk   ? " OK " : "SKIP");
     Log("  [%s] API cache (SpellInfo+ItemInfo)", apiCacheOk ? " OK " : "SKIP");
+    Log("  [%s] Lua fast path (format+math)", fastPathOk  ? " OK " : "SKIP");
 
     return 0;
 }
@@ -1068,6 +1079,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             }
 
             // Dynamic FreeLibrary — safe to clean up
+            LuaFastPath::Shutdown();            
             ApiCache::Shutdown();            
             UICache::Shutdown();                       
             CombatLogOpt::Shutdown();

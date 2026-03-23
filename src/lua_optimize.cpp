@@ -2,6 +2,8 @@
 #include "combatlog_optimize.h"
 #include "ui_cache.h"
 #include "api_cache.h"
+#include "lua_fastpath.h"
+
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -790,6 +792,11 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_HITS",   (double)apiStats.hits);
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_APICACHE_MISSES", (double)apiStats.misses);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_APICACHE_ACTIVE", apiStats.active);
+
+        LuaFastPath::Stats fpStats = LuaFastPath::GetStats();
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_HITS",      (double)fpStats.formatFastHits);
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_FALLBACKS", (double)fpStats.formatFallbacks);
+        WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_FASTPATH_ACTIVE",    fpStats.active);
  
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -864,6 +871,12 @@ static void SetupLuaInterface(lua_State* L) {
             "    LUABOOST_DLL_APICACHE_HITS or 0, "
             "    LUABOOST_DLL_APICACHE_MISSES or 0, "
             "    LUABOOST_DLL_APICACHE_ACTIVE or false "
+            "end "
+            "function LuaBoostC_GetFastPathStats() "
+            "  return "
+            "    LUABOOST_DLL_FASTPATH_HITS or 0, "
+            "    LUABOOST_DLL_FASTPATH_FALLBACKS or 0, "
+            "    LUABOOST_DLL_FASTPATH_ACTIVE or false "
             "end ",
             "LuaOpt", 0
         );
