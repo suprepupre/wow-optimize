@@ -20,6 +20,8 @@
 #include "lua_optimize.h"
 #include "combatlog_optimize.h"
 
+#include "version.h"
+
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
@@ -964,7 +966,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     LogOpen();
     Log("========================================");
-    Log("  wow_optimize.dll v2.0.1 BY SUPREMATIST");
+    Log("  wow_optimize.dll v%s BY %s", WOW_OPTIMIZE_VERSION_STR, WOW_OPTIMIZE_AUTHOR);
     Log("  PID: %lu", GetCurrentProcessId());
     Log("========================================");
 
@@ -1050,7 +1052,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
     Log("  [%s] UI widget cache (10 hooks)",  uiCacheOk   ? " OK " : "SKIP");
     Log("  [%s] API cache (SpellInfo+ItemInfo)", apiCacheOk ? " OK " : "SKIP");
-    Log("  [%s] Lua fast path (format+math)", fastPathOk  ? " OK " : "SKIP");
+    Log("  [%s] Lua fast path (format)", fastPathOk  ? " OK " : "SKIP");
 
     return 0;
 }

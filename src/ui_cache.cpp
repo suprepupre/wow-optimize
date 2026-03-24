@@ -16,19 +16,43 @@ typedef struct lua_State lua_State;
 typedef double lua_Number;
 
 typedef const char* (__cdecl *fn_lua_tolstring)(lua_State* L, int index, size_t* len);
-typedef void*       (__cdecl *fn_lua_touserdata)(lua_State* L, int index);
 typedef lua_Number  (__cdecl *fn_lua_tonumber)(lua_State* L, int index);
 typedef int         (__cdecl *fn_lua_gettop)(lua_State* L);
 typedef int         (__cdecl *fn_lua_type)(lua_State* L, int index);
 
 static fn_lua_tolstring   api_tolstring = (fn_lua_tolstring)0x0084E0E0;
-static fn_lua_touserdata  api_getwidget = (fn_lua_touserdata)0x0084E150;
 static fn_lua_tonumber    api_tonumber  = (fn_lua_tonumber)0x0084E030;
 static fn_lua_gettop      api_gettop    = (fn_lua_gettop)0x0084DBD0;
 static fn_lua_type        api_type      = (fn_lua_type)0x0084DEB0;
 
-#define LUA_TSTRING  4
 #define LUA_TNUMBER  3
+#define LUA_TSTRING  4
+#define LUA_TTABLE   5
+#define LUA_TUSERDATA 7
+
+// ================================================================
+//  Widget Identity — Direct Lua Stack Read
+//
+//  For tables (WoW frames): value.gc = GCObject* = Table*
+//  This pointer is stable and unique per Lua table object.
+// ================================================================
+
+static inline void* GetWidgetIdentity(lua_State* L) {
+    __try {
+        uintptr_t base = *(uintptr_t*)((uintptr_t)L + 0x10);
+        if (!base || base < 0x10000) return nullptr;
+
+        int tt = *(int*)(base + 8);
+
+        if (tt == LUA_TTABLE || tt == LUA_TUSERDATA) {
+            void* identity = *(void**)base;
+            if (identity && (uintptr_t)identity >= 0x10000)
+                return identity;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
+}
 
 // ================================================================
 //  FNV-1a Hash
@@ -44,9 +68,15 @@ static inline uint32_t FNV1a(const char* str, size_t len) {
 }
 
 static inline uint32_t DoubleBits(double val) {
+    if (val >= -2147483648.0 && val <= 2147483647.0) {
+        int iv = (int)val;
+        if ((double)iv == val) {
+            return (uint32_t)iv;
+        }
+    }
     float f = (float)val;
     uint32_t bits;
-    memcpy(&bits, &f, 4);
+    memcpy(&bits, &f, sizeof(bits));
     return bits;
 }
 
@@ -66,10 +96,9 @@ static constexpr int METHOD_SETHEIGHT       = 8;
 static constexpr int METHOD_SETVERTEXCOLOR  = 9;
 static constexpr int NUM_METHODS            = 10;
 
-// BUGFIX #7: 32768 slots (128KB) — room for 2000+ widgets × 7 methods
 static constexpr int CACHE_SIZE  = 32768;
 static constexpr int CACHE_MASK  = CACHE_SIZE - 1;
-static constexpr int CACHE_PROBE = 4;   // lower probe depth OK at lower load factor
+static constexpr int CACHE_PROBE = 4;
 
 struct CacheEntry {
     uint64_t  key;
@@ -83,8 +112,6 @@ static inline uint64_t MakeKey(uintptr_t widget, int method) {
     return ((uint64_t)widget << 4) | (uint64_t)method;
 }
 
-
-// BUGFIX #8: murmur-style finalizer for better avalanche
 static inline int CacheSlot(uint64_t key) {
     uint32_t k = (uint32_t)(key >> 4) ^ (uint32_t)(key);
     k ^= k >> 16;
@@ -109,7 +136,6 @@ static bool CheckAndUpdate(uint64_t key, uint32_t hash) {
             return false;
         }
     }
-    // BUGFIX #6: all probe slots occupied by other keys — evict last slot
     int evict = (slot + CACHE_PROBE - 1) & CACHE_MASK;
     g_cache[evict].key  = key;
     g_cache[evict].hash = hash;
@@ -270,8 +296,8 @@ static ScriptFunc_fn orig_SetVertexColor = nullptr;  static uintptr_t addr_SetVe
 
 static int __cdecl Hooked_SetText(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_text;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_text;
 
         size_t textLen = 0;
         const char* text = api_tolstring(L, 2, &textLen);
@@ -299,11 +325,14 @@ pass_text:
 
 static int __cdecl Hooked_SetValue(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_value;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_value;
 
-        uint32_t hash = DoubleBits(api_tonumber(L, 2));
-        if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETVALUE), hash)) {
+        double val = api_tonumber(L, 2);
+        uint32_t hash = DoubleBits(val);
+        uint64_t key = MakeKey((uintptr_t)widget, METHOD_SETVALUE);
+
+        if (CheckAndUpdate(key, hash)) {
             g_stats[METHOD_SETVALUE].skipped++;
             return 0;
         }
@@ -321,8 +350,8 @@ pass_value:
 
 static int __cdecl Hooked_SetMinMax(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_minmax;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_minmax;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
                       ^ (DoubleBits(api_tonumber(L, 3)) * 0x9E3779B9);
@@ -346,8 +375,8 @@ pass_minmax:
 
 static int __cdecl Hooked_SetBarColor(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_barcolor;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_barcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
@@ -373,8 +402,8 @@ pass_barcolor:
 
 static int __cdecl Hooked_SetTextColor(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_textcolor;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_textcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
@@ -396,17 +425,12 @@ pass_textcolor:
 
 // ================================================================
 //  Hook: Texture:SetTexture(path_or_id)
-//
-//  Arg 2 can be:
-//    string  — texture path ("Interface\\Icons\\...")
-//    number  — texture file ID
-//    nil     — clear texture
 // ================================================================
 
 static int __cdecl Hooked_SetTexture(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_texture;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_texture;
 
         int nargs = api_gettop(L);
         int argType = api_type(L, 2);
@@ -452,8 +476,8 @@ pass_texture:
 
 static int __cdecl Hooked_SetAlpha(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_alpha;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_alpha;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETALPHA), hash)) {
@@ -474,8 +498,8 @@ pass_alpha:
 
 static int __cdecl Hooked_SetWidth(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_width;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_width;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETWIDTH), hash)) {
@@ -496,8 +520,8 @@ pass_width:
 
 static int __cdecl Hooked_SetHeight(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_height;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_height;
 
         uint32_t hash = DoubleBits(api_tonumber(L, 2));
         if (CheckAndUpdate(MakeKey((uintptr_t)widget, METHOD_SETHEIGHT), hash)) {
@@ -518,8 +542,8 @@ pass_height:
 
 static int __cdecl Hooked_SetVertexColor(lua_State* L) {
     __try {
-        void* widget = api_getwidget(L, 1);
-        if (!widget || (uintptr_t)widget < 0x10000) goto pass_vertexcolor;
+        void* widget = GetWidgetIdentity(L);
+        if (!widget) goto pass_vertexcolor;
 
         int nargs = api_gettop(L);
         uint32_t hash = DoubleBits(api_tonumber(L, 2))
@@ -576,6 +600,7 @@ namespace UICache {
 bool Init() {
     Log("[UICache] ====================================");
     Log("[UICache]  UI Widget Cache (auto-discover)");
+    Log("[UICache]  Widget identity: direct Lua stack read");
     Log("[UICache] ====================================");
 
     HMODULE hWow = GetModuleHandleA(NULL);
@@ -591,7 +616,7 @@ bool Init() {
     Log("[UICache] Scanning Wow.exe (0x%08X, %u bytes)...",
         (unsigned)base, (unsigned)size);
 
-    // --- FontString neighbors (shared by SetText and SetTextColor) ---
+    // --- FontString neighbors ---
     const char* fontStringNeighbors[] = {
         "GetText", "SetFont", "SetTextColor", "SetTextHeight",
         "GetStringWidth", "SetAlpha", "GetAlpha", "SetJustifyH",
@@ -618,7 +643,7 @@ bool Init() {
         NULL
     };
 
-    // --- Region neighbors (SetAlpha is on Region base class) ---
+    // --- Region neighbors ---
     const char* regionNeighbors[] = {
         "GetAlpha", "SetPoint", "GetPoint", "ClearAllPoints",
         "SetWidth", "SetHeight", "GetWidth", "GetHeight",
@@ -658,6 +683,7 @@ bool Init() {
     dr = DiscoverMethod("SetAlpha", regionNeighbors, 3, base, size);
     addr_SetAlpha = dr.funcAddr;
     if (dr.funcAddr) Log("[UICache]   Region:SetAlpha         matched %d neighbors", dr.matchCount);
+
     dr = DiscoverMethod("SetWidth", regionNeighbors, 3, base, size);
     addr_SetWidth = dr.funcAddr;
     if (dr.funcAddr) Log("[UICache]   Region:SetWidth         matched %d neighbors", dr.matchCount);
@@ -668,7 +694,7 @@ bool Init() {
 
     dr = DiscoverMethod("SetVertexColor", textureNeighbors, 3, base, size);
     addr_SetVertexColor = dr.funcAddr;
-    if (dr.funcAddr) Log("[UICache]   Texture:SetVertexColor  matched %d neighbors", dr.matchCount);    
+    if (dr.funcAddr) Log("[UICache]   Texture:SetVertexColor  matched %d neighbors", dr.matchCount);
 
     // Install hooks
     Log("[UICache] Installing hooks...");
@@ -681,8 +707,8 @@ bool Init() {
     if (InstallHook("FontString:SetTextColor",      addr_SetTextColor,(void*)Hooked_SetTextColor,(void**)&orig_SetTextColor))hooked++;
     if (InstallHook("Texture:SetTexture",           addr_SetTexture,  (void*)Hooked_SetTexture,  (void**)&orig_SetTexture))  hooked++;
     if (InstallHook("Region:SetAlpha",              addr_SetAlpha,    (void*)Hooked_SetAlpha,    (void**)&orig_SetAlpha))    hooked++;
-    if (InstallHook("Region:SetWidth",              addr_SetWidth,       (void*)Hooked_SetWidth,       (void**)&orig_SetWidth))       hooked++;
-    if (InstallHook("Region:SetHeight",             addr_SetHeight,      (void*)Hooked_SetHeight,      (void**)&orig_SetHeight))      hooked++;
+    if (InstallHook("Region:SetWidth",              addr_SetWidth,    (void*)Hooked_SetWidth,    (void**)&orig_SetWidth))    hooked++;
+    if (InstallHook("Region:SetHeight",             addr_SetHeight,   (void*)Hooked_SetHeight,   (void**)&orig_SetHeight))  hooked++;
     if (InstallHook("Texture:SetVertexColor",       addr_SetVertexColor, (void*)Hooked_SetVertexColor, (void**)&orig_SetVertexColor)) hooked++;
 
     if (hooked == 0) {
@@ -695,6 +721,7 @@ bool Init() {
     Log("[UICache] ====================================");
     Log("[UICache]  Hooks: %d/10 active", hooked);
     Log("[UICache]  Cache: %d slots, FNV-1a + float-bits hash", CACHE_SIZE);
+    Log("[UICache]  Identity: L->base[0].gc (direct stack read)");
     Log("[UICache]  Taint: SAFE (C-level hooks, invisible to Lua)");
     Log("[UICache]  [ OK ] ACTIVE");
     Log("[UICache] ====================================");
@@ -707,7 +734,6 @@ void ClearCache() {
     memset(g_cache, 0, sizeof(g_cache));
 }
 
-
 void Shutdown() {
     if (!g_active) return;
 
@@ -718,9 +744,9 @@ void Shutdown() {
     if (addr_SetTextColor)MH_DisableHook((void*)addr_SetTextColor);
     if (addr_SetTexture)  MH_DisableHook((void*)addr_SetTexture);
     if (addr_SetAlpha)    MH_DisableHook((void*)addr_SetAlpha);
-    if (addr_SetWidth)       MH_DisableHook((void*)addr_SetWidth);
-    if (addr_SetHeight)      MH_DisableHook((void*)addr_SetHeight);
-    if (addr_SetVertexColor) MH_DisableHook((void*)addr_SetVertexColor);    
+    if (addr_SetWidth)    MH_DisableHook((void*)addr_SetWidth);
+    if (addr_SetHeight)   MH_DisableHook((void*)addr_SetHeight);
+    if (addr_SetVertexColor) MH_DisableHook((void*)addr_SetVertexColor);
 
     g_active = false;
 

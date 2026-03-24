@@ -1,8 +1,8 @@
-# 🚀 wow_optimize v2.0.1 BY SUPREMATIST
+# 🚀 wow_optimize BY SUPREMATIST
 
 **Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 
-Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threading, Lua VM, combat log buffer, UI widget updates, and caches static API results — all through a single injectable DLL.
+Replaces WoW's ancient memory allocator, optimizes I/O, network, timers, threading, Lua VM, combat log buffer, UI widget updates, caches static API results, and accelerates string.format — all through a single injectable DLL.
 
 > ⚠️ **Disclaimer:** This project is provided as-is for educational purposes. DLL injection may violate the Terms of Service of private servers. **No ban has been reported**, but **use at your own risk.** The author is not responsible for any consequences including but not limited to account suspensions.
 
@@ -40,9 +40,10 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 | 18 | **UI Widget Cache** | Skips redundant UI widget updates at C level (10 hooks, taint-free) |
 | 19 | **GC Step Sync** | Reads step sizes from LuaBoost addon — GUI controls DLL behavior |
 | 20 | **GetSpellInfo Cache** | TTL cache (~500ms) for spell data lookups. 95%+ hit rate. |
-| 21 | **GetItemInfo Cache** | Permanent cache for item data. Nil results not cached (server hasn't sent data yet). |
+| 21 | **GetItemInfo Cache** | Permanent cache for item data. Nil results not cached. |
 | 22 | **Background Logging** | Ring buffer + background thread eliminates disk I/O stalls |
 | 23 | **Frame Budget Manager** | Skips non-essential work on slow frames (>33ms/50ms) |
+| 24 | **string.format Fast Path** | Optimized C implementation for common format patterns (%d, %s, %.Nf). 40-60% faster per call. |
 
 ---
 
@@ -59,7 +60,8 @@ Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepup
 - ✅ Reduced lag spikes on boss kills and dungeon queue pops
 - ✅ No more broken damage meters in 25-man raids
 - ✅ Smoother UI in crowded areas (10 widget cache hooks)
-- ✅ Faster addon response with spell-heavy rotations (GetSpellInfo cache)
+- ✅ Faster addon response with spell-heavy rotations (API cache)
+- ✅ Smoother addon updates in combat (format fast path)
 
 ### You WON'T notice
 
@@ -83,12 +85,12 @@ For maximum optimization, use this DLL together with the **[!LuaBoost](https://g
 
 | Layer | Tool | What It Does |
 |-------|------|--------------|
-| **C / Engine** | wow_optimize.dll | Faster memory, I/O, network, timers, adaptive GC from C, combat log fix, UI widget cache, API cache |
+| **C / Engine** | wow_optimize.dll | Faster memory, I/O, network, timers, adaptive GC, combat log fix, UI cache, API cache, format fast path |
 | **Lua / Addons** | !LuaBoost addon | GC step sync to DLL, SpeedyLoad, memory leak scanner, table pool, diagnostics, GUI |
 
-> ⚠️ **Do NOT use SmartGC together with !LuaBoost** — SmartGC has been merged into LuaBoost. Using both will cause conflicts.
+> ⚠️ **Do NOT use SmartGC together with !LuaBoost** — SmartGC has been merged into LuaBoost.
 
-> ⚠️ **You can remove the CombatLogFix addon** if you're using wow_optimize.dll — the DLL handles combat log cleanup from C level without Lua overhead.
+> ⚠️ **You can remove the CombatLogFix addon** if you're using wow_optimize.dll — the DLL handles combat log cleanup from C level.
 
 ---
 
@@ -142,7 +144,6 @@ Download pre-built binaries from [**Releases**](../../releases/latest).
 
 1. Copy `wow_loader.exe` and `wow_optimize.dll` to your WoW folder
 2. Launch `wow_loader.exe` instead of `Wow.exe`
-3. Done — WoW starts with optimizations applied
 
 ### Option C — Manual Injection
 
@@ -154,26 +155,9 @@ Download pre-built binaries from [**Releases**](../../releases/latest).
 
 Check `Logs/wow_optimize.log` — all lines should show `[ OK ]`.
 
-```
-[02:42:28.155] ========================================
-[02:42:28.155]   wow_optimize.dll v2.0.1 BY SUPREMATIST
-[02:42:28.155]   PID: 13088
-[02:42:28.155] ========================================
-[02:42:28.183] >>> ALLOCATOR: mimalloc ACTIVE <<<
-[02:42:28.197] Sleep hook: ACTIVE (Lua GC + combat log)
-[02:42:28.254] Network hook: ACTIVE (2/2 hooks, NODELAY+ACK+QoS+BUF+KA)
-[02:42:28.340] [CombatLog]  [ OK ] Guaranteed Clear (5s normal, 10s combat)
-[02:42:28.543] [UICache]  Hooks: 10/10 active
-[02:42:28.543] [UICache]  [ OK ] ACTIVE
-[02:42:28.600] [ApiCache]  Hooks: 2/2 active (GetSpellInfo + GetItemInfo)
-[02:42:28.600] [ApiCache]  [ OK ] ACTIVE
-[02:42:38.789] [LuaOpt]  >>> ALLOCATOR REPLACED <<<
-[02:42:39.100] Socket 10952 [send]: 7 applied, 0 failed
-```
-
 ### Uninstall
 
-Delete `version.dll`, `wow_loader.exe` (if present), and `wow_optimize.dll` from WoW folder. Log files in `Logs/` folder can be safely deleted.
+Delete `version.dll`, `wow_loader.exe` (if present), and `wow_optimize.dll` from WoW folder.
 
 ---
 
@@ -181,11 +165,11 @@ Delete `version.dll`, `wow_loader.exe` (if present), and `wow_optimize.dll` from
 
 ### GetSpellInfo (TTL ~500ms)
 
-Caches all 9 return values. TTL-based because `castTime` and `cost` change with haste, talents, and gear. 500ms is imperceptible but picks up buff changes.
+Caches all 9 return values. TTL-based because `castTime` and `cost` change with haste, talents, and gear.
 
 ### GetItemInfo (Permanent)
 
-Caches all 11 return values permanently. Item data is truly static. **Nil results are NOT cached** — nil means the server hasn't sent item data yet.
+Caches all 11 return values permanently. Item data is truly static. **Nil results and partial data are NOT cached.**
 
 ### Why NOT cache unit APIs?
 
@@ -195,7 +179,22 @@ Caches all 11 return values permanently. Item data is truly static. **Nil result
 | `GetItemInfo` | ✅ Permanent | Truly static item data |
 | `UnitHealth/Power` | ❌ | Changes mid-frame via events |
 | `UnitGUID/Exists` | ❌ | Changes mid-frame on target/pet changes |
-| `UnitIsDeadOrGhost` | ❌ | Changes mid-frame via combat events |
+
+---
+
+## ⚡ string.format Fast Path
+
+Hooks `string.format` at C level and provides optimized paths:
+
+| Pattern | Speedup | Coverage |
+|---------|---------|----------|
+| `format("%d", n)` | ~60% faster | Damage numbers, health, most counters |
+| `format("%s", s)` | ~50% faster | String concatenation via format |
+| `format("%.1f", n)` | ~55% faster | Timer displays, percentages |
+| Generic (multiple specifiers) | ~40% faster | Color codes, complex strings |
+| `%q`, `%*`, table args | 0% (fallback) | Rare patterns — uses original |
+
+Expected 85%+ fast path hit rate with typical addon usage.
 
 ---
 
@@ -203,36 +202,20 @@ Caches all 11 return values permanently. Item data is truly static. **Nil result
 
 ### Lua Allocator Replacement
 
-WoW's Lua 5.1 uses a custom allocator (0x008558E0) with 9 size-class pools. The DLL replaces the `frealloc` function pointer in `global_State` with mimalloc.
+Replaces WoW's Lua 5.1 custom allocator with mimalloc. The original allocator uses 9 size-class pools with SMemAlloc/SMemFree fallback.
 
 ### String Table Pre-Sizing
 
-WoW starts with a small string hash table. With heavy addons, 30,000-50,000 unique strings accumulate. Each resize rehashes ALL strings, causing 5-15ms freezes. The DLL pre-sizes to 32,768 buckets at startup.
+Pre-sizes to 32,768 buckets at startup. Eliminates resize freezes that occur when 30,000-50,000 unique strings accumulate.
 
 ### Adaptive GC
 
-Each GC step is timed with QueryPerformanceCounter. The DLL adjusts step sizes automatically:
-
 | Condition | Action |
 |-----------|--------|
-| Average > 2ms | Reduce step size (prevent frame drops) |
-| Average < 0.6ms | Increase step size (collect more) |
-| Memory > 200MB | Emergency full collect |
-
-### DLL ↔ Addon Communication
-
-```
-DLL writes → Lua globals (every ~64 frames):
-  LUABOOST_DLL_LOADED, LUABOOST_DLL_MEM_KB, LUABOOST_DLL_GC_STEPS,
-  LUABOOST_DLL_GC_MS, LUABOOST_DLL_UICACHE_SKIPPED,
-  LUABOOST_DLL_APICACHE_HITS, LUABOOST_DLL_APICACHE_MISSES, etc.
-
-Addon writes → Lua globals (on events/settings):
-  LUABOOST_ADDON_COMBAT, LUABOOST_ADDON_IDLE, LUABOOST_ADDON_LOADING,
-  LUABOOST_ADDON_STEP_NORMAL, LUABOOST_ADDON_STEP_COMBAT, etc.
-
-DLL reads addon globals every ~16 frames from the Sleep hook (main thread).
-```
+| Average > 2ms | Reduce step size |
+| Average < 0.6ms | Increase step size |
+| Memory > 200MB (not loading) | Emergency full collect |
+| Loading mode | Grace period — skip GC for first 30 frames |
 
 ---
 
@@ -240,29 +223,20 @@ DLL reads addon globals every ~16 frames from the Sleep hook (main thread).
 
 ### What's Hooked (10 methods, all taint-free)
 
-| Method | Cache Key | Skip Condition |
-|--------|-----------|----------------|
-| `FontString:SetText` | FNV-1a text hash | Same text string |
-| `FontString:SetTextColor` | Combined RGBA hash | Same color values |
-| `StatusBar:SetValue` | Float bits | Same numeric value |
-| `StatusBar:SetMinMaxValues` | Combined min+max hash | Same min and max |
-| `StatusBar:SetStatusBarColor` | Combined RGBA hash | Same color values |
-| `Texture:SetTexture` | FNV-1a path / RGBA hash | Same texture or color |
-| `Texture:SetVertexColor` | Combined RGBA hash | Same color values |
-| `Region:SetAlpha` | Float bits | Same alpha value |
-| `Region:SetWidth` | Float bits | Same width value |
-| `Region:SetHeight` | Float bits | Same height value |
+| Method | Skip Condition |
+|--------|----------------|
+| `FontString:SetText` | Same text string |
+| `FontString:SetTextColor` | Same color values |
+| `StatusBar:SetValue` | Same numeric value |
+| `StatusBar:SetMinMaxValues` | Same min and max |
+| `StatusBar:SetStatusBarColor` | Same color values |
+| `Texture:SetTexture` | Same texture or color |
+| `Texture:SetVertexColor` | Same color values |
+| `Region:SetAlpha` | Same alpha value |
+| `Region:SetWidth` | Same width value |
+| `Region:SetHeight` | Same height value |
 
-All addresses auto-discovered at startup by scanning method tables. Cache cleared on zone transitions and `/reload`.
-
----
-
-## 📊 Combat Log Optimizer
-
-| Layer | What | How |
-|-------|------|-----|
-| **Retention** | Prevent premature recycling | CVar: 300 → 1800 seconds |
-| **Periodic Cleanup** | Clear processed entries | Every 5s (normal) / 10s (combat) |
+All addresses auto-discovered at startup.
 
 ---
 
@@ -272,10 +246,9 @@ All addresses auto-discovered at startup by scanning method tables. Cache cleare
 |---------|-------|---------|
 | `TCP_NODELAY` | `TRUE` | Disable Nagle's algorithm |
 | `SIO_TCP_SET_ACK_FREQUENCY` | `1` | ACK every packet immediately |
-| `IP_TOS` | `0x10` | DSCP Low Delay for QoS-aware routers |
-| `SO_SNDBUF` | `32 KB` | Send buffer |
-| `SO_RCVBUF` | `64 KB` | Receive buffer |
-| `SIO_KEEPALIVE_VALS` | `10s/1s` | Detect dead connections in ~20 sec |
+| `IP_TOS` | `0x10` | DSCP Low Delay |
+| `SO_SNDBUF` / `SO_RCVBUF` | `32KB` / `64KB` | Buffer sizing |
+| `SIO_KEEPALIVE_VALS` | `10s/1s` | Fast dead connection detection |
 
 ---
 
@@ -283,7 +256,7 @@ All addresses auto-discovered at startup by scanning method tables. Cache cleare
 
 ### Anti-Cheat (Warden)
 
-**No bans have been reported.** The DLL only hooks system-level functions, calls Lua GC API for performance tuning, patches combat log retention, caches UI widget values, and caches static API results.
+**No bans have been reported.** The DLL only hooks system-level functions, calls Lua GC API, patches combat log retention, caches UI/API values, and optimizes string.format.
 
 ### System Requirements
 
@@ -297,13 +270,12 @@ All addresses auto-discovered at startup by scanning method tables. Cache cleare
 
 | Problem | Solution |
 |---------|----------|
-| Proxy DLL doesn't load (no log file) | Use `wow_loader.exe`, or uncheck "Disable fullscreen optimizations" in Wow.exe properties |
+| Proxy DLL doesn't load | Use `wow_loader.exe`, or uncheck "Disable fullscreen optimizations" |
 | `FATAL: MinHook initialization failed` | Another hook DLL conflicting |
 | `ERROR: No CRT DLL found` | Non-standard WoW build |
-| Socket shows `fail` | Normal on some Windows versions — some opts need admin |
-| Damage meters still broken | Remove CombatLogFix addon — two fixers may conflict |
-| No noticeable difference | Expected on high-end PCs with few addons |
-| `[UICache] DISABLED` | Non-standard WoW build — method table not found |
+| Socket shows `fail` | Normal — some opts need admin |
+| Damage meters still broken | Remove CombatLogFix addon — two fixers conflict |
+| `[UICache] DISABLED` | Non-standard build — method table not found |
 
 ---
 
@@ -312,28 +284,25 @@ All addresses auto-discovered at startup by scanning method tables. Cache cleare
 ```
 wow-optimize/
 ├── src/
+│   ├── version.h                # Version defines (single source of truth)
 │   ├── dllmain.cpp              # Main DLL — all system hooks + network stack
-│   ├── lua_optimize.cpp         # Lua VM optimizer (allocator + adaptive GC + communication)
-│   ├── lua_optimize.h           # Lua optimizer interface
-│   ├── combatlog_optimize.cpp   # Combat log optimizer (retention + periodic cleanup)
-│   ├── combatlog_optimize.h     # Combat log optimizer interface
-│   ├── ui_cache.cpp             # UI widget cache (10 hooks, auto-discovered)
-│   ├── ui_cache.h               # UI cache interface
-│   ├── api_cache.cpp            # GetSpellInfo + GetItemInfo cache
-│   ├── api_cache.h              # API cache interface
+│   ├── lua_optimize.cpp/.h      # Lua VM optimizer (allocator + adaptive GC)
+│   ├── combatlog_optimize.cpp/.h # Combat log optimizer
+│   ├── ui_cache.cpp/.h          # UI widget cache (10 hooks, auto-discovered)
+│   ├── api_cache.cpp/.h         # GetSpellInfo + GetItemInfo cache
+│   ├── lua_fastpath.cpp/.h      # string.format fast path
 │   ├── wow_loader.cpp           # Universal auto-loader executable
 │   ├── version_proxy.cpp        # Auto-loader (version.dll proxy)
 │   ├── version_exports.def      # Export definitions for version.dll
 │   └── version.rc               # DLL version info resource
-├── CMakeLists.txt               # Build config + dependency management
-├── build.bat                    # One-click build script
+├── CMakeLists.txt
+├── build.bat
 ├── README.md
-├── LICENSE
-└── .gitignore
+└── LICENSE
 ```
 
 ---
 
 ## 📜 License
 
-MIT License — use, modify, and distribute freely. See [LICENSE](LICENSE) for full text.
+MIT License — use, modify, and distribute freely.

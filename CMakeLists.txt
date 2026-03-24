@@ -31,6 +31,7 @@ add_library(wow_optimize SHARED
     src/combatlog_optimize.h
     src/ui_cache.cpp
     src/ui_cache.h
+    src/version.h
     src/api_cache.cpp
     src/api_cache.h
     src/lua_fastpath.cpp
@@ -66,7 +67,7 @@ add_library(version SHARED
     src/version_exports.def
 )
 
-target_sources(wow_optimize PRIVATE src/version.rc)
+# target_sources(wow_optimize PRIVATE src/version.rc)
 
 set_target_properties(version PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
