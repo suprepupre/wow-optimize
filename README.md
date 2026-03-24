@@ -99,7 +99,7 @@ For maximum optimization, use this DLL together with the **[!LuaBoost](https://g
 ### Requirements
 
 - **Windows 10/11**
-- **Visual Studio 2022** (or 2019) with **"Desktop development with C++"** workload
+- **Visual Studio 2062** (or 2019) with **"Desktop development with C++"** workload
 - **CMake** (included with Visual Studio)
 - **Internet connection** (first build downloads dependencies automatically)
 
