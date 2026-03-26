@@ -616,6 +616,7 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
             DWORD offset = (DWORD)(rStart - cStart);
             memcpy(lpBuffer, cache->buffer + offset, nBytesToRead);
             if (lpBytesRead) *lpBytesRead = nBytesToRead;
+            // Advance file pointer only if needed for next sequential read
             LARGE_INTEGER newPos; newPos.QuadPart = rEnd;
             SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
             LeaveCriticalSection(&g_cacheLock);
@@ -626,17 +627,21 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     if (!cache) cache = AllocCache(hFile);
     if (cache && cache->buffer) {
         cache->fileOffset = currentPos;
-        SetFilePointerEx(hFile, currentPos, NULL, FILE_BEGIN);
-        DWORD bytesRead = 0;
+        // Read-ahead size adapts to game state
         DWORD readAhead = LuaOpt::IsLoadingMode() ? READ_AHEAD_LOADING : READ_AHEAD_NORMAL;
+        DWORD bytesRead = 0;
         BOOL ok = orig_ReadFile(hFile, cache->buffer, readAhead, &bytesRead, NULL);
         if (ok && bytesRead > 0) {
             cache->validBytes = bytesRead;
             DWORD toCopy = (nBytesToRead < bytesRead) ? nBytesToRead : bytesRead;
             memcpy(lpBuffer, cache->buffer, toCopy);
             if (lpBytesRead) *lpBytesRead = toCopy;
-            LARGE_INTEGER newPos; newPos.QuadPart = currentPos.QuadPart + toCopy;
-            SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
+            // File pointer is already at the right position after orig_ReadFile
+            // But we need to set it to where the caller expects
+            if (toCopy < bytesRead) {
+                LARGE_INTEGER newPos; newPos.QuadPart = currentPos.QuadPart + toCopy;
+                SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
+            }
             LeaveCriticalSection(&g_cacheLock);
             return TRUE;
         }
@@ -648,7 +653,6 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        // If anything crashes in cache logic, bypass cache entirely
         __try { LeaveCriticalSection(&g_cacheLock); } __except(EXCEPTION_EXECUTE_HANDLER) {}
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
     }
@@ -968,6 +972,116 @@ static bool InstallGetFileAttributesHook() {
 }
 
 // ================================================================
+// 7f2. IsBadReadPtr / IsBadWritePtr — Fast Path
+//  For NULL or obvious bad pointers, return TRUE immediately.
+// ================================================================
+
+typedef BOOL (WINAPI* IsBadReadPtr_fn)(const void*, UINT_PTR);
+typedef BOOL (WINAPI* IsBadWritePtr_fn)(void*, UINT_PTR);
+static IsBadReadPtr_fn  orig_IsBadReadPtr  = nullptr;
+static IsBadWritePtr_fn orig_IsBadWritePtr = nullptr;
+static long g_badPtrFastChecks = 0;
+
+static BOOL WINAPI hooked_IsBadReadPtr(const void* lp, UINT_PTR ucb) {
+    if (!lp) return TRUE;
+    if (ucb == 0) return FALSE;
+    if ((uintptr_t)lp < 0x10000) return TRUE;
+
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(lp, &mbi, sizeof(mbi)) == 0) return TRUE;
+    if (mbi.State != MEM_COMMIT) return TRUE;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return TRUE;
+
+    g_badPtrFastChecks++;
+    return FALSE;
+}
+
+static BOOL WINAPI hooked_IsBadWritePtr(void* lp, UINT_PTR ucb) {
+    if (!lp) return TRUE;
+    if (ucb == 0) return FALSE;
+    if ((uintptr_t)lp < 0x10000) return TRUE;
+
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(lp, &mbi, sizeof(mbi)) == 0) return TRUE;
+    if (mbi.State != MEM_COMMIT) return TRUE;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_READONLY)) return TRUE;
+
+    g_badPtrFastChecks++;
+    return FALSE;
+}
+
+static bool InstallBadPtrHooks() {
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+
+    int ok = 0;
+
+    void* pR = (void*)GetProcAddress(hK32, "IsBadReadPtr");
+    if (pR && MH_CreateHook(pR, (void*)hooked_IsBadReadPtr, (void**)&orig_IsBadReadPtr) == MH_OK)
+        if (MH_EnableHook(pR) == MH_OK) ok++;
+
+    void* pW = (void*)GetProcAddress(hK32, "IsBadWritePtr");
+    if (pW && MH_CreateHook(pW, (void*)hooked_IsBadWritePtr, (void**)&orig_IsBadWritePtr) == MH_OK)
+        if (MH_EnableHook(pW) == MH_OK) ok++;
+
+    if (ok > 0) {
+        Log("IsBadPtr hooks: ACTIVE (%d/2, fast VirtualQuery path)", ok);
+        return true;
+    }
+    return false;
+}
+
+// ================================================================
+// 7f. GetCurrentThreadId — TLS Cached
+// ================================================================
+
+typedef DWORD (WINAPI* GetCurrentThreadId_fn)(void);
+typedef HANDLE (WINAPI* GetCurrentThread_fn)(void);
+static GetCurrentThreadId_fn orig_GetCurrentThreadId = nullptr;
+static GetCurrentThread_fn   orig_GetCurrentThread   = nullptr;
+
+static __declspec(thread) DWORD t_cachedThreadId = 0;
+static long g_threadIdCacheHits = 0;
+
+static DWORD WINAPI hooked_GetCurrentThreadId(void) {
+    DWORD id = t_cachedThreadId;
+    if (id == 0) {
+        id = orig_GetCurrentThreadId();
+        t_cachedThreadId = id;
+    }
+    return id;
+}
+
+static HANDLE WINAPI hooked_GetCurrentThread(void) {
+    return (HANDLE)(LONG_PTR)-2;  // constant pseudo-handle
+}
+
+static bool InstallThreadIdCacheHook() {
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+
+    int ok = 0;
+
+    void* pTid = (void*)GetProcAddress(hK32, "GetCurrentThreadId");
+    if (pTid) {
+        if (MH_CreateHook(pTid, (void*)hooked_GetCurrentThreadId, (void**)&orig_GetCurrentThreadId) == MH_OK)
+            if (MH_EnableHook(pTid) == MH_OK) ok++;
+    }
+
+    void* pTh = (void*)GetProcAddress(hK32, "GetCurrentThread");
+    if (pTh) {
+        if (MH_CreateHook(pTh, (void*)hooked_GetCurrentThread, (void**)&orig_GetCurrentThread) == MH_OK)
+            if (MH_EnableHook(pTh) == MH_OK) ok++;
+    }
+
+    if (ok > 0) {
+        Log("ThreadId cache: ACTIVE (%d/2 hooks, TLS-cached)", ok);
+        return true;
+    }
+    return false;
+}
+
+// ================================================================
 // 8. CreateFile — Sequential Scan + MPQ Tracking
 // ================================================================
 typedef HANDLE (WINAPI* CreateFileA_fn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -1279,6 +1393,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool tgtOk  = InstallTimeGetTimeHook();
     Log("--- Heap Optimization ---");
     bool heapOk = InstallHeapOptimization();
+    Log("--- Thread ID Cache ---");
+    bool tidOk = InstallThreadIdCacheHook();
+    Log("--- Bad Pointer Checks ---");
+    bool bpOk  = InstallBadPtrHooks();    
     Log("--- String Comparison ---");
     bool cmpOk = InstallCompareStringHook();
     Log("--- Debug Strings ---");
@@ -1339,6 +1457,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] GetTickCount (QPC)",           tickOk      ? " OK " : "FAIL");
     Log("  [%s] timeGetTime (QPC sync)",       tgtOk       ? " OK " : "FAIL");
     Log("  [%s] Heap optimization (LFH)",      heapOk      ? " OK " : "FAIL");
+    Log("  [%s] ThreadId cache (TLS)",         tidOk       ? " OK " : "FAIL");
+    Log("  [%s] IsBadPtr (fast VirtualQuery)", bpOk        ? " OK " : "FAIL");    
     Log("  [%s] CompareStringA (ASCII fast)",  cmpOk       ? " OK " : "FAIL");
     Log("  [%s] OutputDebugString (no-op)",    debugOk     ? " OK " : "FAIL");
     Log("  [%s] CriticalSection (spin lock)",  csOk        ? " OK " : "FAIL");
@@ -1406,7 +1526,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             if (g_fileAttrHits + g_fileAttrMisses > 0)
                 Log("GetFileAttributesA: %ld hits, %ld misses (%.1f%% hit rate)",
                     g_fileAttrHits, g_fileAttrMisses,
-                    (double)g_fileAttrHits / (g_fileAttrHits + g_fileAttrMisses) * 100.0);            
+                    (double)g_fileAttrHits / (g_fileAttrHits + g_fileAttrMisses) * 100.0);       
+            if (g_badPtrFastChecks > 0)
+                Log("IsBadPtr: %ld fast checks (avoided SEH probing)", g_badPtrFastChecks);                         
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
