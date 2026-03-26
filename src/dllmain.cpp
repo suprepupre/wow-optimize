@@ -724,22 +724,68 @@ static bool InstallTimeGetTimeHook() {
 }
 
 // ================================================================
-// 7. CriticalSection Spin
+// 7. CriticalSection — Spin + TryEnter Optimization
+//
+//  Original hook just adds spin count to InitializeCriticalSection.
+//  v2.1.0 also hooks EnterCriticalSection to try spinning first
+//  before entering the kernel wait path.
+//
+//  WoW has many short-held locks (Lua state, sound, network).
+//  For these, a brief user-mode spin avoids an expensive
+//  kernel transition (~10-15 microseconds per context switch).
+//
+//  Strategy:
+//    1. TryEnterCriticalSection (instant, no kernel)
+//    2. If fails, spin up to 32 iterations with _mm_pause
+//    3. If still fails, fall through to real EnterCriticalSection
 // ================================================================
+
 typedef void (WINAPI* InitCS_fn)(LPCRITICAL_SECTION);
-static InitCS_fn orig_InitCS = nullptr;
+typedef void (WINAPI* EnterCS_fn)(LPCRITICAL_SECTION);
+static InitCS_fn  orig_InitCS  = nullptr;
+static EnterCS_fn orig_EnterCS = nullptr;
+static long g_csSpinHits = 0;
 
 static void WINAPI hooked_InitCS(LPCRITICAL_SECTION lpCS) {
     InitializeCriticalSectionAndSpinCount(lpCS, 4000);
 }
 
+static void WINAPI hooked_EnterCS(LPCRITICAL_SECTION lpCS) {
+    // Fast path: try to acquire without blocking
+    if (TryEnterCriticalSection(lpCS)) {
+        InterlockedIncrement(&g_csSpinHits);
+        return;
+    }
+
+    // Brief spin before falling into kernel wait
+    for (int i = 0; i < 32; i++) {
+        _mm_pause();
+        if (TryEnterCriticalSection(lpCS)) {
+            InterlockedIncrement(&g_csSpinHits);
+            return;
+        }
+    }
+
+    // Fall through to real kernel wait
+    orig_EnterCS(lpCS);
+}
+
 static bool InstallCriticalSectionHook() {
-    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "InitializeCriticalSection");
-    if (!p) return false;
-    if (MH_CreateHook(p, (void*)hooked_InitCS, (void**)&orig_InitCS) != MH_OK) return false;
-    if (MH_EnableHook(p) != MH_OK) return false;
-    Log("CriticalSection hook: ACTIVE (spin count 4000)");
-    return true;
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+
+    int ok = 0;
+
+    void* pInit = (void*)GetProcAddress(hK32, "InitializeCriticalSection");
+    if (pInit && MH_CreateHook(pInit, (void*)hooked_InitCS, (void**)&orig_InitCS) == MH_OK)
+        if (MH_EnableHook(pInit) == MH_OK) ok++;
+
+    void* pEnter = (void*)GetProcAddress(hK32, "EnterCriticalSection");
+    if (pEnter && MH_CreateHook(pEnter, (void*)hooked_EnterCS, (void**)&orig_EnterCS) == MH_OK)
+        if (MH_EnableHook(pEnter) == MH_OK) ok++;
+
+    Log("CriticalSection hooks: ACTIVE (%d/2, spin 4000 + TryEnter spin-first)", ok);
+    return ok > 0;
 }
 
 // ================================================================
@@ -969,6 +1015,117 @@ static bool InstallGetFileAttributesHook() {
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("GetFileAttributesA hook: ACTIVE (cache existing files, %d slots)", FILE_ATTR_CACHE_SIZE);
     return true;
+}
+
+// ================================================================
+// 7g. SetFilePointer → SetFilePointerEx Redirect
+//
+//  WoW uses the legacy 32-bit SetFilePointer API which has
+//  awkward error handling (INVALID_SET_FILE_POINTER + GetLastError)
+//  and slightly more overhead than SetFilePointerEx.
+//
+//  We redirect to SetFilePointerEx which:
+//    - Has cleaner semantics (BOOL return)
+//    - Is the "real" implementation internally
+//    - Avoids double error-code checking overhead
+//
+//  WoW is 32-bit so all file sizes fit in 32 bits anyway.
+// ================================================================
+
+typedef DWORD (WINAPI* SetFilePointer_fn)(HANDLE, LONG, PLONG, DWORD);
+static SetFilePointer_fn orig_SetFilePointer = nullptr;
+static long g_sfpRedirected = 0;
+
+static DWORD WINAPI hooked_SetFilePointer(HANDLE hFile, LONG lDistanceToMove,
+    PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod)
+{
+    LARGE_INTEGER liDist;
+    if (lpDistanceToMoveHigh) {
+        liDist.LowPart  = (DWORD)lDistanceToMove;
+        liDist.HighPart = *lpDistanceToMoveHigh;
+    } else {
+        liDist.QuadPart = (LONGLONG)lDistanceToMove;
+    }
+
+    LARGE_INTEGER liNewPos;
+    if (SetFilePointerEx(hFile, liDist, &liNewPos, dwMoveMethod)) {
+        if (lpDistanceToMoveHigh)
+            *lpDistanceToMoveHigh = liNewPos.HighPart;
+        g_sfpRedirected++;
+        return liNewPos.LowPart;
+    }
+
+    return INVALID_SET_FILE_POINTER;
+}
+
+static bool InstallSetFilePointerHook() {
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetFilePointer");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_SetFilePointer, (void**)&orig_SetFilePointer) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("SetFilePointer hook: ACTIVE (redirected to SetFilePointerEx)");
+    return true;
+}
+
+// ================================================================
+// 7h. GlobalAlloc/GlobalFree — mimalloc for GMEM_FIXED
+//
+//  GMEM_MOVEABLE allocations use a different mechanism
+//  (GlobalLock/GlobalUnlock) and MUST stay on the original
+//  heap to work correctly. We only optimize GMEM_FIXED.
+// ================================================================
+
+typedef HGLOBAL (WINAPI* GlobalAlloc_fn)(UINT, SIZE_T);
+typedef HGLOBAL (WINAPI* GlobalFree_fn)(HGLOBAL);
+static GlobalAlloc_fn orig_GlobalAlloc = nullptr;
+static GlobalFree_fn  orig_GlobalFree  = nullptr;
+static long g_globalAllocFast = 0;
+
+static HGLOBAL WINAPI hooked_GlobalAlloc(UINT uFlags, SIZE_T dwBytes) {
+    // Only optimize GMEM_FIXED (flags == 0 or GPTR which includes GMEM_FIXED+GMEM_ZEROINIT)
+    // GMEM_MOVEABLE must use original for GlobalLock/GlobalUnlock semantics
+    if ((uFlags & GMEM_MOVEABLE) == 0 && dwBytes > 0) {
+        void* ptr;
+        if (uFlags & GMEM_ZEROINIT) {
+            ptr = mi_calloc(1, dwBytes);
+        } else {
+            ptr = mi_malloc(dwBytes);
+        }
+        if (ptr) {
+            g_globalAllocFast++;
+            return (HGLOBAL)ptr;
+        }
+    }
+    return orig_GlobalAlloc(uFlags, dwBytes);
+}
+
+static HGLOBAL WINAPI hooked_GlobalFree(HGLOBAL hMem) {
+    if (hMem && mi_is_in_heap_region(hMem)) {
+        mi_free(hMem);
+        return NULL;
+    }
+    return orig_GlobalFree(hMem);
+}
+
+static bool InstallGlobalAllocHooks() {
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+
+    int ok = 0;
+
+    void* pA = (void*)GetProcAddress(hK32, "GlobalAlloc");
+    if (pA && MH_CreateHook(pA, (void*)hooked_GlobalAlloc, (void**)&orig_GlobalAlloc) == MH_OK)
+        if (MH_EnableHook(pA) == MH_OK) ok++;
+
+    void* pF = (void*)GetProcAddress(hK32, "GlobalFree");
+    if (pF && MH_CreateHook(pF, (void*)hooked_GlobalFree, (void**)&orig_GlobalFree) == MH_OK)
+        if (MH_EnableHook(pF) == MH_OK) ok++;
+
+    if (ok > 0) {
+        Log("GlobalAlloc hooks: ACTIVE (%d/2, mimalloc for GMEM_FIXED)", ok);
+        return true;
+    }
+    return false;
 }
 
 // ================================================================
@@ -1411,7 +1568,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool closeOk = InstallCloseHandleHook();
     bool flushOk = InstallFlushFileBuffersHook();
     Log("--- File Attributes ---");
-    bool faOk = InstallGetFileAttributesHook();
+    bool faOk = InstallGetFileAttributesHook();\
+    Log("--- File Pointer ---");
+    bool sfpOk = InstallSetFilePointerHook();
+    Log("--- Global Alloc ---");
+    bool gaOk  = InstallGlobalAllocHooks();    
     Log("--- System Timer ---");
     SetHighTimerResolution();
     Log("--- Threads ---");
@@ -1461,13 +1622,15 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] IsBadPtr (fast VirtualQuery)", bpOk        ? " OK " : "FAIL");    
     Log("  [%s] CompareStringA (ASCII fast)",  cmpOk       ? " OK " : "FAIL");
     Log("  [%s] OutputDebugString (no-op)",    debugOk     ? " OK " : "FAIL");
-    Log("  [%s] CriticalSection (spin lock)",  csOk        ? " OK " : "FAIL");
+    Log("  [%s] CriticalSection (spin+try)",   csOk        ? " OK " : "FAIL");
     Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk      ? " OK " : "FAIL");
     Log("  [%s] CreateFile (sequential I/O)",  fileOk      ? " OK " : "FAIL");
     Log("  [%s] ReadFile (adaptive MPQ cache)", readOk     ? " OK " : "FAIL");
     Log("  [%s] CloseHandle (cache cleanup)",  closeOk     ? " OK " : "FAIL");
     Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
     Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
+    Log("  [%s] SetFilePointer (64-bit)",      sfpOk       ? " OK " : "FAIL");
+    Log("  [%s] GlobalAlloc (mimalloc fast)",   gaOk        ? " OK " : "FAIL");    
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
@@ -1528,7 +1691,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                     g_fileAttrHits, g_fileAttrMisses,
                     (double)g_fileAttrHits / (g_fileAttrHits + g_fileAttrMisses) * 100.0);       
             if (g_badPtrFastChecks > 0)
-                Log("IsBadPtr: %ld fast checks (avoided SEH probing)", g_badPtrFastChecks);                         
+                Log("IsBadPtr: %ld fast checks (avoided SEH probing)", g_badPtrFastChecks);
+            if (g_csSpinHits > 0)
+                Log("CriticalSection: %ld spin-acquired (avoided kernel wait)", g_csSpinHits);
+            if (g_sfpRedirected > 0)
+                Log("SetFilePointer: %ld calls redirected to SetFilePointerEx", g_sfpRedirected);
+            if (g_globalAllocFast > 0)
+                Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast);                                     
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
