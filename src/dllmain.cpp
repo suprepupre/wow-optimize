@@ -551,8 +551,10 @@ struct ReadCache {
     LARGE_INTEGER fileOffset; DWORD validBytes; bool active;
 };
 
-static const int   MAX_CACHED_HANDLES = 16;
-static const DWORD READ_AHEAD_SIZE    = 64 * 1024;
+static const int   MAX_CACHED_HANDLES  = 16;
+static const DWORD READ_AHEAD_NORMAL   = 64 * 1024;
+static const DWORD READ_AHEAD_LOADING  = 256 * 1024;
+static const DWORD READ_AHEAD_MAX      = 256 * 1024;  // buffer allocation size
 static ReadCache   g_readCache[MAX_CACHED_HANDLES] = {};
 static int         g_cacheEvictIndex = 0;               
 static CRITICAL_SECTION g_cacheLock;
@@ -565,13 +567,12 @@ static ReadCache* FindCache(HANDLE h) {
     return nullptr;
 }
 
-
 static ReadCache* AllocCache(HANDLE h) {
 
     for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
         if (!g_readCache[i].active) {
             g_readCache[i].handle = h;
-            if (!g_readCache[i].buffer) g_readCache[i].buffer = (uint8_t*)mi_malloc(READ_AHEAD_SIZE);
+            if (!g_readCache[i].buffer) g_readCache[i].buffer = (uint8_t*)mi_malloc(READ_AHEAD_MAX);
             g_readCache[i].validBytes = 0;
             g_readCache[i].active = true;
             return &g_readCache[i];
@@ -581,7 +582,7 @@ static ReadCache* AllocCache(HANDLE h) {
     int idx = g_cacheEvictIndex;
     g_cacheEvictIndex = (g_cacheEvictIndex + 1) % MAX_CACHED_HANDLES;
     g_readCache[idx].handle = h;
-    if (!g_readCache[idx].buffer) g_readCache[idx].buffer = (uint8_t*)mi_malloc(READ_AHEAD_SIZE);
+    if (!g_readCache[idx].buffer) g_readCache[idx].buffer = (uint8_t*)mi_malloc(READ_AHEAD_MAX);
     g_readCache[idx].validBytes = 0;
     g_readCache[idx].active = true;
     return &g_readCache[idx];
@@ -591,7 +592,7 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     DWORD nBytesToRead, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped)
 {
     if (lpOverlapped || !g_cacheInitialized || !IsMpqHandle(hFile) ||
-        nBytesToRead >= READ_AHEAD_SIZE)
+        nBytesToRead >= READ_AHEAD_MAX)
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
     __try {
@@ -627,7 +628,8 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         cache->fileOffset = currentPos;
         SetFilePointerEx(hFile, currentPos, NULL, FILE_BEGIN);
         DWORD bytesRead = 0;
-        BOOL ok = orig_ReadFile(hFile, cache->buffer, READ_AHEAD_SIZE, &bytesRead, NULL);
+        DWORD readAhead = LuaOpt::IsLoadingMode() ? READ_AHEAD_LOADING : READ_AHEAD_NORMAL;
+        BOOL ok = orig_ReadFile(hFile, cache->buffer, readAhead, &bytesRead, NULL);
         if (ok && bytesRead > 0) {
             cache->validBytes = bytesRead;
             DWORD toCopy = (nBytesToRead < bytesRead) ? nBytesToRead : bytesRead;
@@ -658,7 +660,7 @@ static bool InstallReadFileHook() {
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_ReadFile, (void**)&orig_ReadFile) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
-    Log("ReadFile hook: ACTIVE (MPQ-only cache, 64KB read-ahead, %d slots)", MAX_CACHED_HANDLES);
+    Log("ReadFile hook: ACTIVE (MPQ cache, 64KB/256KB adaptive read-ahead, %d slots)", MAX_CACHED_HANDLES);
     return true;
 }
 
@@ -812,6 +814,156 @@ static bool InstallOutputDebugStringHook() {
     if (MH_CreateHook(p, (void*)hooked_OutputDebugStringA, (void**)&orig_OutputDebugStringA) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("OutputDebugStringA hook: ACTIVE (no-op when no debugger)");
+    return true;
+}
+
+// ================================================================
+// 7d. CompareStringA — Fast ASCII Path
+//
+//  For pure ASCII strings with simple flags (case-insensitive or
+//  ordinal), we can do the comparison directly in user mode.
+//  Falls back to original for non-ASCII (Cyrillic, Korean, etc.)
+//  and complex locale flags.
+//
+//  Return values: CSTR_LESS_THAN(1), CSTR_EQUAL(2), CSTR_GREATER_THAN(3)
+// ================================================================
+
+typedef int (WINAPI* CompareStringA_fn)(LCID, DWORD, LPCSTR, int, LPCSTR, int);
+static CompareStringA_fn orig_CompareStringA = nullptr;
+static long g_compareAsciiHits = 0;
+static long g_compareFallbacks = 0;
+
+#ifndef CSTR_LESS_THAN
+#define CSTR_LESS_THAN    1
+#define CSTR_EQUAL        2
+#define CSTR_GREATER_THAN 3
+#endif
+
+static int WINAPI hooked_CompareStringA(LCID Locale, DWORD dwCmpFlags,
+    LPCSTR lpString1, int cchCount1, LPCSTR lpString2, int cchCount2)
+{
+    // Only fast-path for simple flags: none, case-insensitive, or string sort
+    if ((dwCmpFlags & ~(NORM_IGNORECASE | SORT_STRINGSORT)) != 0)
+        goto cmp_fallback;
+
+    if (!lpString1 || !lpString2)
+        goto cmp_fallback;
+
+    {
+        bool ignoreCase = (dwCmpFlags & NORM_IGNORECASE) != 0;
+        int i1 = 0, i2 = 0;
+
+        while (true) {
+            bool end1 = (cchCount1 == -1) ? (lpString1[i1] == '\0') : (i1 >= cchCount1);
+            bool end2 = (cchCount2 == -1) ? (lpString2[i2] == '\0') : (i2 >= cchCount2);
+
+            if (end1 && end2) { g_compareAsciiHits++; return CSTR_EQUAL; }
+            if (end1)         { g_compareAsciiHits++; return CSTR_LESS_THAN; }
+            if (end2)         { g_compareAsciiHits++; return CSTR_GREATER_THAN; }
+
+            unsigned char c1 = (unsigned char)lpString1[i1];
+            unsigned char c2 = (unsigned char)lpString2[i2];
+
+            // Bail on non-ASCII — needs locale-aware comparison
+            if (c1 > 127 || c2 > 127)
+                goto cmp_fallback;
+
+            if (ignoreCase) {
+                if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+                if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+            }
+
+            if (c1 != c2) {
+                g_compareAsciiHits++;
+                return (c1 < c2) ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
+            }
+
+            i1++;
+            i2++;
+        }
+    }
+
+cmp_fallback:
+    g_compareFallbacks++;
+    return orig_CompareStringA(Locale, dwCmpFlags, lpString1, cchCount1, lpString2, cchCount2);
+}
+
+static bool InstallCompareStringHook() {
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "CompareStringA");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_CompareStringA, (void**)&orig_CompareStringA) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("CompareStringA hook: ACTIVE (fast ASCII path, locale fallback for non-ASCII)");
+    return true;
+}
+
+// ================================================================
+// 7e. GetFileAttributesA — Cache for MPQ paths
+//
+//  Only caches results for files that EXIST (not INVALID).
+//  Files that don't exist are not cached because they might
+//  be created later (addons, config, screenshots, etc.)
+// ================================================================
+
+typedef DWORD (WINAPI* GetFileAttributesA_fn)(LPCSTR);
+static GetFileAttributesA_fn orig_GetFileAttributesA = nullptr;
+
+static constexpr int FILE_ATTR_CACHE_SIZE = 256;
+static constexpr int FILE_ATTR_CACHE_MASK = FILE_ATTR_CACHE_SIZE - 1;
+
+struct FileAttrEntry {
+    uint32_t pathHash;
+    DWORD    attributes;
+    bool     valid;
+};
+
+static FileAttrEntry g_fileAttrCache[FILE_ATTR_CACHE_SIZE] = {};
+static long g_fileAttrHits   = 0;
+static long g_fileAttrMisses = 0;
+
+static uint32_t HashPathCI(const char* path) {
+    uint32_t h = 0x811C9DC5;
+    while (*path) {
+        char c = *path++;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c == '/') c = '\\';
+        h ^= (uint8_t)c;
+        h *= 0x01000193;
+    }
+    return h;
+}
+
+static DWORD WINAPI hooked_GetFileAttributesA(LPCSTR lpFileName) {
+    if (!lpFileName) return orig_GetFileAttributesA(lpFileName);
+
+    uint32_t hash = HashPathCI(lpFileName);
+    int slot = hash & FILE_ATTR_CACHE_MASK;
+    FileAttrEntry* e = &g_fileAttrCache[slot];
+
+    if (e->valid && e->pathHash == hash) {
+        g_fileAttrHits++;
+        return e->attributes;
+    }
+
+    DWORD result = orig_GetFileAttributesA(lpFileName);
+
+    // Only cache files that exist — non-existent files might be created later
+    if (result != INVALID_FILE_ATTRIBUTES) {
+        e->pathHash   = hash;
+        e->attributes = result;
+        e->valid      = true;
+    }
+
+    g_fileAttrMisses++;
+    return result;
+}
+
+static bool InstallGetFileAttributesHook() {
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetFileAttributesA");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_GetFileAttributesA, (void**)&orig_GetFileAttributesA) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("GetFileAttributesA hook: ACTIVE (cache existing files, %d slots)", FILE_ATTR_CACHE_SIZE);
     return true;
 }
 
@@ -1125,15 +1277,23 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Timer Precision ---");
     bool tickOk = InstallGetTickCountHook();
     bool tgtOk  = InstallTimeGetTimeHook();
+    Log("--- Heap Optimization ---");
+    bool heapOk = InstallHeapOptimization();
+    Log("--- String Comparison ---");
+    bool cmpOk = InstallCompareStringHook();
+    Log("--- Debug Strings ---");
+    bool debugOk = InstallOutputDebugStringHook();
     Log("--- Critical Sections ---");
     bool csOk = InstallCriticalSectionHook();
     Log("--- Network ---");
     bool netOk = InstallNetworkHooks();
     Log("--- File I/O ---");
-    bool fileOk = InstallFileHooks();
-    bool readOk = InstallReadFileHook();
+    bool fileOk  = InstallFileHooks();
+    bool readOk  = InstallReadFileHook();
     bool closeOk = InstallCloseHandleHook();
     bool flushOk = InstallFlushFileBuffersHook();
+    Log("--- File Attributes ---");
+    bool faOk = InstallGetFileAttributesHook();
     Log("--- System Timer ---");
     SetHighTimerResolution();
     Log("--- Threads ---");
@@ -1174,26 +1334,30 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  Initialization complete");
     Log("========================================");
     Log("");
-    Log("  [%s] mimalloc allocator",          allocOk     ? " OK " : "FAIL");
-    Log("  [%s] Sleep hook (PreciseSleep)",   sleepOk     ? " OK " : "FAIL");
-    Log("  [%s] GetTickCount (QPC)",          tickOk      ? " OK " : "FAIL");
-    Log("  [%s] timeGetTime (QPC sync)",      tgtOk       ? " OK " : "FAIL");
-    Log("  [%s] CriticalSection (spin lock)", csOk        ? " OK " : "FAIL");
-    Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk     ? " OK " : "FAIL");
-    Log("  [%s] CreateFile (sequential I/O)", fileOk      ? " OK " : "FAIL");
-    Log("  [%s] ReadFile (MPQ read-ahead)",   readOk      ? " OK " : "FAIL");
-    Log("  [%s] CloseHandle (cache cleanup)", closeOk     ? " OK " : "FAIL");
-    Log("  [%s] FlushFileBuffers (MPQ skip)", flushOk     ? " OK " : "FAIL");
+    Log("  [%s] mimalloc allocator",           allocOk     ? " OK " : "FAIL");
+    Log("  [%s] Sleep hook (PreciseSleep)",    sleepOk     ? " OK " : "FAIL");
+    Log("  [%s] GetTickCount (QPC)",           tickOk      ? " OK " : "FAIL");
+    Log("  [%s] timeGetTime (QPC sync)",       tgtOk       ? " OK " : "FAIL");
+    Log("  [%s] Heap optimization (LFH)",      heapOk      ? " OK " : "FAIL");
+    Log("  [%s] CompareStringA (ASCII fast)",  cmpOk       ? " OK " : "FAIL");
+    Log("  [%s] OutputDebugString (no-op)",    debugOk     ? " OK " : "FAIL");
+    Log("  [%s] CriticalSection (spin lock)",  csOk        ? " OK " : "FAIL");
+    Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk      ? " OK " : "FAIL");
+    Log("  [%s] CreateFile (sequential I/O)",  fileOk      ? " OK " : "FAIL");
+    Log("  [%s] ReadFile (adaptive MPQ cache)", readOk     ? " OK " : "FAIL");
+    Log("  [%s] CloseHandle (cache cleanup)",  closeOk     ? " OK " : "FAIL");
+    Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
+    Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
     Log("  [ OK ] Process priority (Above Normal)");
     Log("  [ OK ] FPS cap removal (200 -> 300)");
-    Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
-    Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
-    Log("  [%s] UI widget cache",             uiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] API cache (ItemInfo only)",   apiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] Lua fast path (format)", fastPathOk  ? " OK " : "SKIP");
+    Log("  [%s] Lua VM GC optimizer",          luaOk       ? "WAIT" : "SKIP");
+    Log("  [%s] Combat log optimizer",         combatLogOk ? " OK " : "SKIP");
+    Log("  [%s] UI widget cache",              uiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] API cache (ItemInfo only)",    apiCacheOk  ? " OK " : "SKIP");
+    Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
 
     return 0;
 }
@@ -1229,6 +1393,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             LuaOpt::Shutdown();
             if (g_flushSkipped > 0)
                 Log("FlushFileBuffers: %ld MPQ flushes skipped", g_flushSkipped);            
+            if (g_flushSkipped > 0)
+                Log("FlushFileBuffers: %ld MPQ flushes skipped", g_flushSkipped);
+            if (g_debugStringSkipped > 0)
+                Log("OutputDebugStringA: %ld calls skipped (no debugger)", g_debugStringSkipped);
+            if (g_heapsOptimized > 0)
+                Log("Heap optimization: %d heaps with LFH enabled", g_heapsOptimized);
+            if (g_compareAsciiHits + g_compareFallbacks > 0)
+                Log("CompareStringA: %ld ASCII fast, %ld locale fallback (%.1f%% fast)",
+                    g_compareAsciiHits, g_compareFallbacks,
+                    (double)g_compareAsciiHits / (g_compareAsciiHits + g_compareFallbacks) * 100.0);
+            if (g_fileAttrHits + g_fileAttrMisses > 0)
+                Log("GetFileAttributesA: %ld hits, %ld misses (%.1f%% hit rate)",
+                    g_fileAttrHits, g_fileAttrMisses,
+                    (double)g_fileAttrHits / (g_fileAttrHits + g_fileAttrMisses) * 100.0);            
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {

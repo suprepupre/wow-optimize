@@ -32,6 +32,8 @@ void Shutdown();
 
 // Combat mode (reduces GC during combat)
 void SetCombatMode(bool inCombat);
+// Returns true if client is in loading screen
+bool IsLoadingMode();
 
 struct Stats {
     bool   initialized;

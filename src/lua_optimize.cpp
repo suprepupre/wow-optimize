@@ -1147,4 +1147,8 @@ Stats GetStats() {
     return s;
 }
 
+bool LuaOpt::IsLoadingMode() {
+    return Config.isLoading;
+}
+
 } // namespace LuaOpt
