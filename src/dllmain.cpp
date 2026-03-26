@@ -1112,8 +1112,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [ OK ] FPS cap removal (200 -> 300)");
     Log("  [%s] Lua VM GC optimizer",         luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",        combatLogOk ? " OK " : "SKIP");
-    Log("  [%s] UI widget cache (3 hooks)",   uiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] API cache (SpellInfo+ItemInfo)", apiCacheOk ? " OK " : "SKIP");
+    Log("  [%s] UI widget cache",             uiCacheOk   ? " OK " : "SKIP");
+    Log("  [%s] API cache (ItemInfo only)",   apiCacheOk   ? " OK " : "SKIP");
     Log("  [%s] Lua fast path (format)", fastPathOk  ? " OK " : "SKIP");
 
     return 0;

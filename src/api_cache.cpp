@@ -8,16 +8,6 @@ extern "C" void Log(const char* fmt, ...);
 
 // ================================================================
 //  WoW API Result Cache
-//
-//  GetSpellInfo: 500ms QPC TTL
-//    castTime/cost change with haste/talents/gear
-//    500ms is imperceptible but picks up buff changes
-//
-//  GetItemInfo: PERMANENT cache (no TTL)
-//    Item data is truly static — name, quality, iLevel etc.
-//    never change for a given itemId.
-//    Only non-nil results cached (nil = server hasn't sent data yet)
-//    Cleared on /reload (lua_State change)
 // ================================================================
 
 typedef struct lua_State lua_State;
@@ -53,24 +43,9 @@ static fn_lua_toboolean   lua_toboolean_  = (fn_lua_toboolean)0x0084E0B0;
 //  Addresses — build 12340
 // ================================================================
 
-static constexpr uintptr_t ADDR_GetSpellInfo = 0x00540A30;
 static constexpr uintptr_t ADDR_GetItemInfo  = 0x00516C60;
 
-static ScriptFunc_fn orig_GetSpellInfo = nullptr;
 static ScriptFunc_fn orig_GetItemInfo  = nullptr;
-
-// ================================================================
-//  QPC timer
-// ================================================================
-
-static double g_qpcFreqMs = 0.0;
-static constexpr double SPELL_TTL_MS = 500.0;  // GetSpellInfo: 0.5 sec
-
-static inline double GetNowMs() {
-    LARGE_INTEGER li;
-    QueryPerformanceCounter(&li);
-    return (double)li.QuadPart / g_qpcFreqMs;
-}
 
 // ================================================================
 //  Cache structures
@@ -83,28 +58,23 @@ static constexpr int MAX_RETVALS   = 11;  // GetItemInfo returns up to 11
 struct CachedRetVal {
     int    type;
     double numVal;
-    char   strVal[512];  // item links with gems/enchants can reach 200+ chars
+    char   strVal[512];
 };
 
 struct CacheEntry {
     uint32_t     keyHash;
-    double       timestamp;   // QPC ms when cached (0 = permanent)
     bool         valid;
     int          retCount;
     int          pushed;
     CachedRetVal vals[MAX_RETVALS];
 };
 
-// Separate cache arrays — no collisions between spell and item lookups
-static CacheEntry g_spellCache[CACHE_SIZE] = {};
 static CacheEntry g_itemCache[CACHE_SIZE]  = {};
 
 // ================================================================
 //  Stats
 // ================================================================
 
-static long g_spellHits   = 0;
-static long g_spellMisses = 0;
 static long g_itemHits    = 0;
 static long g_itemMisses  = 0;
 static bool g_active      = false;
@@ -127,11 +97,10 @@ static inline uint32_t HashStr(const char* s) {
 // ================================================================
 
 static void CaptureReturnValues(lua_State* L, CacheEntry* e,
-                                 uint32_t keyHash, double timestamp,
+                                 uint32_t keyHash,
                                  int retCount, int topBefore, int pushed)
 {
     e->keyHash   = keyHash;
-    e->timestamp = timestamp;
     e->valid     = true;
     e->retCount  = retCount;
     e->pushed    = pushed;
@@ -152,8 +121,6 @@ static void CaptureReturnValues(lua_State* L, CacheEntry* e,
                     memcpy(e->vals[i].strVal, s, slen);
                     e->vals[i].strVal[slen] = '\0';
                 } else {
-                    // String is NULL or too long to cache — mark as nil
-                    // so we don't serve truncated data
                     e->vals[i].type = LUA_TNIL;
                 }
                 break;
@@ -184,63 +151,12 @@ static inline void ReplayCachedValues(lua_State* L, CacheEntry* e) {
 }
 
 // ================================================================
-//  Hook: GetSpellInfo — 500ms TTL
-//
-//  Returns: name, rank, icon, cost, isFunnel, powerType,
-//           castTime, minRange, maxRange  (9 values)
-// ================================================================
-
-static int __cdecl Hooked_GetSpellInfo(lua_State* L) {
-    uint32_t keyHash;
-    int argType = lua_type_(L, 1);
-
-    if (argType == LUA_TNUMBER) {
-        keyHash = (uint32_t)lua_tonumber_(L, 1);
-    } else if (argType == LUA_TSTRING) {
-        const char* name = lua_tolstring_(L, 1, NULL);
-        if (!name) return orig_GetSpellInfo(L);
-        keyHash = HashStr(name);
-    } else {
-        return orig_GetSpellInfo(L);
-    }
-
-    int slot = keyHash & CACHE_MASK;
-    CacheEntry* e = &g_spellCache[slot];
-    double now = GetNowMs();
-
-    // Cache hit with TTL check
-    if (e->valid && e->keyHash == keyHash &&
-        (now - e->timestamp) < SPELL_TTL_MS)
-    {
-        ReplayCachedValues(L, e);
-        g_spellHits++;
-        return e->retCount;
-    }
-
-    // Miss or expired
-    int topBefore = lua_gettop_(L);
-    int ret = orig_GetSpellInfo(L);
-    int topAfter = lua_gettop_(L);
-    int pushed = topAfter - topBefore;
-
-    if (pushed >= 0 && pushed <= MAX_RETVALS) {
-        CaptureReturnValues(L, e, keyHash, now, ret, topBefore, pushed);
-    }
-
-    g_spellMisses++;
-    return ret;
-}
-
-// ================================================================
 //  Hook: GetItemInfo — PERMANENT cache
 //
 //  Returns: name, link, quality, iLevel, reqLevel, class,
 //           subclass, maxStack, equipSlot, texture, vendorPrice
-//           (11 values)
 //
-//  IMPORTANT: Do NOT cache nil results.
-//  GetItemInfo returns nil when item data hasn't loaded from
-//  server yet. Caching nil would permanently block that item.
+//  IMPORTANT: Do NOT cache nil/partial results.
 // ================================================================
 
 static int __cdecl Hooked_GetItemInfo(lua_State* L) {
@@ -260,27 +176,21 @@ static int __cdecl Hooked_GetItemInfo(lua_State* L) {
     int slot = keyHash & CACHE_MASK;
     CacheEntry* e = &g_itemCache[slot];
 
-    // Cache hit — permanent, no TTL check
     if (e->valid && e->keyHash == keyHash) {
         ReplayCachedValues(L, e);
         g_itemHits++;
         return e->retCount;
     }
 
-    // Miss
     int topBefore = lua_gettop_(L);
     int ret = orig_GetItemInfo(L);
     int topAfter = lua_gettop_(L);
     int pushed = topAfter - topBefore;
 
-    // Only cache if all expected data was returned
-    // GetItemInfo returns 11 values when item data is fully loaded
-    // Fewer values means partial data — don't cache
     if (pushed >= 10 && pushed <= MAX_RETVALS) {
-        // Verify: first value = name (string), second value = link (string)
         if (lua_type_(L, topBefore + 1) == LUA_TSTRING &&
             lua_type_(L, topBefore + 2) == LUA_TSTRING) {
-            CaptureReturnValues(L, e, keyHash, 0.0, ret, topBefore, pushed);
+            CaptureReturnValues(L, e, keyHash, ret, topBefore, pushed);
         }
     }
 
@@ -317,18 +227,12 @@ bool Init() {
     Log("[ApiCache] ====================================");
     Log("[ApiCache]  WoW API Result Cache");
     Log("[ApiCache]  Build 12340");
+    Log("[ApiCache]  v2.0.5 hotfix: GetSpellInfo disabled");
     Log("[ApiCache] ====================================");
-
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    g_qpcFreqMs = (double)freq.QuadPart / 1000.0;
 
     int hooked = 0;
 
-    if (HookFunc("GetSpellInfo", ADDR_GetSpellInfo, (void*)Hooked_GetSpellInfo, (void**)&orig_GetSpellInfo))
-        hooked++;
-
-    if (HookFunc("GetItemInfo",  ADDR_GetItemInfo,  (void*)Hooked_GetItemInfo,  (void**)&orig_GetItemInfo))
+    if (HookFunc("GetItemInfo", ADDR_GetItemInfo, (void*)Hooked_GetItemInfo, (void**)&orig_GetItemInfo))
         hooked++;
 
     if (hooked == 0) {
@@ -339,9 +243,9 @@ bool Init() {
     g_active = true;
 
     Log("[ApiCache] ====================================");
-    Log("[ApiCache]  Hooks: %d/2 active", hooked);
-    Log("[ApiCache]  GetSpellInfo: %d slots, TTL %.0fms", CACHE_SIZE, SPELL_TTL_MS);
-    Log("[ApiCache]  GetItemInfo:  %d slots, permanent (nil not cached)", CACHE_SIZE);
+    Log("[ApiCache]  Hooks: %d/1 active", hooked);
+    Log("[ApiCache]  GetItemInfo: %d slots, permanent (nil not cached)", CACHE_SIZE);
+    Log("[ApiCache]  GetSpellInfo: DISABLED (spec/talent rebuild safety)");
     Log("[ApiCache]  [ OK ] ACTIVE");
     Log("[ApiCache] ====================================");
     return true;
@@ -350,38 +254,31 @@ bool Init() {
 void Shutdown() {
     if (!g_active) return;
 
-    MH_DisableHook((void*)ADDR_GetSpellInfo);
     MH_DisableHook((void*)ADDR_GetItemInfo);
 
     g_active = false;
 
-    long spellTotal = g_spellHits + g_spellMisses;
     long itemTotal  = g_itemHits  + g_itemMisses;
 
-    if (spellTotal > 0) {
-        Log("[ApiCache] GetSpellInfo: %ld hits, %ld misses (%.1f%% hit rate)",
-            g_spellHits, g_spellMisses, (double)g_spellHits / spellTotal * 100.0);
-    }
     if (itemTotal > 0) {
-        Log("[ApiCache] GetItemInfo:  %ld hits, %ld misses (%.1f%% hit rate)",
+        Log("[ApiCache] GetItemInfo: %ld hits, %ld misses (%.1f%% hit rate)",
             g_itemHits, g_itemMisses, (double)g_itemHits / itemTotal * 100.0);
     }
 }
 
 void OnNewFrame() {
-    // No-op — GetSpellInfo uses QPC TTL, GetItemInfo is permanent
+    // no-op
 }
 
 void ClearCache() {
-    memset(g_spellCache, 0, sizeof(g_spellCache));
     memset(g_itemCache,  0, sizeof(g_itemCache));
-    Log("[ApiCache] Cache cleared (spell: %d, item: %d entries)", CACHE_SIZE, CACHE_SIZE);
+    Log("[ApiCache] Cache cleared (item: %d entries)", CACHE_SIZE);
 }
 
 Stats GetStats() {
     Stats s;
-    s.hits   = g_spellHits + g_itemHits;
-    s.misses = g_spellMisses + g_itemMisses;
+    s.hits   = g_itemHits;
+    s.misses = g_itemMisses;
     s.active = g_active;
     return s;
 }
