@@ -737,6 +737,85 @@ static bool InstallCriticalSectionHook() {
 }
 
 // ================================================================
+// 7b. Heap Optimization — Low Fragmentation Heap
+// ================================================================
+
+typedef HANDLE (WINAPI* HeapCreate_fn)(DWORD, SIZE_T, SIZE_T);
+static HeapCreate_fn orig_HeapCreate = nullptr;
+static int g_heapsOptimized = 0;
+
+static void EnableLFH(HANDLE hHeap) {
+    if (!hHeap) return;
+    ULONG heapInfo = 2; // LFH
+    HeapSetInformation(hHeap, HeapCompatibilityInformation,
+                       &heapInfo, sizeof(heapInfo));
+}
+
+static HANDLE WINAPI hooked_HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) {
+    HANDLE h = orig_HeapCreate(flOptions, dwInitialSize, dwMaximumSize);
+    if (h && dwMaximumSize == 0) {
+        // LFH only works on growable heaps (dwMaximumSize == 0)
+        // Fixed-size heaps don't support LFH
+        EnableLFH(h);
+        g_heapsOptimized++;
+    }
+    return h;
+}
+
+static bool InstallHeapOptimization() {
+    // Enable LFH on the process default heap first
+    HANDLE processHeap = GetProcessHeap();
+    if (processHeap) {
+        EnableLFH(processHeap);
+        g_heapsOptimized++;
+    }
+
+    // Hook HeapCreate to enable LFH on all future heaps
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "HeapCreate");
+    if (!p) {
+        Log("Heap optimization: LFH on process heap only (%d heaps)", g_heapsOptimized);
+        return g_heapsOptimized > 0;
+    }
+
+    if (MH_CreateHook(p, (void*)hooked_HeapCreate, (void**)&orig_HeapCreate) != MH_OK) {
+        Log("Heap optimization: LFH on process heap only (%d heaps)", g_heapsOptimized);
+        return g_heapsOptimized > 0;
+    }
+    if (MH_EnableHook(p) != MH_OK) {
+        Log("Heap optimization: LFH on process heap only (%d heaps)", g_heapsOptimized);
+        return g_heapsOptimized > 0;
+    }
+
+    Log("Heap optimization: ACTIVE (LFH on process heap + all new heaps)");
+    return true;
+}
+
+// ================================================================
+// 7c. OutputDebugStringA — No-op when no debugger
+// ================================================================
+
+typedef void (WINAPI* OutputDebugStringA_fn)(LPCSTR);
+static OutputDebugStringA_fn orig_OutputDebugStringA = nullptr;
+static long g_debugStringSkipped = 0;
+
+static void WINAPI hooked_OutputDebugStringA(LPCSTR lpOutputString) {
+    if (!IsDebuggerPresent()) {
+        InterlockedIncrement(&g_debugStringSkipped);
+        return;
+    }
+    orig_OutputDebugStringA(lpOutputString);
+}
+
+static bool InstallOutputDebugStringHook() {
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "OutputDebugStringA");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_OutputDebugStringA, (void**)&orig_OutputDebugStringA) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("OutputDebugStringA hook: ACTIVE (no-op when no debugger)");
+    return true;
+}
+
+// ================================================================
 // 8. CreateFile — Sequential Scan + MPQ Tracking
 // ================================================================
 typedef HANDLE (WINAPI* CreateFileA_fn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
