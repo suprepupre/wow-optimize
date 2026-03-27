@@ -22,6 +22,18 @@
 
 #include "version.h"
 
+// ================================================================
+// Crash Isolation Toggles (test builds only)
+// Set ONE of these to 1 when preparing a test DLL.
+// Keep all 0 for normal build.
+// ================================================================
+#define CRASH_TEST_DISABLE_COMPARESTRING   0
+#define CRASH_TEST_DISABLE_GETFILEATTR     0
+#define CRASH_TEST_DISABLE_GLOBALALLOC     1
+#define CRASH_TEST_DISABLE_CS_ENTER        0
+#define CRASH_TEST_DISABLE_SETFILEPOINTER  0
+#define CRASH_TEST_DISABLE_ISBADPTR        0
+
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
@@ -724,20 +736,13 @@ static bool InstallTimeGetTimeHook() {
 }
 
 // ================================================================
-// 7. CriticalSection — Spin + TryEnter Optimization
+// 7. CriticalSection
 //
-//  Original hook just adds spin count to InitializeCriticalSection.
-//  v2.1.0 also hooks EnterCriticalSection to try spinning first
-//  before entering the kernel wait path.
+//  If CRASH_TEST_DISABLE_CS_ENTER == 1:
+//    keep only InitializeCriticalSection spin-count tuning
 //
-//  WoW has many short-held locks (Lua state, sound, network).
-//  For these, a brief user-mode spin avoids an expensive
-//  kernel transition (~10-15 microseconds per context switch).
-//
-//  Strategy:
-//    1. TryEnterCriticalSection (instant, no kernel)
-//    2. If fails, spin up to 32 iterations with _mm_pause
-//    3. If still fails, fall through to real EnterCriticalSection
+//  Else:
+//    use full v2.1.0 behavior (spin count + TryEnter spin-first)
 // ================================================================
 
 typedef void (WINAPI* InitCS_fn)(LPCRITICAL_SECTION);
@@ -750,14 +755,13 @@ static void WINAPI hooked_InitCS(LPCRITICAL_SECTION lpCS) {
     InitializeCriticalSectionAndSpinCount(lpCS, 4000);
 }
 
+#if !CRASH_TEST_DISABLE_CS_ENTER
 static void WINAPI hooked_EnterCS(LPCRITICAL_SECTION lpCS) {
-    // Fast path: try to acquire without blocking
     if (TryEnterCriticalSection(lpCS)) {
         InterlockedIncrement(&g_csSpinHits);
         return;
     }
 
-    // Brief spin before falling into kernel wait
     for (int i = 0; i < 32; i++) {
         _mm_pause();
         if (TryEnterCriticalSection(lpCS)) {
@@ -766,9 +770,9 @@ static void WINAPI hooked_EnterCS(LPCRITICAL_SECTION lpCS) {
         }
     }
 
-    // Fall through to real kernel wait
     orig_EnterCS(lpCS);
 }
+#endif
 
 static bool InstallCriticalSectionHook() {
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
@@ -780,12 +784,17 @@ static bool InstallCriticalSectionHook() {
     if (pInit && MH_CreateHook(pInit, (void*)hooked_InitCS, (void**)&orig_InitCS) == MH_OK)
         if (MH_EnableHook(pInit) == MH_OK) ok++;
 
+#if CRASH_TEST_DISABLE_CS_ENTER
+    Log("CriticalSection hook: ACTIVE (%d/1, spin count only, crash isolation)", ok);
+    return ok > 0;
+#else
     void* pEnter = (void*)GetProcAddress(hK32, "EnterCriticalSection");
     if (pEnter && MH_CreateHook(pEnter, (void*)hooked_EnterCS, (void**)&orig_EnterCS) == MH_OK)
         if (MH_EnableHook(pEnter) == MH_OK) ok++;
 
     Log("CriticalSection hooks: ACTIVE (%d/2, spin 4000 + TryEnter spin-first)", ok);
     return ok > 0;
+#endif
 }
 
 // ================================================================
@@ -939,12 +948,17 @@ cmp_fallback:
 }
 
 static bool InstallCompareStringHook() {
+#if CRASH_TEST_DISABLE_COMPARESTRING
+    Log("CompareStringA hook: DISABLED (crash isolation)");
+    return false;
+#else
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "CompareStringA");
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_CompareStringA, (void**)&orig_CompareStringA) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("CompareStringA hook: ACTIVE (fast ASCII path, locale fallback for non-ASCII)");
     return true;
+#endif
 }
 
 // ================================================================
@@ -1009,12 +1023,17 @@ static DWORD WINAPI hooked_GetFileAttributesA(LPCSTR lpFileName) {
 }
 
 static bool InstallGetFileAttributesHook() {
+#if CRASH_TEST_DISABLE_GETFILEATTR
+    Log("GetFileAttributesA hook: DISABLED (crash isolation)");
+    return false;
+#else
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetFileAttributesA");
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_GetFileAttributesA, (void**)&orig_GetFileAttributesA) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("GetFileAttributesA hook: ACTIVE (cache existing files, %d slots)", FILE_ATTR_CACHE_SIZE);
     return true;
+#endif
 }
 
 // ================================================================
@@ -1059,12 +1078,17 @@ static DWORD WINAPI hooked_SetFilePointer(HANDLE hFile, LONG lDistanceToMove,
 }
 
 static bool InstallSetFilePointerHook() {
+#if CRASH_TEST_DISABLE_SETFILEPOINTER
+    Log("SetFilePointer hook: DISABLED (crash isolation)");
+    return false;
+#else
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetFilePointer");
     if (!p) return false;
     if (MH_CreateHook(p, (void*)hooked_SetFilePointer, (void**)&orig_SetFilePointer) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("SetFilePointer hook: ACTIVE (redirected to SetFilePointerEx)");
     return true;
+#endif
 }
 
 // ================================================================
@@ -1108,6 +1132,10 @@ static HGLOBAL WINAPI hooked_GlobalFree(HGLOBAL hMem) {
 }
 
 static bool InstallGlobalAllocHooks() {
+#if CRASH_TEST_DISABLE_GLOBALALLOC
+    Log("GlobalAlloc hooks: DISABLED (crash isolation)");
+    return false;
+#else
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
     if (!hK32) return false;
 
@@ -1126,6 +1154,7 @@ static bool InstallGlobalAllocHooks() {
         return true;
     }
     return false;
+#endif
 }
 
 // ================================================================
@@ -1168,6 +1197,10 @@ static BOOL WINAPI hooked_IsBadWritePtr(void* lp, UINT_PTR ucb) {
 }
 
 static bool InstallBadPtrHooks() {
+#if CRASH_TEST_DISABLE_ISBADPTR
+    Log("IsBadPtr hooks: DISABLED (crash isolation)");
+    return false;
+#else
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
     if (!hK32) return false;
 
@@ -1186,6 +1219,7 @@ static bool InstallBadPtrHooks() {
         return true;
     }
     return false;
+#endif
 }
 
 // ================================================================
@@ -1630,7 +1664,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
     Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
     Log("  [%s] SetFilePointer (64-bit)",      sfpOk       ? " OK " : "FAIL");
-    Log("  [%s] GlobalAlloc (mimalloc fast)",   gaOk        ? " OK " : "FAIL");    
+    Log("  [SKIP] GlobalAlloc fast path (disabled hotfix)");  
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
