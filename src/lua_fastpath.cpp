@@ -82,6 +82,44 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
     int numArgs = nargs - 1;
 
     // ============================================================
+    // Safety check: bail on any format string containing embedded
+    // nuls — these need special Lua-internal handling
+    // ============================================================
+    for (size_t i = 0; i < fmtLen; i++) {
+        if (fmt[i] == '\0') {
+            g_formatFallbacks++;
+            return orig_str_format(L);
+        }
+    }
+
+    // ============================================================
+    // Safety check: bail if any string argument contains embedded
+    // nuls — our snprintf-based path cannot handle them correctly
+    // ============================================================
+    for (int i = 2; i <= nargs; i++) {
+        if (lua_type_(L, i) == LUA_TSTRING) {
+            size_t slen = 0;
+            const char* s = lua_tolstring_(L, i, &slen);
+            if (s && slen > 0) {
+                // Check for embedded nuls
+                if (memchr(s, '\0', slen) != (s + slen)) {
+                    for (size_t j = 0; j < slen; j++) {
+                        if (s[j] == '\0') {
+                            g_formatFallbacks++;
+                            return orig_str_format(L);
+                        }
+                    }
+                }
+                // Also bail on very long strings —  buffers can't handle them
+                if (slen > 2048) {
+                    g_formatFallbacks++;
+                    return orig_str_format(L);
+                }
+            }
+        }
+    }
+
+    // ============================================================
     // Ultra-fast paths for top patterns
     // ============================================================
 
@@ -152,7 +190,8 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
     }
 
     // ============================================================
-    // Generic parser
+    // Generic parser — only for simple cases
+    // Bail to original for anything complex
     // ============================================================
 
     char output[4096];
@@ -163,7 +202,7 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
 
     while (p < end) {
         if (*p != '%') {
-            if (outPos >= 3900) goto fallback;
+            if (outPos >= 3800) goto fallback;
             output[outPos++] = *p++;
             continue;
         }
@@ -172,12 +211,13 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         if (p >= end) goto fallback;
 
         if (*p == '%') {
-            if (outPos >= 3900) goto fallback;
+            if (outPos >= 3800) goto fallback;
             output[outPos++] = '%';
             p++;
             continue;
         }
 
+        // Bail on %q — needs special Lua quoting logic
         if (*p == 'q') goto fallback;
 
         char spec[32];
@@ -190,13 +230,13 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
             spec[specLen++] = *p++;
         }
 
-        // Width
+        // Width — bail on * (dynamic width)
         if (p < end && *p == '*') goto fallback;
         while (p < end && specLen < 24 && *p >= '0' && *p <= '9') {
             spec[specLen++] = *p++;
         }
 
-        // Precision
+        // Precision — bail on * (dynamic precision)
         if (p < end && *p == '.') {
             spec[specLen++] = *p++;
             if (p < end && *p == '*') goto fallback;
@@ -209,45 +249,45 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         if (argIdx > nargs) goto fallback;
 
         char type = *p++;
-        char tmpBuf[1024];
+        char tmpBuf[3072];
         int tmpLen = 0;
 
         switch (type) {
             case 'd': case 'i': {
                 spec[specLen++] = 'd';
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, (int)lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (int)lua_tonumber_(L, argIdx));
                 break;
             }
             case 'u': {
                 spec[specLen++] = 'u';
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, (unsigned int)lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
                 break;
             }
             case 'x': case 'X': {
                 spec[specLen++] = type;
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, (unsigned int)lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
                 break;
             }
             case 'o': {
                 spec[specLen++] = 'o';
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, (unsigned int)lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
                 break;
             }
             case 'f': case 'e': case 'g':
             case 'E': case 'G': {
                 spec[specLen++] = type;
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, lua_tonumber_(L, argIdx));
                 break;
             }
             case 'c': {
                 spec[specLen++] = 'c';
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, (int)lua_tonumber_(L, argIdx));
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (int)lua_tonumber_(L, argIdx));
                 break;
             }
             case 's': {
@@ -256,8 +296,12 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
                 char numBuf[64];
 
                 if (argType == LUA_TSTRING) {
-                    s = lua_tolstring_(L, argIdx, NULL);
+                    size_t slen = 0;
+                    s = lua_tolstring_(L, argIdx, &slen);
                     if (!s) s = "";
+                    // Double-check: if string is longer than our buffer can handle,
+                    // bail to original which handles arbitrary lengths
+                    if (slen > 2048) goto fallback;
                 } else if (argType == LUA_TNIL) {
                     s = "nil";
                 } else if (argType == LUA_TBOOLEAN) {
@@ -267,23 +311,24 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
                     numBuf[63] = '\0';
                     s = numBuf;
                 } else {
+                    // tables, userdata, functions — need tostring() metamethod
                     goto fallback;
                 }
 
                 spec[specLen++] = 's';
                 spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, 1023, spec, s);
+                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, s);
                 break;
             }
             default:
                 goto fallback;
         }
 
-        tmpBuf[1023] = '\0';
+        tmpBuf[sizeof(tmpBuf) - 1] = '\0';
         argIdx++;
 
         if (tmpLen < 0) tmpLen = (int)strlen(tmpBuf);
-        if (outPos + tmpLen >= 3900) goto fallback;
+        if (outPos + tmpLen >= 3800) goto fallback;
 
         memcpy(output + outPos, tmpBuf, tmpLen);
         outPos += tmpLen;
