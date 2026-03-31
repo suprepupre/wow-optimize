@@ -1096,6 +1096,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
 
     if (!slowFrame && g_luaAllocReplaced && (State.statsUpdateCounter & 4095) == 0) {
         LogLuaAllocStats();
+        mi_collect(false);
     }
 }
 

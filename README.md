@@ -1,6 +1,6 @@
-# 🚀 wow_optimize 
+# 🚀 wow_optimize
 
-**Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**  
+**Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**
 Author: **SUPREMATIST**
 
 wow_optimize improves WoW 3.3.5a at the **engine/runtime level**: memory allocation, Lua VM behavior, timers, file I/O, networking, heap fragmentation, lock contention, and other low-level bottlenecks.
@@ -24,7 +24,7 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
 - **Lua VM allocator replacement** with mimalloc
 - **Lua string table pre-sizing** to reduce hash resize freezes
 - **Low Fragmentation Heap (LFH)** enabled for process heap and new heaps
-- **Periodic mimalloc purge** to reduce long-session memory pressure
+- **Periodic mimalloc purge** (`mi_collect`) for long-session memory stability
 
 ### Lua Runtime
 - **Adaptive manual Lua GC**
@@ -34,28 +34,29 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
 - **Lua reload detection and clean reinitialization**
 
 ### Timers / Frame Pacing
-- **PreciseSleep** on the main thread
+- **PreciseSleep** on the main thread (adaptive for multi-client)
 - **GetTickCount → QPC**
 - **timeGetTime → same QPC timeline**
-- **0.5ms timer resolution**
-- **Hardcoded FPS cap raised**
+- **Adaptive timer resolution** (0.5ms single client / 1.0ms multi-client)
+- **Hardcoded FPS cap raised** (200 → 999)
+- **Multi-client detection** — automatically reduces CPU pressure when running multiple WoW instances
 
 ### File I/O
-- **MPQ handle tracking**
+- **MPQ memory mapping** — archives 256KB–512MB are memory-mapped via `MapViewOfFile` for zero-kernel-transition reads
+- **Retroactive MPQ handle scanner** — finds and tracks MPQ files opened before DLL hooks install
+- **MPQ handle tracking** (O(1) hash lookup)
 - **CreateFile sequential-scan hints for MPQ**
-- **Adaptive MPQ read-ahead cache**
-  - 64KB during gameplay
-  - 256KB during loading screens
+- **Adaptive MPQ read-ahead cache** (64KB gameplay / 256KB loading)
 - **FlushFileBuffers skipped for read-only MPQ handles**
 - **GetFileAttributesA cache**
 - **SetFilePointer redirected to SetFilePointerEx**
 
 ### Threading / Synchronization
+- **SRWLOCK-based file cache** (replaces CRITICAL_SECTION for lower contention)
 - **Main thread priority ABOVE_NORMAL**
 - **Ideal processor assignment**
 - **Process priority ABOVE_NORMAL**
-- **CriticalSection spin count**
-- **TryEnterCriticalSection spin-first path**
+- **CriticalSection spin count + TryEnter spin-first path**
 - **TLS-cached GetCurrentThreadId / pseudo-handle fast path**
 
 ### Networking
@@ -67,10 +68,11 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
 
 ### Other Runtime Optimizations
 - **Combat log optimizer** (retention + periodic clear)
-- **string.format fast path**
+- **string.format fast path** (with embedded-nul safety for ElvUI/AceSerializer)
 - **CompareStringA fast ASCII path**
 - **OutputDebugStringA no-op when no debugger**
 - **Fast VirtualQuery-based IsBadReadPtr / IsBadWritePtr**
+- **Periodic stats dump** (every 5 minutes to log, survives unclean exit)
 
 ---
 
@@ -88,7 +90,7 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
 ### You may notice
 - ✅ Slightly better minimum FPS in raids/cities
 - ✅ Faster zone transitions
-- ✅ Less “client feels worse after 2+ hours” behavior
+- ✅ Less "client feels worse after 2+ hours" behavior
 
 ### You should NOT expect
 - ✗ Massive average FPS increase from one feature alone
@@ -134,6 +136,16 @@ Copy:
 - optional helper batch script
 
 Then inject after WoW starts.
+
+---
+
+## 🎮 Multi-Client Support
+
+wow_optimize automatically detects when multiple WoW instances are running:
+- **Single client:** 0.5ms timer resolution, precise busy-wait sleep
+- **Multi-client:** 1.0ms timer resolution, yield-based sleep (prevents 100% CPU usage)
+
+No configuration needed — detection is automatic.
 
 ---
 
@@ -198,35 +210,25 @@ wow-optimize/
 
 ---
 
-## 🔍 Notes On Safety
-
-### Why the public build is stricter now
-Several earlier “smart” optimizations looked correct in synthetic testing, but failed in real addon ecosystems.
-
-The current release philosophy is:
-
-> **If a feature can break addon semantics, it does not belong in the public build.**
-
-That is why:
-- UI cache is disabled
-- GetSpellInfo cache is disabled
-- only truly safe caches remain public
-
----
-
 ## 🐛 Troubleshooting
 
-### “The DLL loads but I see no UI cache”
+### "The DLL loads but I see no UI cache"
 That is expected. UI cache is intentionally disabled in public builds.
 
-### “Why is only GetItemInfo cached?”
+### "Why is only GetItemInfo cached?"
 Because `GetItemInfo` is static once item data is loaded. `GetSpellInfo` and most unit APIs are not safe enough in practice.
 
-### “Antivirus flags the DLL”
+### "Antivirus flags the DLL"
 Hooking/injection tools often trigger false positives. Review the source if needed.
 
-### “I use DXVK/Vulkan”
-That’s fine. The project does **not** depend on OpenGL-specific optimizations.
+### "I use DXVK/Vulkan"
+That's fine. The project does **not** depend on OpenGL-specific optimizations.
+
+### "I run two WoW clients and get 100% CPU"
+Update to v2.2.0 or later. Multi-client mode is now automatic — the DLL detects other instances and reduces timer/sleep aggressiveness.
+
+### "ElvUI profile export/import shows 'decoding error'"
+Update to v2.1.2 or later. The string.format fast path now correctly handles binary data.
 
 ---
 

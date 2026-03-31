@@ -33,9 +33,18 @@
 #define CRASH_TEST_DISABLE_CS_ENTER        0
 #define CRASH_TEST_DISABLE_SETFILEPOINTER  0
 #define CRASH_TEST_DISABLE_ISBADPTR        0
+#define CRASH_TEST_DISABLE_MPQ_MMAP        0
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+
+// ================================================================
+// Forward Declarations
+// ================================================================
+static bool   g_isMultiClient = false;
+static HANDLE g_instanceMutex = NULL;
+static int    g_periodicStatsCounter = 0;
+static void   DumpPeriodicStats();
 
 // ================================================================
 // Logging — ring buffer + background thread
@@ -253,12 +262,21 @@ static void PreciseSleep(double milliseconds) {
 
         double remaining = milliseconds - elapsed;
 
-        if (remaining > 2.0)
-            orig_Sleep(1);
-        else if (remaining > 0.3)
-            SwitchToThread();
-        else
-            _mm_pause();
+        if (g_isMultiClient) {
+            // Multi-client: no busy-wait, always yield CPU
+            if (remaining > 1.5)
+                orig_Sleep(1);
+            else
+                orig_Sleep(0);
+        } else {
+            // Single client: precise busy-wait for sub-ms accuracy
+            if (remaining > 2.0)
+                orig_Sleep(1);
+            else if (remaining > 0.3)
+                SwitchToThread();
+            else
+                _mm_pause();
+        }
     }
 }
 
@@ -279,8 +297,15 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
 
-        // PreciseSleep: hybrid busy-wait for sub-millisecond accuracy
-        // Reduces frame time variance from ±15ms to ±0.1ms
+        // Periodic stats dump:
+        // First dump after ~30 seconds (1800 frames at 60fps)
+        // Subsequent dumps every ~5 minutes (18000 frames)
+        g_periodicStatsCounter++;
+        if ((g_periodicStatsCounter == 1800) ||
+            (g_periodicStatsCounter > 0 && (g_periodicStatsCounter % 18000) == 0)) {
+            DumpPeriodicStats();
+        }
+
         PreciseSleep((double)ms);
         return;
     }
@@ -553,6 +578,136 @@ static void UntrackMpqHandle(HANDLE h) {
 }
 
 // ================================================================
+// 4b. Memory-Mapped MPQ Files
+//
+//  For MPQ files between 1MB and 256MB, memory mapping
+//  eliminates kernel transitions on every read.
+//  Reads become simple memcpy from user-space mapped memory.
+//
+//  Limits:
+//    - Min file: 1 MB (small files not worth mapping)
+//    - Max file: 256 MB (32-bit address space constraint)
+//    - Max total: 512 MB across all mappings
+//    - Max count: 32 simultaneous mappings
+//
+//  Falls back to read-ahead cache for files outside these limits.
+// ================================================================
+
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+
+struct MpqMapping {
+    HANDLE fileHandle;
+    HANDLE mappingHandle;
+    void*  baseAddress;
+    DWORD  fileSize;
+    bool   active;
+};
+
+static constexpr int    MAX_MPQ_MAPPINGS    = 32;
+static constexpr DWORD  MPQ_MMAP_MIN_SIZE   = 256 * 1024;              // 256 KB
+static constexpr DWORD  MPQ_MMAP_MAX_SIZE   = 512 * 1024 * 1024;      // 512 MB
+static constexpr DWORD  MPQ_MMAP_MAX_TOTAL  = 1024 * 1024 * 1024;     // 1 GB total
+
+static MpqMapping g_mpqMappings[MAX_MPQ_MAPPINGS] = {};
+static SRWLOCK    g_mpqMapLock = SRWLOCK_INIT;
+static DWORD      g_mpqMapTotalBytes = 0;
+static long       g_mpqMapHits    = 0;
+static long       g_mpqMapMisses  = 0;
+static int        g_mpqMapCount   = 0;
+
+static MpqMapping* FindMpqMapping(HANDLE h) {
+    for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
+        if (g_mpqMappings[i].active && g_mpqMappings[i].fileHandle == h)
+            return &g_mpqMappings[i];
+    }
+    return nullptr;
+}
+
+static MpqMapping* CreateMpqMapping(HANDLE hFile, const char* pathForLog = nullptr) {
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize)) return nullptr;
+
+    // Size checks with logging
+    if (fileSize.QuadPart < MPQ_MMAP_MIN_SIZE) {
+        if (pathForLog) {
+            Log("MPQ skip: %s (%.0f KB < %d KB min)",
+                pathForLog, fileSize.QuadPart / 1024.0, MPQ_MMAP_MIN_SIZE / 1024);
+        }
+        return nullptr;
+    }
+    if (fileSize.QuadPart > MPQ_MMAP_MAX_SIZE) {
+        if (pathForLog) {
+            Log("MPQ skip: %s (%.0f MB > %d MB max, using read-ahead cache)",
+                pathForLog, fileSize.QuadPart / (1024.0 * 1024.0), MPQ_MMAP_MAX_SIZE / (1024 * 1024));
+        }
+        return nullptr;
+    }
+
+    DWORD fsize = (DWORD)fileSize.QuadPart;
+
+    // Total limit check
+    if (g_mpqMapTotalBytes + fsize > MPQ_MMAP_MAX_TOTAL) {
+        if (pathForLog) {
+            Log("MPQ skip: %s (%.0f MB, total limit %d MB reached)",
+                pathForLog, fsize / (1024.0 * 1024.0), MPQ_MMAP_MAX_TOTAL / (1024 * 1024));
+        }
+        return nullptr;
+    }
+
+    // Already mapped?
+    if (FindMpqMapping(hFile)) return nullptr;
+
+    HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMapping) return nullptr;
+
+    void* base = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+    if (!base) {
+        CloseHandle(hMapping);
+        return nullptr;
+    }
+
+    // Find free slot
+    for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
+        if (!g_mpqMappings[i].active) {
+            g_mpqMappings[i].fileHandle    = hFile;
+            g_mpqMappings[i].mappingHandle = hMapping;
+            g_mpqMappings[i].baseAddress   = base;
+            g_mpqMappings[i].fileSize      = fsize;
+            g_mpqMappings[i].active        = true;
+            g_mpqMapTotalBytes += fsize;
+            g_mpqMapCount++;
+            return &g_mpqMappings[i];
+        }
+    }
+
+    // No free slot
+    UnmapViewOfFile(base);
+    CloseHandle(hMapping);
+    return nullptr;
+}
+
+static void DestroyMpqMapping(HANDLE hFile) {
+    for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
+        if (g_mpqMappings[i].active && g_mpqMappings[i].fileHandle == hFile) {
+            UnmapViewOfFile(g_mpqMappings[i].baseAddress);
+            // NOTE: mappingHandle is intentionally NOT closed here.
+            // CloseHandle is hooked → hooked_CloseHandle → AcquireSRWLock → DEADLOCK
+            // The OS will close the handle when the process exits.
+            // For runtime cleanup, we just unmap the view — that's sufficient.
+            g_mpqMapTotalBytes -= g_mpqMappings[i].fileSize;
+            g_mpqMapCount--;
+            g_mpqMappings[i].active = false;
+            g_mpqMappings[i].baseAddress = nullptr;
+            g_mpqMappings[i].mappingHandle = nullptr;
+            g_mpqMappings[i].fileSize = 0;
+            return;
+        }
+    }
+}
+
+#endif // !CRASH_TEST_DISABLE_MPQ_MMAP
+
+// ================================================================
 // 5. ReadFile Cache (MPQ-only)
 // ================================================================
 typedef BOOL (WINAPI* ReadFile_fn)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
@@ -569,9 +724,8 @@ static const DWORD READ_AHEAD_LOADING  = 256 * 1024;
 static const DWORD READ_AHEAD_MAX      = 256 * 1024;  // buffer allocation size
 static ReadCache   g_readCache[MAX_CACHED_HANDLES] = {};
 static int         g_cacheEvictIndex = 0;               
-static CRITICAL_SECTION g_cacheLock;
+static SRWLOCK g_cacheLock = SRWLOCK_INIT;
 static bool g_cacheInitialized = false;
-static bool g_csInitialized    = false;
 
 static ReadCache* FindCache(HANDLE h) {
     for (int i = 0; i < MAX_CACHED_HANDLES; i++)
@@ -607,14 +761,47 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         nBytesToRead >= READ_AHEAD_MAX)
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
-    __try {
+    // === Memory-mapped fast path (zero kernel read transitions) ===
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+    {
+        AcquireSRWLockShared(&g_mpqMapLock);
+        MpqMapping* m = FindMpqMapping(hFile);
+        if (m) {
+            LARGE_INTEGER zero, currentPos;
+            zero.QuadPart = 0;
+            BOOL gotPos = SetFilePointerEx(hFile, zero, &currentPos, FILE_CURRENT);
+            if (gotPos) {
+                DWORD offset = (DWORD)currentPos.QuadPart;
+                if (offset + nBytesToRead <= m->fileSize) {
+                    __try {
+                        memcpy(lpBuffer, (const uint8_t*)m->baseAddress + offset, nBytesToRead);
+                        if (lpBytesRead) *lpBytesRead = nBytesToRead;
+                        LARGE_INTEGER newPos;
+                        newPos.QuadPart = (LONGLONG)(offset + nBytesToRead);
+                        SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
+                        InterlockedIncrement(&g_mpqMapHits);
+                        ReleaseSRWLockShared(&g_mpqMapLock);
+                        return TRUE;
+                    }
+                    __except(EXCEPTION_EXECUTE_HANDLER) {
+                        InterlockedIncrement(&g_mpqMapMisses);
+                    }
+                }
+            }
+        }
+        ReleaseSRWLockShared(&g_mpqMapLock);
+    }
+#endif
 
-    EnterCriticalSection(&g_cacheLock);
+    // === Read-ahead cache path ===
+    AcquireSRWLockExclusive(&g_cacheLock);
+
+    __try {
 
     LARGE_INTEGER currentPos, zero;
     zero.QuadPart = 0;
     if (!SetFilePointerEx(hFile, zero, &currentPos, FILE_CURRENT)) {
-        LeaveCriticalSection(&g_cacheLock);
+        ReleaseSRWLockExclusive(&g_cacheLock);
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
     }
 
@@ -625,13 +812,12 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
         LONGLONG rStart = currentPos.QuadPart;
         LONGLONG rEnd   = rStart + nBytesToRead;
         if (rStart >= cStart && rEnd <= cEnd) {
-            DWORD offset = (DWORD)(rStart - cStart);
-            memcpy(lpBuffer, cache->buffer + offset, nBytesToRead);
+            DWORD off = (DWORD)(rStart - cStart);
+            memcpy(lpBuffer, cache->buffer + off, nBytesToRead);
             if (lpBytesRead) *lpBytesRead = nBytesToRead;
-            // Advance file pointer only if needed for next sequential read
             LARGE_INTEGER newPos; newPos.QuadPart = rEnd;
             SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
-            LeaveCriticalSection(&g_cacheLock);
+            ReleaseSRWLockExclusive(&g_cacheLock);
             return TRUE;
         }
     }
@@ -639,7 +825,6 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     if (!cache) cache = AllocCache(hFile);
     if (cache && cache->buffer) {
         cache->fileOffset = currentPos;
-        // Read-ahead size adapts to game state
         DWORD readAhead = LuaOpt::IsLoadingMode() ? READ_AHEAD_LOADING : READ_AHEAD_NORMAL;
         DWORD bytesRead = 0;
         BOOL ok = orig_ReadFile(hFile, cache->buffer, readAhead, &bytesRead, NULL);
@@ -648,24 +833,22 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
             DWORD toCopy = (nBytesToRead < bytesRead) ? nBytesToRead : bytesRead;
             memcpy(lpBuffer, cache->buffer, toCopy);
             if (lpBytesRead) *lpBytesRead = toCopy;
-            // File pointer is already at the right position after orig_ReadFile
-            // But we need to set it to where the caller expects
             if (toCopy < bytesRead) {
-                LARGE_INTEGER newPos; newPos.QuadPart = currentPos.QuadPart + toCopy;
-                SetFilePointerEx(hFile, newPos, NULL, FILE_BEGIN);
+                LARGE_INTEGER newPos2; newPos2.QuadPart = currentPos.QuadPart + toCopy;
+                SetFilePointerEx(hFile, newPos2, NULL, FILE_BEGIN);
             }
-            LeaveCriticalSection(&g_cacheLock);
+            ReleaseSRWLockExclusive(&g_cacheLock);
             return TRUE;
         }
         cache->validBytes = 0;
         SetFilePointerEx(hFile, currentPos, NULL, FILE_BEGIN);
     }
 
-    LeaveCriticalSection(&g_cacheLock);
+    ReleaseSRWLockExclusive(&g_cacheLock);
     return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        __try { LeaveCriticalSection(&g_cacheLock); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        ReleaseSRWLockExclusive(&g_cacheLock);
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
     }
 }
@@ -1291,7 +1474,17 @@ static HANDLE WINAPI hooked_CreateFileA(LPCSTR lpFileName, DWORD dwAccess, DWORD
         }
     }
     HANDLE result = orig_CreateFileA(lpFileName, dwAccess, dwShare, lpSA, dwDisposition, dwFlags, hTemplate);
-    if (isMPQ && result != INVALID_HANDLE_VALUE) TrackMpqHandle(result);
+    if (isMPQ && result != INVALID_HANDLE_VALUE) {
+        TrackMpqHandle(result);
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+        AcquireSRWLockExclusive(&g_mpqMapLock);
+        MpqMapping* m = CreateMpqMapping(result, lpFileName);
+        ReleaseSRWLockExclusive(&g_mpqMapLock);
+        if (m) {
+            Log("MPQ mmap: %s (%.1f MB)", lpFileName, m->fileSize / (1024.0 * 1024.0));
+        }
+#endif
+    }
     return result;
 }
 
@@ -1306,7 +1499,14 @@ static HANDLE WINAPI hooked_CreateFileW(LPCWSTR lpFileName, DWORD dwAccess, DWOR
         }
     }
     HANDLE result = orig_CreateFileW(lpFileName, dwAccess, dwShare, lpSA, dwDisposition, dwFlags, hTemplate);
-    if (isMPQ && result != INVALID_HANDLE_VALUE) TrackMpqHandle(result);
+    if (isMPQ && result != INVALID_HANDLE_VALUE) {
+        TrackMpqHandle(result);
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+        AcquireSRWLockExclusive(&g_mpqMapLock);
+        CreateMpqMapping(result, nullptr);
+        ReleaseSRWLockExclusive(&g_mpqMapLock);
+#endif
+    }
     return result;
 }
 
@@ -1334,15 +1534,20 @@ static BOOL WINAPI hooked_CloseHandle(HANDLE hObject) {
     if (!hObject || hObject == INVALID_HANDLE_VALUE ||
         hObject == GetCurrentProcess() || hObject == GetCurrentThread())
         return orig_CloseHandle(hObject);
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+    AcquireSRWLockExclusive(&g_mpqMapLock);
+    DestroyMpqMapping(hObject);
+    ReleaseSRWLockExclusive(&g_mpqMapLock);
+#endif
     UntrackMpqHandle(hObject);
     if (g_cacheInitialized) {
-        EnterCriticalSection(&g_cacheLock);
+        AcquireSRWLockExclusive(&g_cacheLock);
         for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
             if (g_readCache[i].active && g_readCache[i].handle == hObject) {
                 g_readCache[i].active = false; g_readCache[i].validBytes = 0; break;
             }
         }
-        LeaveCriticalSection(&g_cacheLock);
+        ReleaseSRWLockExclusive(&g_cacheLock);
     }
     return orig_CloseHandle(hObject);
 }
@@ -1354,6 +1559,81 @@ static bool InstallCloseHandleHook() {
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("CloseHandle hook: ACTIVE (cache invalidation on file close)");
     return true;
+}
+
+// ================================================================
+// 9c. Retroactive MPQ Handle Scanner
+// ================================================================
+
+typedef DWORD (WINAPI* GetFinalPathNameByHandleA_fn)(HANDLE, LPSTR, DWORD, DWORD);
+static GetFinalPathNameByHandleA_fn pGetFinalPathNameByHandleA = nullptr;
+
+static void ScanExistingMpqHandles() {
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (hK32) {
+        pGetFinalPathNameByHandleA = (GetFinalPathNameByHandleA_fn)
+            GetProcAddress(hK32, "GetFinalPathNameByHandleA");
+    }
+    if (!pGetFinalPathNameByHandleA) {
+        Log("MPQ scan: GetFinalPathNameByHandleA not available — skipped");
+        return;
+    }
+
+    char pathBuf[MAX_PATH];
+    int tracked = 0;
+    int mapped  = 0;
+    int alreadyTracked = 0;
+
+    for (DWORD h = 4; h < 0x10000; h += 4) {
+        HANDLE handle = (HANDLE)(uintptr_t)h;
+
+        SetLastError(0);
+        DWORD fileType = GetFileType(handle);
+        if (fileType != FILE_TYPE_DISK) continue;
+        if (GetLastError() == ERROR_INVALID_HANDLE) continue;
+
+        DWORD len = pGetFinalPathNameByHandleA(handle, pathBuf, MAX_PATH,
+                                                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (len == 0 || len >= MAX_PATH) continue;
+
+        const char* ext = strrchr(pathBuf, '.');
+        if (!ext) continue;
+        if (_stricmp(ext, ".mpq") != 0 && _stricmp(ext, ".MPQ") != 0) continue;
+
+        if (IsMpqHandle(handle)) {
+            alreadyTracked++;
+            continue;
+        }
+
+        TrackMpqHandle(handle);
+        tracked++;
+
+        const char* displayPath = pathBuf;
+        if (pathBuf[0] == '\\' && pathBuf[1] == '\\' &&
+            pathBuf[2] == '?' && pathBuf[3] == '\\') {
+            displayPath = pathBuf + 4;
+        }
+
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+        AcquireSRWLockExclusive(&g_mpqMapLock);
+        MpqMapping* m = CreateMpqMapping(handle, displayPath);
+        ReleaseSRWLockExclusive(&g_mpqMapLock);
+        if (m) {
+            mapped++;
+            Log("MPQ mmap: %s (%.1f MB)", displayPath, m->fileSize / (1024.0 * 1024.0));
+        }
+#else
+        Log("MPQ tracked: %s", displayPath);
+#endif
+    }
+
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+    Log("MPQ scan: %d handles tracked, %d memory-mapped (%.1f MB), %d already tracked",
+        tracked, mapped, g_mpqMapTotalBytes / (1024.0 * 1024.0), alreadyTracked);
+#else
+    Log("MPQ scan: %d handles tracked, %d already tracked (mmap disabled)",
+        tracked, alreadyTracked);
+#endif
 }
 
 // ================================================================
@@ -1382,6 +1662,25 @@ static bool InstallFlushFileBuffersHook() {
 }
 
 // ================================================================
+// 9d. Multi-Client Detection
+//
+//  If multiple WoW instances run with wow_optimize.dll,
+//  PreciseSleep busy-wait causes excessive CPU usage.
+//  Detect via named mutex, adjust timer and sleep behavior.
+// ================================================================
+
+static void DetectMultiClient() {
+    g_instanceMutex = CreateMutexA(NULL, FALSE, "wow_optimize_instance_v2");
+    if (g_instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        g_isMultiClient = true;
+        Log("Multi-client: DETECTED (conservative timer + sleep)");
+    } else {
+        g_isMultiClient = false;
+        Log("Single client: optimal timer + sleep settings");
+    }
+}
+
+// ================================================================
 // 10. System Timer Resolution
 // ================================================================
 static void SetHighTimerResolution() {
@@ -1391,8 +1690,14 @@ static void SetHighTimerResolution() {
     auto p = (NtSetTimerRes_fn)GetProcAddress(h, "NtSetTimerResolution");
     if (!p) return;
     ULONG actual;
-    if (p(5000, TRUE, &actual) == 0)
-        Log("Timer resolution: %.3f ms (requested 0.500 ms)", actual / 10000.0);
+    // Multi-client: 1.0ms to reduce CPU overhead
+    // Single client: 0.5ms for best frame pacing
+    ULONG requested = g_isMultiClient ? 10000 : 5000;
+    double requestedMs = requested / 10000.0;
+    if (p(requested, TRUE, &actual) == 0)
+        Log("Timer resolution: %.3f ms (requested %.3f ms%s)",
+            actual / 10000.0, requestedMs,
+            g_isMultiClient ? ", multi-client mode" : "");
     else
         Log("WARNING: Timer resolution change failed");
 }
@@ -1543,13 +1848,49 @@ static void TryRemoveFPSCap() {
     if (addr) {
         DWORD old;
         if (VirtualProtect((void*)(addr + 1), 4, PAGE_EXECUTE_READWRITE, &old)) {
-            *(uint32_t*)(addr + 1) = 300;
+            *(uint32_t*)(addr + 1) = 999;
             VirtualProtect((void*)(addr + 1), 4, old, &old);
-            Log("FPS cap: changed from 200 to 300 at 0x%08X", (unsigned)addr);
+            Log("FPS cap: changed from 200 to 999 at 0x%08X", (unsigned)addr);
         }
     } else {
         Log("FPS cap: signature not found (may be a different build)");
     }
+}
+
+// ================================================================
+// Periodic Stats Dump
+//
+//  WoW often hangs on exit, so DLL_PROCESS_DETACH stats never
+//  get written. Dump key stats every 5 minutes from hooked_Sleep.
+// ================================================================
+
+static void DumpPeriodicStats() {
+    Log("[Stats] ====================================");
+
+#if !CRASH_TEST_DISABLE_MPQ_MMAP
+    Log("[Stats] MPQ mmap: %ld reads, %ld faults, %d files, %.1f MB mapped",
+        g_mpqMapHits, g_mpqMapMisses, g_mpqMapCount,
+        g_mpqMapTotalBytes / (1024.0 * 1024.0));
+#endif
+
+    if (g_flushSkipped > 0)
+        Log("[Stats] FlushFileBuffers: %ld MPQ skipped", g_flushSkipped);
+    if (g_compareAsciiHits + g_compareFallbacks > 0)
+        Log("[Stats] CompareStringA: %ld fast, %ld fallback",
+            g_compareAsciiHits, g_compareFallbacks);
+    if (g_fileAttrHits + g_fileAttrMisses > 0)
+        Log("[Stats] GetFileAttributes: %ld hits, %ld misses",
+            g_fileAttrHits, g_fileAttrMisses);
+    if (g_badPtrFastChecks > 0)
+        Log("[Stats] IsBadPtr: %ld fast checks", g_badPtrFastChecks);
+    if (g_csSpinHits > 0)
+        Log("[Stats] CriticalSection: %ld spin-acquired", g_csSpinHits);
+    if (g_sfpRedirected > 0)
+        Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
+    if (g_debugStringSkipped > 0)
+        Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
+
+    Log("[Stats] ====================================");
 }
 
 // ================================================================
@@ -1567,8 +1908,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     if (MH_Initialize() != MH_OK) { Log("FATAL: MinHook initialization failed"); LogClose(); return 1; }
     Log("MinHook initialized");
 
-    InitializeCriticalSection(&g_cacheLock);
-    g_csInitialized = true;
 
     ConfigureMimalloc();
     TryEnableLargePages();
@@ -1601,12 +1940,16 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool readOk  = InstallReadFileHook();
     bool closeOk = InstallCloseHandleHook();
     bool flushOk = InstallFlushFileBuffersHook();
+    Log("--- MPQ Scan ---");
+    ScanExistingMpqHandles();
     Log("--- File Attributes ---");
-    bool faOk = InstallGetFileAttributesHook();\
+    bool faOk = InstallGetFileAttributesHook();
     Log("--- File Pointer ---");
     bool sfpOk = InstallSetFilePointerHook();
     Log("--- Global Alloc ---");
     bool gaOk  = InstallGlobalAllocHooks();    
+    Log("--- Multi-Client ---");
+    DetectMultiClient();
     Log("--- System Timer ---");
     SetHighTimerResolution();
     Log("--- Threads ---");
@@ -1660,6 +2003,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk      ? " OK " : "FAIL");
     Log("  [%s] CreateFile (sequential I/O)",  fileOk      ? " OK " : "FAIL");
     Log("  [%s] ReadFile (adaptive MPQ cache)", readOk     ? " OK " : "FAIL");
+    #if !CRASH_TEST_DISABLE_MPQ_MMAP
+        Log("  [ OK ] MPQ memory mapping (1-256MB files)");
+    #else
+        Log("  [SKIP] MPQ memory mapping (crash isolation)");
+    #endif    
     Log("  [%s] CloseHandle (cache cleanup)",  closeOk     ? " OK " : "FAIL");
     Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
     Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
@@ -1669,7 +2017,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [ OK ] Thread affinity + priority");
     Log("  [ OK ] Working set (256MB-2GB)");
     Log("  [ OK ] Process priority (Above Normal)");
-    Log("  [ OK ] FPS cap removal (200 -> 300)");
+    Log("  [ OK ] FPS cap removal (200 -> 999)");
+    if (g_isMultiClient) {
+        Log("  [ OK ] Multi-client mode (conservative timer + sleep)");
+    }
     Log("  [%s] Lua VM GC optimizer",          luaOk       ? "WAIT" : "SKIP");
     Log("  [%s] Combat log optimizer",         combatLogOk ? " OK " : "SKIP");
     Log("  [%s] UI widget cache",              uiCacheOk   ? " OK " : "SKIP");
@@ -1709,8 +2060,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();
             if (g_flushSkipped > 0)
-                Log("FlushFileBuffers: %ld MPQ flushes skipped", g_flushSkipped);            
-            if (g_flushSkipped > 0)
                 Log("FlushFileBuffers: %ld MPQ flushes skipped", g_flushSkipped);
             if (g_debugStringSkipped > 0)
                 Log("OutputDebugStringA: %ld calls skipped (no debugger)", g_debugStringSkipped);
@@ -1731,7 +2080,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             if (g_sfpRedirected > 0)
                 Log("SetFilePointer: %ld calls redirected to SetFilePointerEx", g_sfpRedirected);
             if (g_globalAllocFast > 0)
-                Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast);                                     
+                Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast); 
+            #if !CRASH_TEST_DISABLE_MPQ_MMAP
+            if (g_mpqMapHits + g_mpqMapMisses > 0)
+                Log("MPQ mmap: %ld reads served, %ld faults, %d files mapped, %.1f MB total",
+                    g_mpqMapHits, g_mpqMapMisses, g_mpqMapCount,
+                    g_mpqMapTotalBytes / (1024.0 * 1024.0));
+            #endif 
+            if (g_instanceMutex) {
+                CloseHandle(g_instanceMutex);
+                g_instanceMutex = NULL;
+            }                                    
+            #if !CRASH_TEST_DISABLE_MPQ_MMAP
+                        for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
+                            if (g_mpqMappings[i].active) {
+                                UnmapViewOfFile(g_mpqMappings[i].baseAddress);
+                                // mapping handles closed by OS on process exit
+                                g_mpqMappings[i].active = false;
+                            }
+                        }
+            #endif                                
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
