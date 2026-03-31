@@ -34,6 +34,7 @@
 #define CRASH_TEST_DISABLE_SETFILEPOINTER  0
 #define CRASH_TEST_DISABLE_ISBADPTR        0
 #define CRASH_TEST_DISABLE_MPQ_MMAP        0
+#define CRASH_TEST_DISABLE_QPC_CACHE       0
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -45,6 +46,9 @@ static bool   g_isMultiClient = false;
 static HANDLE g_instanceMutex = NULL;
 static int    g_periodicStatsCounter = 0;
 static void   DumpPeriodicStats();
+// Forward declarations for MPQ prefetch
+static void PrefetchMappedMPQs();
+static void ResetPrefetchFlag();
 
 // ================================================================
 // Logging — ring buffer + background thread
@@ -296,6 +300,13 @@ static void WINAPI hooked_Sleep(DWORD ms) {
 
         LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
+
+        // Prefetch mapped MPQ data when entering loading screen
+        if (LuaOpt::IsLoadingMode()) {
+            PrefetchMappedMPQs();
+        } else {
+            ResetPrefetchFlag();
+        }
 
         // Periodic stats dump:
         // First dump after ~30 seconds (1800 frames at 60fps)
@@ -757,11 +768,11 @@ static ReadCache* AllocCache(HANDLE h) {
 static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     DWORD nBytesToRead, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped)
 {
-    if (lpOverlapped || !g_cacheInitialized || !IsMpqHandle(hFile) ||
-        nBytesToRead >= READ_AHEAD_MAX)
+    // Skip: overlapped I/O, non-MPQ, or not initialized
+    if (lpOverlapped || !g_cacheInitialized || !IsMpqHandle(hFile))
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
-    // === Memory-mapped fast path (zero kernel read transitions) ===
+    // === Memory-mapped fast path (ANY read size, zero kernel transitions) ===
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
     {
         AcquireSRWLockShared(&g_mpqMapLock);
@@ -793,7 +804,10 @@ static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     }
 #endif
 
-    // === Read-ahead cache path ===
+    // === Read-ahead cache path (only for small reads) ===
+    if (nBytesToRead >= READ_AHEAD_MAX)
+        return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
+
     AcquireSRWLockExclusive(&g_cacheLock);
 
     __try {
@@ -1456,6 +1470,58 @@ static bool InstallThreadIdCacheHook() {
 }
 
 // ================================================================
+// 7f3. QueryPerformanceCounter — Coalesced
+// ================================================================
+
+typedef BOOL (WINAPI* QueryPerformanceCounter_fn)(LARGE_INTEGER*);
+static QueryPerformanceCounter_fn orig_QPC = nullptr;
+
+static __declspec(thread) LONGLONG t_lastQPC = 0;
+static __declspec(thread) LONGLONG t_lastQPCTime = 0;
+static long g_qpcCacheHits = 0;
+static long g_qpcCacheMisses = 0;
+
+// Coalescing window in QPC ticks (calculated at init)
+static LONGLONG g_qpcCoalesceWindow = 0;
+
+static BOOL WINAPI hooked_QPC(LARGE_INTEGER* lpPerformanceCount) {
+    if (!lpPerformanceCount)
+        return orig_QPC(lpPerformanceCount);
+
+    LARGE_INTEGER now;
+    orig_QPC(&now);
+
+    LONGLONG elapsed = now.QuadPart - t_lastQPCTime;
+
+    if (elapsed >= 0 && elapsed < g_qpcCoalesceWindow && t_lastQPCTime != 0) {
+        lpPerformanceCount->QuadPart = t_lastQPC;
+        InterlockedIncrement(&g_qpcCacheHits);
+        return TRUE;
+    }
+
+    t_lastQPC = now.QuadPart;
+    t_lastQPCTime = now.QuadPart;
+    lpPerformanceCount->QuadPart = now.QuadPart;
+    InterlockedIncrement(&g_qpcCacheMisses);
+    return TRUE;
+}
+
+static bool InstallQPCHook() {
+    // Calculate coalescing window: 50 microseconds in QPC ticks
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    g_qpcCoalesceWindow = freq.QuadPart / 20000;  // 50us
+    if (g_qpcCoalesceWindow < 1) g_qpcCoalesceWindow = 1;
+
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "QueryPerformanceCounter");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_QPC, (void**)&orig_QPC) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("QPC hook: ACTIVE (50us coalescing, %lld ticks window)", g_qpcCoalesceWindow);
+    return true;
+}
+
+// ================================================================
 // 8. CreateFile — Sequential Scan + MPQ Tracking
 // ================================================================
 typedef HANDLE (WINAPI* CreateFileA_fn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -1634,6 +1700,88 @@ static void ScanExistingMpqHandles() {
     Log("MPQ scan: %d handles tracked, %d already tracked (mmap disabled)",
         tracked, alreadyTracked);
 #endif
+}
+
+// ================================================================
+// 9e. MPQ Prefetch During Loading
+//
+//  When entering a loading screen, proactively tell the OS
+//  to page in all memory-mapped MPQ data. This converts
+//  random page faults during asset loading into a single
+//  sequential prefetch operation.
+//
+//  Uses PrefetchVirtualMemory (Win8+) or sequential touch.
+// ================================================================
+
+typedef BOOL (WINAPI* PrefetchVirtualMemory_fn)(
+    HANDLE, ULONG_PTR, PVOID, ULONG);
+static PrefetchVirtualMemory_fn pPrefetchVirtualMemory = nullptr;
+static bool g_prefetchResolved = false;
+static bool g_prefetchAvailable = false;
+static volatile LONG g_prefetchDone = 0;
+
+static void ResolvePrefetch() {
+    if (g_prefetchResolved) return;
+    g_prefetchResolved = true;
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (hK32) {
+        pPrefetchVirtualMemory = (PrefetchVirtualMemory_fn)
+            GetProcAddress(hK32, "PrefetchVirtualMemory");
+    }
+    g_prefetchAvailable = (pPrefetchVirtualMemory != nullptr);
+    Log("MPQ prefetch: %s", g_prefetchAvailable ? "PrefetchVirtualMemory available" : "fallback to sequential touch");
+}
+
+static void PrefetchMappedMPQs() {
+#if CRASH_TEST_DISABLE_MPQ_MMAP
+    return;
+#endif
+
+    // Only prefetch once per loading screen
+    if (InterlockedCompareExchange(&g_prefetchDone, 1, 0) != 0) return;
+
+    AcquireSRWLockShared(&g_mpqMapLock);
+
+    int prefetched = 0;
+
+    for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
+        if (!g_mpqMappings[i].active) continue;
+
+        if (g_prefetchAvailable && pPrefetchVirtualMemory) {
+            // Win8+ path: single syscall to prefetch entire region
+            WIN32_MEMORY_RANGE_ENTRY entry;
+            entry.VirtualAddress = g_mpqMappings[i].baseAddress;
+            entry.NumberOfBytes  = g_mpqMappings[i].fileSize;
+            pPrefetchVirtualMemory(GetCurrentProcess(), 1, &entry, 0);
+            prefetched++;
+        } else {
+            // Fallback: touch every 4KB page to fault it in
+            volatile uint8_t* base = (volatile uint8_t*)g_mpqMappings[i].baseAddress;
+            DWORD size = g_mpqMappings[i].fileSize;
+            __try {
+                volatile uint8_t dummy;
+                for (DWORD off = 0; off < size; off += 4096) {
+                    dummy = base[off];
+                }
+                (void)dummy;
+                prefetched++;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                // Page fault on mapped file — skip this one
+            }
+        }
+    }
+
+    ReleaseSRWLockShared(&g_mpqMapLock);
+
+    if (prefetched > 0) {
+        Log("MPQ prefetch: %d archives prefetched (%.1f MB)",
+            prefetched, g_mpqMapTotalBytes / (1024.0 * 1024.0));
+    }
+}
+
+static void ResetPrefetchFlag() {
+    InterlockedExchange(&g_prefetchDone, 0);
 }
 
 // ================================================================
@@ -1873,14 +2021,25 @@ static void DumpPeriodicStats() {
         g_mpqMapTotalBytes / (1024.0 * 1024.0));
 #endif
 
+#if !CRASH_TEST_DISABLE_QPC_CACHE
+    if (g_qpcCacheHits + g_qpcCacheMisses > 0) {
+        long total = g_qpcCacheHits + g_qpcCacheMisses;
+        Log("[Stats] QPC: %ld cached, %ld real (%.1f%% cache hit)",
+            g_qpcCacheHits, g_qpcCacheMisses,
+            (double)g_qpcCacheHits / total * 100.0);
+    }
+#endif
+
     if (g_flushSkipped > 0)
         Log("[Stats] FlushFileBuffers: %ld MPQ skipped", g_flushSkipped);
     if (g_compareAsciiHits + g_compareFallbacks > 0)
-        Log("[Stats] CompareStringA: %ld fast, %ld fallback",
-            g_compareAsciiHits, g_compareFallbacks);
+        Log("[Stats] CompareStringA: %ld fast, %ld fallback (%.1f%%)",
+            g_compareAsciiHits, g_compareFallbacks,
+            (double)g_compareAsciiHits / (g_compareAsciiHits + g_compareFallbacks) * 100.0);
     if (g_fileAttrHits + g_fileAttrMisses > 0)
-        Log("[Stats] GetFileAttributes: %ld hits, %ld misses",
-            g_fileAttrHits, g_fileAttrMisses);
+        Log("[Stats] GetFileAttributes: %ld hits, %ld misses (%.1f%%)",
+            g_fileAttrHits, g_fileAttrMisses,
+            (double)g_fileAttrHits / (g_fileAttrHits + g_fileAttrMisses) * 100.0);
     if (g_badPtrFastChecks > 0)
         Log("[Stats] IsBadPtr: %ld fast checks", g_badPtrFastChecks);
     if (g_csSpinHits > 0)
@@ -1925,6 +2084,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool heapOk = InstallHeapOptimization();
     Log("--- Thread ID Cache ---");
     bool tidOk = InstallThreadIdCacheHook();
+    Log("--- QPC Cache ---");
+#if !CRASH_TEST_DISABLE_QPC_CACHE
+    bool qpcOk = InstallQPCHook();
+#else
+    bool qpcOk = false;
+    Log("QPC hook: DISABLED (crash isolation)");
+#endif     
     Log("--- Bad Pointer Checks ---");
     bool bpOk  = InstallBadPtrHooks();    
     Log("--- String Comparison ---");
@@ -1942,6 +2108,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool flushOk = InstallFlushFileBuffersHook();
     Log("--- MPQ Scan ---");
     ScanExistingMpqHandles();
+    ResolvePrefetch();
     Log("--- File Attributes ---");
     bool faOk = InstallGetFileAttributesHook();
     Log("--- File Pointer ---");
@@ -1996,6 +2163,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] timeGetTime (QPC sync)",       tgtOk       ? " OK " : "FAIL");
     Log("  [%s] Heap optimization (LFH)",      heapOk      ? " OK " : "FAIL");
     Log("  [%s] ThreadId cache (TLS)",         tidOk       ? " OK " : "FAIL");
+    #if !CRASH_TEST_DISABLE_QPC_CACHE
+        Log("  [%s] QPC cache (50us coalesce)",    qpcOk       ? " OK " : "FAIL");
+    #else
+        Log("  [SKIP] QPC cache (crash isolation)");
+    #endif        
     Log("  [%s] IsBadPtr (fast VirtualQuery)", bpOk        ? " OK " : "FAIL");    
     Log("  [%s] CompareStringA (ASCII fast)",  cmpOk       ? " OK " : "FAIL");
     Log("  [%s] OutputDebugString (no-op)",    debugOk     ? " OK " : "FAIL");
