@@ -8,26 +8,11 @@
 extern "C" void Log(const char* fmt, ...);
 
 // ================================================================
-//  Lua Fast Path — Optimized string.format
-//
-//  WoW validates C closure function pointers — only accepts
-//  addresses within Wow.exe. We CANNOT register our own C
-//  functions via lua_pushcclosure. Only MinHook detours work
-//  (they redirect at the original Wow.exe address).
-//
-//  string.format hook:
-//    Ultra-fast paths for %d, %s, %.Nf (most common patterns)
-//    Generic fast path for any simple format specifiers
-//    Falls back to original for %q, %*, tables as %s args
+//  Lua types and API (known addresses build 12340)
 // ================================================================
 
-typedef struct lua_State lua_State;
 typedef double lua_Number;
 typedef int (__cdecl *lua_CFunction_t)(lua_State* L);
-
-// ================================================================
-//  Lua API — known addresses build 12340
-// ================================================================
 
 typedef const char* (__cdecl *fn_lua_tolstring)(lua_State* L, int index, size_t* len);
 typedef lua_Number  (__cdecl *fn_lua_tonumber)(lua_State* L, int index);
@@ -35,7 +20,10 @@ typedef int         (__cdecl *fn_lua_gettop)(lua_State* L);
 typedef int         (__cdecl *fn_lua_type)(lua_State* L, int index);
 typedef void        (__cdecl *fn_lua_pushnumber)(lua_State* L, lua_Number n);
 typedef void        (__cdecl *fn_lua_pushstring)(lua_State* L, const char* s);
+typedef void        (__cdecl *fn_lua_pushnil)(lua_State* L);
 typedef int         (__cdecl *fn_lua_toboolean)(lua_State* L, int index);
+typedef void        (__cdecl *fn_lua_settop)(lua_State* L, int index);
+typedef void        (__cdecl *fn_lua_getfield)(lua_State* L, int index, const char* k);
 
 static fn_lua_tolstring   lua_tolstring_   = (fn_lua_tolstring)0x0084E0E0;
 static fn_lua_tonumber    lua_tonumber_    = (fn_lua_tonumber)0x0084E030;
@@ -43,19 +31,24 @@ static fn_lua_gettop      lua_gettop_      = (fn_lua_gettop)0x0084DBD0;
 static fn_lua_type        lua_type_        = (fn_lua_type)0x0084DEB0;
 static fn_lua_pushnumber  lua_pushnumber_  = (fn_lua_pushnumber)0x0084E2A0;
 static fn_lua_pushstring  lua_pushstring_  = (fn_lua_pushstring)0x0084E350;
+static fn_lua_pushnil     lua_pushnil_     = (fn_lua_pushnil)0x0084E280;
 static fn_lua_toboolean   lua_toboolean_   = (fn_lua_toboolean)0x0084E0B0;
+static fn_lua_settop      lua_settop_      = (fn_lua_settop)0x0084DBF0;
+static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 
 #define LUA_TNIL     0
 #define LUA_TBOOLEAN 1
 #define LUA_TNUMBER  3
 #define LUA_TSTRING  4
+#define LUA_TTABLE   5
+#define LUA_TFUNCTION 6
+#define LUA_GLOBALSINDEX (-10002)
 
 // ================================================================
-//  Hook Address
+//  Phase 1: string.format hook (hardcoded address)
 // ================================================================
 
 static constexpr uintptr_t ADDR_str_format = 0x00853C50;
-
 static lua_CFunction_t orig_str_format = nullptr;
 
 // ================================================================
@@ -64,10 +57,21 @@ static lua_CFunction_t orig_str_format = nullptr;
 
 static long g_formatFastHits  = 0;
 static long g_formatFallbacks = 0;
-static bool g_active          = false;
+static long g_findPlainHits   = 0;
+static long g_findFallbacks   = 0;
+static long g_typeHits        = 0;
+static long g_typeFallbacks   = 0;
+static long g_mathHits        = 0;
+static long g_mathFallbacks   = 0;
+static long g_strlenHits      = 0;
+static long g_strbyteHits     = 0;
+
+static bool g_active       = false;
+static bool g_phase2Active = false;
+static int  g_phase2Hooks  = 0;
 
 // ================================================================
-//  Format Fast Path
+//  string.format fast path (Phase 1 — unchanged logic)
 // ================================================================
 
 static int __cdecl Hooked_StrFormat(lua_State* L) {
@@ -81,105 +85,72 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
 
     int numArgs = nargs - 1;
 
-    // ============================================================
-    // Safety check: bail on any format string containing embedded
-    // nuls — these need special Lua-internal handling
-    // ============================================================
-    for (size_t i = 0; i < fmtLen; i++) {
-        if (fmt[i] == '\0') {
-            g_formatFallbacks++;
-            return orig_str_format(L);
-        }
-    }
-
-    // ============================================================
-    // Safety check: bail if any string argument contains embedded
-    // nuls — our snprintf-based path cannot handle them correctly
-    // ============================================================
+    // Safety: bail if any string arg has embedded nuls or is very long
     for (int i = 2; i <= nargs; i++) {
         if (lua_type_(L, i) == LUA_TSTRING) {
             size_t slen = 0;
             const char* s = lua_tolstring_(L, i, &slen);
-            if (s && slen > 0) {
-                // Check for embedded nuls
-                if (memchr(s, '\0', slen) != (s + slen)) {
-                    for (size_t j = 0; j < slen; j++) {
-                        if (s[j] == '\0') {
-                            g_formatFallbacks++;
-                            return orig_str_format(L);
-                        }
-                    }
-                }
-                // Also bail on very long strings —  buffers can't handle them
-                if (slen > 2048) {
-                    g_formatFallbacks++;
-                    return orig_str_format(L);
+            if (s && slen > 2048) { g_formatFallbacks++; return orig_str_format(L); }
+            if (s) {
+                for (size_t j = 0; j < slen; j++) {
+                    if (s[j] == '\0') { g_formatFallbacks++; return orig_str_format(L); }
                 }
             }
         }
     }
 
-    // ============================================================
-    // Ultra-fast paths for top patterns
-    // ============================================================
+    // Ultra-fast: "%d"
+    if (numArgs == 1 && fmtLen == 2 && fmt[0] == '%' && fmt[1] == 'd') {
+        char buf[32];
+        _snprintf(buf, 31, "%d", (int)lua_tonumber_(L, 2));
+        buf[31] = '\0';
+        lua_pushstring_(L, buf);
+        g_formatFastHits++;
+        return 1;
+    }
 
-    if (numArgs == 1) {
-        // "%d" — integer
-        if (fmtLen == 2 && fmt[0] == '%' && fmt[1] == 'd') {
-            char buf[32];
-            _snprintf(buf, 31, "%d", (int)lua_tonumber_(L, 2));
-            buf[31] = '\0';
+    // Ultra-fast: "%s"
+    if (numArgs == 1 && fmtLen == 2 && fmt[0] == '%' && fmt[1] == 's') {
+        int t = lua_type_(L, 2);
+        if (t == LUA_TSTRING) {
+            lua_pushstring_(L, lua_tolstring_(L, 2, NULL));
+        } else if (t == LUA_TNIL) {
+            lua_pushstring_(L, "nil");
+        } else if (t == LUA_TBOOLEAN) {
+            lua_pushstring_(L, lua_toboolean_(L, 2) ? "true" : "false");
+        } else if (t == LUA_TNUMBER) {
+            char buf[64];
+            _snprintf(buf, 63, "%.14g", lua_tonumber_(L, 2));
+            buf[63] = '\0';
+            lua_pushstring_(L, buf);
+        } else {
+            g_formatFallbacks++;
+            return orig_str_format(L);
+        }
+        g_formatFastHits++;
+        return 1;
+    }
+
+    // Ultra-fast: "%.Nf"
+    if (numArgs == 1 && fmtLen == 4 && fmt[0] == '%' && fmt[1] == '.' &&
+        fmt[2] >= '0' && fmt[2] <= '9' && fmt[3] == 'f') {
+        char buf[64];
+        int n = _snprintf(buf, 63, fmt, lua_tonumber_(L, 2));
+        buf[63] = '\0';
+        if (n > 0) {
             lua_pushstring_(L, buf);
             g_formatFastHits++;
             return 1;
         }
-        // "%s" — string
-        if (fmtLen == 2 && fmt[0] == '%' && fmt[1] == 's') {
-            int t = lua_type_(L, 2);
-            if (t == LUA_TSTRING) {
-                const char* s = lua_tolstring_(L, 2, NULL);
-                lua_pushstring_(L, s ? s : "");
-            } else if (t == LUA_TNIL) {
-                lua_pushstring_(L, "nil");
-            } else if (t == LUA_TBOOLEAN) {
-                lua_pushstring_(L, lua_toboolean_(L, 2) ? "true" : "false");
-            } else if (t == LUA_TNUMBER) {
-                char buf[64];
-                _snprintf(buf, 63, "%.14g", lua_tonumber_(L, 2));
-                buf[63] = '\0';
-                lua_pushstring_(L, buf);
-            } else {
-                g_formatFallbacks++;
-                return orig_str_format(L);
-            }
-            g_formatFastHits++;
-            return 1;
-        }
-        // "%.Nf" — float with precision
-        if (fmtLen == 4 && fmt[0] == '%' && fmt[1] == '.' &&
-            fmt[2] >= '0' && fmt[2] <= '9' && fmt[3] == 'f') {
-            char buf[64];
-            int n = _snprintf(buf, 63, fmt, lua_tonumber_(L, 2));
-            buf[63] = '\0';
-            if (n > 0) {
-                lua_pushstring_(L, buf);
-                g_formatFastHits++;
-                return 1;
-            }
-        }
     }
 
-    // ============================================================
     // No specifiers — return as-is
-    // ============================================================
-
     {
         bool hasSpec = false;
         for (size_t i = 0; i < fmtLen; i++) {
             if (fmt[i] == '%') {
                 if (i + 1 < fmtLen && fmt[i + 1] == '%') { i++; continue; }
-                hasSpec = true;
-                break;
+                hasSpec = true; break;
             }
         }
         if (!hasSpec && numArgs == 0) {
@@ -189,11 +160,7 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         }
     }
 
-    // ============================================================
-    // Generic parser — only for simple cases
-    // Bail to original for anything complex
-    // ============================================================
-
+    // Generic parser
     char output[4096];
     int outPos = 0;
     int argIdx = 2;
@@ -203,148 +170,425 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
     while (p < end) {
         if (*p != '%') {
             if (outPos >= 3800) goto fallback;
-            output[outPos++] = *p++;
-            continue;
+            output[outPos++] = *p++; continue;
         }
-
         p++;
         if (p >= end) goto fallback;
-
-        if (*p == '%') {
-            if (outPos >= 3800) goto fallback;
-            output[outPos++] = '%';
-            p++;
-            continue;
-        }
-
-        // Bail on %q — needs special Lua quoting logic
+        if (*p == '%') { if (outPos >= 3800) goto fallback; output[outPos++] = '%'; p++; continue; }
         if (*p == 'q') goto fallback;
 
-        char spec[32];
-        int specLen = 0;
-        spec[specLen++] = '%';
-
-        // Flags
-        while (p < end && specLen < 24 &&
-               (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0')) {
-            spec[specLen++] = *p++;
-        }
-
-        // Width — bail on * (dynamic width)
+        char spec[32]; int specLen = 0; spec[specLen++] = '%';
+        while (p < end && specLen < 24 && (*p=='-'||*p=='+'||*p==' '||*p=='#'||*p=='0')) spec[specLen++] = *p++;
         if (p < end && *p == '*') goto fallback;
-        while (p < end && specLen < 24 && *p >= '0' && *p <= '9') {
-            spec[specLen++] = *p++;
-        }
-
-        // Precision — bail on * (dynamic precision)
+        while (p < end && specLen < 24 && *p >= '0' && *p <= '9') spec[specLen++] = *p++;
         if (p < end && *p == '.') {
             spec[specLen++] = *p++;
             if (p < end && *p == '*') goto fallback;
-            while (p < end && specLen < 24 && *p >= '0' && *p <= '9') {
-                spec[specLen++] = *p++;
-            }
+            while (p < end && specLen < 24 && *p >= '0' && *p <= '9') spec[specLen++] = *p++;
         }
-
-        if (p >= end) goto fallback;
-        if (argIdx > nargs) goto fallback;
+        if (p >= end || argIdx > nargs) goto fallback;
 
         char type = *p++;
-        char tmpBuf[3072];
-        int tmpLen = 0;
-
+        char tmpBuf[3072]; int tmpLen = 0;
         switch (type) {
-            case 'd': case 'i': {
-                spec[specLen++] = 'd';
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (int)lua_tonumber_(L, argIdx));
-                break;
-            }
-            case 'u': {
-                spec[specLen++] = 'u';
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
-                break;
-            }
-            case 'x': case 'X': {
-                spec[specLen++] = type;
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
-                break;
-            }
-            case 'o': {
-                spec[specLen++] = 'o';
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (unsigned int)lua_tonumber_(L, argIdx));
-                break;
-            }
-            case 'f': case 'e': case 'g':
-            case 'E': case 'G': {
-                spec[specLen++] = type;
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, lua_tonumber_(L, argIdx));
-                break;
-            }
-            case 'c': {
-                spec[specLen++] = 'c';
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, (int)lua_tonumber_(L, argIdx));
-                break;
-            }
+            case 'd': case 'i': spec[specLen++]='d'; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,(int)lua_tonumber_(L,argIdx)); break;
+            case 'u': spec[specLen++]='u'; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,(unsigned)lua_tonumber_(L,argIdx)); break;
+            case 'x': case 'X': spec[specLen++]=type; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,(unsigned)lua_tonumber_(L,argIdx)); break;
+            case 'o': spec[specLen++]='o'; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,(unsigned)lua_tonumber_(L,argIdx)); break;
+            case 'f': case 'e': case 'g': case 'E': case 'G': spec[specLen++]=type; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,lua_tonumber_(L,argIdx)); break;
+            case 'c': spec[specLen++]='c'; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,(int)lua_tonumber_(L,argIdx)); break;
             case 's': {
-                int argType = lua_type_(L, argIdx);
-                const char* s;
-                char numBuf[64];
-
-                if (argType == LUA_TSTRING) {
-                    size_t slen = 0;
-                    s = lua_tolstring_(L, argIdx, &slen);
-                    if (!s) s = "";
-                    // Double-check: if string is longer than our buffer can handle,
-                    // bail to original which handles arbitrary lengths
-                    if (slen > 2048) goto fallback;
-                } else if (argType == LUA_TNIL) {
-                    s = "nil";
-                } else if (argType == LUA_TBOOLEAN) {
-                    s = lua_toboolean_(L, argIdx) ? "true" : "false";
-                } else if (argType == LUA_TNUMBER) {
-                    _snprintf(numBuf, 63, "%.14g", lua_tonumber_(L, argIdx));
-                    numBuf[63] = '\0';
-                    s = numBuf;
-                } else {
-                    // tables, userdata, functions — need tostring() metamethod
-                    goto fallback;
-                }
-
-                spec[specLen++] = 's';
-                spec[specLen] = '\0';
-                tmpLen = _snprintf(tmpBuf, sizeof(tmpBuf) - 1, spec, s);
-                break;
+                int at = lua_type_(L, argIdx);
+                const char* s; char numBuf[64];
+                if (at==LUA_TSTRING) { size_t sl=0; s=lua_tolstring_(L,argIdx,&sl); if(!s)s=""; if(sl>2048) goto fallback; }
+                else if (at==LUA_TNIL) s="nil";
+                else if (at==LUA_TBOOLEAN) s=lua_toboolean_(L,argIdx)?"true":"false";
+                else if (at==LUA_TNUMBER) { _snprintf(numBuf,63,"%.14g",lua_tonumber_(L,argIdx)); numBuf[63]='\0'; s=numBuf; }
+                else goto fallback;
+                spec[specLen++]='s'; spec[specLen]='\0'; tmpLen=_snprintf(tmpBuf,sizeof(tmpBuf)-1,spec,s); break;
             }
-            default:
-                goto fallback;
+            default: goto fallback;
         }
-
-        tmpBuf[sizeof(tmpBuf) - 1] = '\0';
-        argIdx++;
-
-        if (tmpLen < 0) tmpLen = (int)strlen(tmpBuf);
-        if (outPos + tmpLen >= 3800) goto fallback;
-
-        memcpy(output + outPos, tmpBuf, tmpLen);
-        outPos += tmpLen;
+        tmpBuf[sizeof(tmpBuf)-1]='\0'; argIdx++;
+        if (tmpLen<0) tmpLen=(int)strlen(tmpBuf);
+        if (outPos+tmpLen>=3800) goto fallback;
+        memcpy(output+outPos,tmpBuf,tmpLen); outPos+=tmpLen;
     }
-
-    if (argIdx != nargs + 1) goto fallback;
-
-    output[outPos] = '\0';
+    if (argIdx!=nargs+1) goto fallback;
+    output[outPos]='\0';
     lua_pushstring_(L, output);
     g_formatFastHits++;
     return 1;
-
 fallback:
     g_formatFallbacks++;
     return orig_str_format(L);
 }
+
+// ================================================================
+//  Phase 2: Runtime-Discovered Lua Function Hooks
+//
+//  System discovers C function addresses from Lua's global tables
+//  at runtime. Validates against known string.format address.
+//
+//  How it works:
+//  1. Push a known function (string.format) onto the Lua stack
+//  2. Read lua_State->base to find stack memory
+//  3. Try different TValue sizes (12 or 16 bytes)
+//  4. Try different Closure offsets for the function pointer
+//  5. When the read value matches 0x00853C50, layout is calibrated
+//  6. Use calibrated layout to discover all other functions
+// ================================================================
+
+static bool IsReadableMemory(uintptr_t addr) {
+    if (addr == 0) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD);
+}
+
+// Calibrated stack layout
+struct StackLayout {
+    int baseOffset;      // offset of 'base' field in lua_State
+    int tvalueSize;      // sizeof(TValue) — 12 or 16
+    int closureFOffset;  // offset of C function pointer in Closure
+    bool valid;
+};
+
+static StackLayout g_layout = {0, 0, 0, false};
+
+static bool CalibrateStackLayout(lua_State* L) {
+    uintptr_t L_addr = (uintptr_t)L;
+
+    int topBefore = lua_gettop_(L);
+    lua_getfield_(L, LUA_GLOBALSINDEX, "string");
+    if (lua_type_(L, -1) != LUA_TTABLE) {
+        lua_settop_(L, topBefore);
+        return false;
+    }
+    lua_getfield_(L, -1, "format");
+    if (lua_type_(L, -1) != LUA_TFUNCTION) {
+        lua_settop_(L, topBefore);
+        return false;
+    }
+
+    int funcIdx = lua_gettop_(L); // 1-based
+
+    // Try combinations: baseOffset × tvalueSize × closureFOffset
+    static const int BASE_OFFS[]   = {0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20};
+    static const int TV_SIZES[]    = {12, 16};
+    static const int CLOS_F_OFFS[] = {0x10, 0x14, 0x18, 0x0C};
+
+    for (int bi = 0; bi < 7; bi++) {
+        for (int ti = 0; ti < 2; ti++) {
+            for (int ci = 0; ci < 4; ci++) {
+                __try {
+                    uintptr_t base = *(uintptr_t*)(L_addr + BASE_OFFS[bi]);
+                    if (base == 0 || !IsReadableMemory(base)) continue;
+
+                    uintptr_t slotAddr = base + (uintptr_t)(funcIdx - 1) * TV_SIZES[ti];
+                    if (!IsReadableMemory(slotAddr + 12)) continue;
+
+                    // Type tag at offset 8 in TValue
+                    int tt = *(int*)(slotAddr + 8);
+                    if (tt != LUA_TFUNCTION) continue;
+
+                    // GCObject pointer at offset 0
+                    uintptr_t gcObj = *(uintptr_t*)(slotAddr);
+                    if (gcObj == 0 || !IsReadableMemory(gcObj + CLOS_F_OFFS[ci] + 4)) continue;
+
+                    // C function pointer
+                    uintptr_t cfunc = *(uintptr_t*)(gcObj + CLOS_F_OFFS[ci]);
+
+                    if (cfunc == ADDR_str_format) {
+                        g_layout.baseOffset     = BASE_OFFS[bi];
+                        g_layout.tvalueSize     = TV_SIZES[ti];
+                        g_layout.closureFOffset  = CLOS_F_OFFS[ci];
+                        g_layout.valid           = true;
+
+                        Log("[FastPath] Calibrated: base=L+0x%02X, TValue=%dB, Closure.f=+0x%02X",
+                            BASE_OFFS[bi], TV_SIZES[ti], CLOS_F_OFFS[ci]);
+
+                        lua_settop_(L, topBefore);
+                        return true;
+                    }
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
+            }
+        }
+    }
+
+    lua_settop_(L, topBefore);
+    Log("[FastPath] Calibration FAILED — cannot determine stack layout");
+    return false;
+}
+
+static uintptr_t ReadCFunction(lua_State* L, int stackIndex) {
+    if (!g_layout.valid) return 0;
+    __try {
+        uintptr_t base = *(uintptr_t*)((uintptr_t)L + g_layout.baseOffset);
+        if (!base) return 0;
+
+        uintptr_t slot = base + (uintptr_t)(stackIndex - 1) * g_layout.tvalueSize;
+        if (*(int*)(slot + 8) != LUA_TFUNCTION) return 0;
+
+        uintptr_t gc = *(uintptr_t*)(slot);
+        if (!gc) return 0;
+
+        uintptr_t cfunc = *(uintptr_t*)(gc + g_layout.closureFOffset);
+        if (cfunc >= 0x00401000 && cfunc < 0x00F00000) return cfunc;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return 0;
+}
+
+static uintptr_t DiscoverFunc(lua_State* L, const char* table, const char* name) {
+    int topBefore = lua_gettop_(L);
+
+    if (table) {
+        lua_getfield_(L, LUA_GLOBALSINDEX, table);
+        if (lua_type_(L, -1) != LUA_TTABLE) { lua_settop_(L, topBefore); return 0; }
+        lua_getfield_(L, -1, name);
+    } else {
+        lua_getfield_(L, LUA_GLOBALSINDEX, name);
+    }
+
+    if (lua_type_(L, -1) != LUA_TFUNCTION) { lua_settop_(L, topBefore); return 0; }
+
+    uintptr_t addr = ReadCFunction(L, lua_gettop_(L));
+    lua_settop_(L, topBefore);
+    return addr;
+}
+
+// ================================================================
+//  Hook implementations
+// ================================================================
+
+// --- string.find (plain mode fast path) ---
+static lua_CFunction_t orig_str_find = nullptr;
+
+static int __cdecl Hooked_StrFind(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs < 2) return orig_str_find(L);
+
+    // Only fast-path plain mode (4th arg true)
+    if (nargs < 4 || !lua_toboolean_(L, 4))
+        return orig_str_find(L);
+
+    if (lua_type_(L, 1) != LUA_TSTRING || lua_type_(L, 2) != LUA_TSTRING)
+        return orig_str_find(L);
+
+    size_t sLen = 0, pLen = 0;
+    const char* s = lua_tolstring_(L, 1, &sLen);
+    const char* p = lua_tolstring_(L, 2, &pLen);
+    if (!s || !p) return orig_str_find(L);
+
+    // Init position (3rd arg, default 1)
+    int init = 1;
+    if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
+        init = (int)lua_tonumber_(L, 3);
+
+    if (init < 0) init = (int)sLen + init + 1;
+    if (init < 1) init = 1;
+    if (init > (int)sLen + 1) { lua_pushnil_(L); g_findPlainHits++; return 1; }
+
+    int startIdx = init - 1;
+
+    if (pLen == 0) {
+        lua_pushnumber_(L, (double)init);
+        lua_pushnumber_(L, (double)(init - 1));
+        g_findPlainHits++;
+        return 2;
+    }
+
+    if (pLen > sLen - startIdx) { lua_pushnil_(L); g_findPlainHits++; return 1; }
+
+    const char* searchStart = s + startIdx;
+    size_t searchLen = sLen - startIdx;
+    const char* found = nullptr;
+
+    if (pLen == 1) {
+        found = (const char*)memchr(searchStart, p[0], searchLen);
+    } else {
+        size_t limit = searchLen - pLen + 1;
+        char first = p[0];
+        for (size_t i = 0; i < limit; i++) {
+            if (searchStart[i] == first && memcmp(searchStart + i, p, pLen) == 0) {
+                found = searchStart + i;
+                break;
+            }
+        }
+    }
+
+    if (found) {
+        int pos = (int)(found - s) + 1;
+        lua_pushnumber_(L, (double)pos);
+        lua_pushnumber_(L, (double)(pos + (int)pLen - 1));
+    } else {
+        lua_pushnil_(L);
+    }
+    g_findPlainHits++;
+    return found ? 2 : 1;
+}
+
+// --- type() fast path ---
+static lua_CFunction_t orig_luaB_type = nullptr;
+
+static const char* const TYPE_NAMES[] = {
+    "nil", "boolean", "userdata", "number",
+    "string", "table", "function", "userdata", "thread"
+};
+
+static int __cdecl Hooked_Type(lua_State* L) {
+    if (lua_gettop_(L) < 1) return orig_luaB_type(L);
+    int t = lua_type_(L, 1);
+    if (t >= 0 && t <= 8) {
+        lua_pushstring_(L, TYPE_NAMES[t]);
+        g_typeHits++;
+        return 1;
+    }
+    g_typeFallbacks++;
+    return orig_luaB_type(L);
+}
+
+// --- math.floor fast path ---
+static lua_CFunction_t orig_math_floor = nullptr;
+
+static int __cdecl Hooked_MathFloor(lua_State* L) {
+    if (lua_type_(L, 1) == LUA_TNUMBER) {
+        lua_pushnumber_(L, floor(lua_tonumber_(L, 1)));
+        g_mathHits++;
+        return 1;
+    }
+    g_mathFallbacks++;
+    return orig_math_floor(L);
+}
+
+// --- math.ceil fast path ---
+static lua_CFunction_t orig_math_ceil = nullptr;
+
+static int __cdecl Hooked_MathCeil(lua_State* L) {
+    if (lua_type_(L, 1) == LUA_TNUMBER) {
+        lua_pushnumber_(L, ceil(lua_tonumber_(L, 1)));
+        g_mathHits++;
+        return 1;
+    }
+    g_mathFallbacks++;
+    return orig_math_ceil(L);
+}
+
+// --- math.abs fast path ---
+static lua_CFunction_t orig_math_abs = nullptr;
+
+static int __cdecl Hooked_MathAbs(lua_State* L) {
+    if (lua_type_(L, 1) == LUA_TNUMBER) {
+        lua_pushnumber_(L, fabs(lua_tonumber_(L, 1)));
+        g_mathHits++;
+        return 1;
+    }
+    g_mathFallbacks++;
+    return orig_math_abs(L);
+}
+
+// --- math.max fast path (2 args) ---
+static lua_CFunction_t orig_math_max = nullptr;
+
+static int __cdecl Hooked_MathMax(lua_State* L) {
+    int n = lua_gettop_(L);
+    if (n == 2 && lua_type_(L, 1) == LUA_TNUMBER && lua_type_(L, 2) == LUA_TNUMBER) {
+        double a = lua_tonumber_(L, 1);
+        double b = lua_tonumber_(L, 2);
+        lua_pushnumber_(L, a > b ? a : b);
+        g_mathHits++;
+        return 1;
+    }
+    return orig_math_max(L);
+}
+
+// --- math.min fast path (2 args) ---
+static lua_CFunction_t orig_math_min = nullptr;
+
+static int __cdecl Hooked_MathMin(lua_State* L) {
+    int n = lua_gettop_(L);
+    if (n == 2 && lua_type_(L, 1) == LUA_TNUMBER && lua_type_(L, 2) == LUA_TNUMBER) {
+        double a = lua_tonumber_(L, 1);
+        double b = lua_tonumber_(L, 2);
+        lua_pushnumber_(L, a < b ? a : b);
+        g_mathHits++;
+        return 1;
+    }
+    return orig_math_min(L);
+}
+
+// --- string.len fast path ---
+static lua_CFunction_t orig_str_len = nullptr;
+
+static int __cdecl Hooked_StrLen(lua_State* L) {
+    if (lua_type_(L, 1) == LUA_TSTRING) {
+        size_t len = 0;
+        lua_tolstring_(L, 1, &len);
+        lua_pushnumber_(L, (double)len);
+        g_strlenHits++;
+        return 1;
+    }
+    return orig_str_len(L);
+}
+
+// --- string.byte fast path (single byte) ---
+static lua_CFunction_t orig_str_byte = nullptr;
+
+static int __cdecl Hooked_StrByte(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (lua_type_(L, 1) != LUA_TSTRING) return orig_str_byte(L);
+
+    // Fast path: single byte (most common: string.byte(s, i))
+    if (nargs <= 2) {
+        size_t sLen = 0;
+        const char* s = lua_tolstring_(L, 1, &sLen);
+        if (!s || sLen == 0) return orig_str_byte(L);
+
+        int pos = 1;
+        if (nargs >= 2 && lua_type_(L, 2) == LUA_TNUMBER)
+            pos = (int)lua_tonumber_(L, 2);
+
+        if (pos < 0) pos = (int)sLen + pos + 1;
+        if (pos < 1 || pos > (int)sLen) { return 0; }
+
+        lua_pushnumber_(L, (double)(unsigned char)s[pos - 1]);
+        g_strbyteHits++;
+        return 1;
+    }
+
+    // Multi-byte: fallback
+    return orig_str_byte(L);
+}
+
+// ================================================================
+//  Phase 2: Discovery and Hook Installation
+// ================================================================
+
+struct FuncHookEntry {
+    const char*        table;     // "string", "math", or nullptr
+    const char*        name;
+    void*              hookFn;
+    lua_CFunction_t*   origFn;
+    uintptr_t          address;
+    bool               hooked;
+};
+
+static FuncHookEntry g_funcHooks[] = {
+    {"string", "find",  (void*)Hooked_StrFind,    &orig_str_find,    0, false},
+    {nullptr,  "type",  (void*)Hooked_Type,        &orig_luaB_type,   0, false},
+    {"math",   "floor", (void*)Hooked_MathFloor,   &orig_math_floor,  0, false},
+    {"math",   "ceil",  (void*)Hooked_MathCeil,    &orig_math_ceil,   0, false},
+    {"math",   "abs",   (void*)Hooked_MathAbs,     &orig_math_abs,    0, false},
+    {"math",   "max",   (void*)Hooked_MathMax,     &orig_math_max,    0, false},
+    {"math",   "min",   (void*)Hooked_MathMin,     &orig_math_min,    0, false},
+    {"string", "len",   (void*)Hooked_StrLen,      &orig_str_len,     0, false},
+    {"string", "byte",  (void*)Hooked_StrByte,     &orig_str_byte,    0, false},
+};
+
+static constexpr int NUM_FUNC_HOOKS = sizeof(g_funcHooks) / sizeof(g_funcHooks[0]);
 
 // ================================================================
 //  Public API
@@ -354,67 +598,159 @@ namespace LuaFastPath {
 
 bool Init() {
     Log("[FastPath] ====================================");
-    Log("[FastPath]  Lua string.format Fast Path");
+    Log("[FastPath]  Lua Fast Path — Phase 1");
     Log("[FastPath]  Build 12340");
     Log("[FastPath] ====================================");
-
-    int hooked = 0;
 
     __try {
         MH_STATUS s = MH_CreateHook((void*)ADDR_str_format, (void*)Hooked_StrFormat,
                                      (void**)&orig_str_format);
         if (s != MH_OK) {
             Log("[FastPath]   string.format MH_CreateHook failed (%d)", (int)s);
-        } else {
-            s = MH_EnableHook((void*)ADDR_str_format);
-            if (s != MH_OK) {
-                Log("[FastPath]   string.format MH_EnableHook failed (%d)", (int)s);
-            } else {
-                Log("[FastPath]   string.format      0x%08X  [ OK ]", (unsigned)ADDR_str_format);
-                hooked++;
-            }
+            return false;
         }
+        s = MH_EnableHook((void*)ADDR_str_format);
+        if (s != MH_OK) {
+            Log("[FastPath]   string.format MH_EnableHook failed (%d)", (int)s);
+            return false;
+        }
+        Log("[FastPath]   string.format      0x%08X  [ OK ]", (unsigned)ADDR_str_format);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log("[FastPath]   string.format: EXCEPTION — SKIPPED");
-    }
-
-    if (hooked == 0) {
-        Log("[FastPath]  DISABLED — hook failed");
+        Log("[FastPath]   string.format: EXCEPTION");
         return false;
     }
 
     g_active = true;
-
-    Log("[FastPath]  NOTE: math.* replacements not possible");
-    Log("[FastPath]  (WoW validates C closure pointers — DLL addresses rejected)");
-    Log("[FastPath] ====================================");
-    Log("[FastPath]  Ultra-fast: %%d, %%s, %%.Nf");
-    Log("[FastPath]  Generic: all simple specifiers");
-    Log("[FastPath]  Fallback: %%q, %%*, tables/userdata");
-    Log("[FastPath]  [ OK ] ACTIVE");
+    Log("[FastPath]  Phase 1 [ OK ] — string.format hooked");
+    Log("[FastPath]  Phase 2 will run after Lua state ready");
     Log("[FastPath] ====================================");
     return true;
 }
 
-void Shutdown() {
-    if (!g_active) return;
+bool InitPhase2(lua_State* L) {
+    if (g_phase2Active) return true;
+    if (!L) return false;
 
-    MH_DisableHook((void*)ADDR_str_format);
-    g_active = false;
+    Log("[FastPath] ====================================");
+    Log("[FastPath]  Phase 2: Runtime Function Discovery");
+    Log("[FastPath] ====================================");
 
-    long total = g_formatFastHits + g_formatFallbacks;
-    if (total > 0) {
-        Log("[FastPath] Format: %ld fast, %ld fallback (%.1f%% fast path)",
-            g_formatFastHits, g_formatFallbacks,
-            (double)g_formatFastHits / total * 100.0);
+    // Step 1: Calibrate stack layout
+    if (!CalibrateStackLayout(L)) {
+        Log("[FastPath]  Phase 2 FAILED — calibration unsuccessful");
+        return false;
     }
+
+    // Step 2: Discover function addresses
+    int discovered = 0;
+    for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
+        FuncHookEntry& e = g_funcHooks[i];
+        e.address = DiscoverFunc(L, e.table, e.name);
+        if (e.address) {
+            discovered++;
+            Log("[FastPath]   %-8s.%-6s  0x%08X  discovered",
+                e.table ? e.table : "_G", e.name, (unsigned)e.address);
+        } else {
+            Log("[FastPath]   %-8s.%-6s  NOT FOUND", e.table ? e.table : "_G", e.name);
+        }
+    }
+
+    if (discovered == 0) {
+        Log("[FastPath]  Phase 2 FAILED — no functions discovered");
+        return false;
+    }
+
+    // Step 3: Install hooks via MinHook
+    int hooked = 0;
+    for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
+        FuncHookEntry& e = g_funcHooks[i];
+        if (e.address == 0) continue;
+        if (e.address == ADDR_str_format) {
+            Log("[FastPath]   %-8s.%-6s  SKIP (already hooked in Phase 1)",
+                e.table ? e.table : "_G", e.name);
+            continue;
+        }
+
+        __try {
+            MH_STATUS s = MH_CreateHook((void*)e.address, e.hookFn, (void**)e.origFn);
+            if (s != MH_OK) {
+                Log("[FastPath]   %-8s.%-6s  MH_CreateHook failed (%d)",
+                    e.table ? e.table : "_G", e.name, (int)s);
+                continue;
+            }
+            s = MH_EnableHook((void*)e.address);
+            if (s != MH_OK) {
+                Log("[FastPath]   %-8s.%-6s  MH_EnableHook failed (%d)",
+                    e.table ? e.table : "_G", e.name, (int)s);
+                continue;
+            }
+            e.hooked = true;
+            hooked++;
+            Log("[FastPath]   %-8s.%-6s  0x%08X  [ OK ]",
+                e.table ? e.table : "_G", e.name, (unsigned)e.address);
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            Log("[FastPath]   %-8s.%-6s  EXCEPTION during hook",
+                e.table ? e.table : "_G", e.name);
+        }
+    }
+
+    g_phase2Hooks = hooked;
+    g_phase2Active = (hooked > 0);
+
+    Log("[FastPath] ====================================");
+    Log("[FastPath]  Phase 2: %d/%d discovered, %d/%d hooked",
+        discovered, NUM_FUNC_HOOKS, hooked, discovered);
+    Log("[FastPath] ====================================");
+    return g_phase2Active;
+}
+
+void Shutdown() {
+    if (g_active) {
+        MH_DisableHook((void*)ADDR_str_format);
+    }
+
+    for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
+        if (g_funcHooks[i].hooked && g_funcHooks[i].address) {
+            MH_DisableHook((void*)g_funcHooks[i].address);
+            g_funcHooks[i].hooked = false;
+        }
+    }
+
+    long fmtTotal = g_formatFastHits + g_formatFallbacks;
+    if (fmtTotal > 0) {
+        Log("[FastPath] Format: %ld fast, %ld fallback (%.1f%%)",
+            g_formatFastHits, g_formatFallbacks,
+            (double)g_formatFastHits / fmtTotal * 100.0);
+    }
+    if (g_findPlainHits > 0)
+        Log("[FastPath] Find(plain): %ld fast, %ld fallback", g_findPlainHits, g_findFallbacks);
+    if (g_typeHits > 0)
+        Log("[FastPath] Type: %ld fast, %ld fallback", g_typeHits, g_typeFallbacks);
+    if (g_mathHits > 0)
+        Log("[FastPath] Math: %ld fast, %ld fallback", g_mathHits, g_mathFallbacks);
+    if (g_strlenHits > 0) Log("[FastPath] StrLen: %ld fast", g_strlenHits);
+    if (g_strbyteHits > 0) Log("[FastPath] StrByte: %ld fast", g_strbyteHits);
+
+    g_active = false;
+    g_phase2Active = false;
 }
 
 Stats GetStats() {
     Stats s;
     s.formatFastHits  = g_formatFastHits;
     s.formatFallbacks = g_formatFallbacks;
+    s.findPlainHits   = g_findPlainHits;
+    s.findFallbacks   = g_findFallbacks;
+    s.typeHits        = g_typeHits;
+    s.typeFallbacks   = g_typeFallbacks;
+    s.mathHits        = g_mathHits;
+    s.mathFallbacks   = g_mathFallbacks;
+    s.strlenHits      = g_strlenHits;
+    s.strbyteHits     = g_strbyteHits;
+    s.phase2Hooks     = g_phase2Hooks;
     s.active          = g_active;
+    s.phase2Active    = g_phase2Active;
     return s;
 }
 

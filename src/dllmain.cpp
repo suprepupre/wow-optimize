@@ -2049,6 +2049,19 @@ static void DumpPeriodicStats() {
     if (g_debugStringSkipped > 0)
         Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
 
+    LuaFastPath::Stats fps = LuaFastPath::GetStats();
+    if (fps.active) {
+        long fmtTotal = fps.formatFastHits + fps.formatFallbacks;
+        if (fmtTotal > 0)
+            Log("[Stats] Format: %ld fast, %ld fallback (%.1f%%)",
+                fps.formatFastHits, fps.formatFallbacks,
+                (double)fps.formatFastHits / fmtTotal * 100.0);
+    }
+    if (fps.phase2Active) {
+        Log("[Stats] Phase2: %d hooks | find=%ld type=%ld math=%ld strlen=%ld byte=%ld",
+            fps.phase2Hooks, fps.findPlainHits, fps.typeHits,
+            fps.mathHits, fps.strlenHits, fps.strbyteHits);
+    }        
     Log("[Stats] ====================================");
 }
 

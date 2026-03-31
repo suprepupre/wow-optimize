@@ -960,6 +960,13 @@ static void DoMainThreadInit() {
 
     SetupLuaInterface(Api.L);
 
+    // Phase 2: discover and hook Lua library functions at runtime
+    __try {
+        LuaFastPath::InitPhase2(Api.L);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("[LuaOpt] EXCEPTION in LuaFastPath::InitPhase2");
+    }
+
     if (Api.lua_pushnumber && Api.lua_setfield) {
         UpdateLuaStats(Api.L);
     }
@@ -1061,6 +1068,9 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);
         SetupLuaInterface(Api.L);
+        __try {
+            LuaFastPath::InitPhase2(Api.L);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}        
         g_addonReadCounter = 0;
         g_gcRequestCounter = 0;
         g_lastSyncNormal = -1;
