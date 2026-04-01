@@ -33,7 +33,7 @@
 #define CRASH_TEST_DISABLE_CS_ENTER        0
 #define CRASH_TEST_DISABLE_SETFILEPOINTER  0
 #define CRASH_TEST_DISABLE_ISBADPTR        0
-#define CRASH_TEST_DISABLE_MPQ_MMAP        0
+#define CRASH_TEST_DISABLE_MPQ_MMAP        1
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
 
 #pragma comment(lib, "psapi.lib")
@@ -603,7 +603,8 @@ static void UntrackMpqHandle(HANDLE h) {
 //
 //  Falls back to read-ahead cache for files outside these limits.
 // ================================================================
-
+// MPQ map lock — always defined (used by scanner even when mmap disabled)
+static SRWLOCK g_mpqMapLock = SRWLOCK_INIT;
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
 
 struct MpqMapping {
@@ -617,10 +618,9 @@ struct MpqMapping {
 static constexpr int    MAX_MPQ_MAPPINGS    = 32;
 static constexpr DWORD  MPQ_MMAP_MIN_SIZE   = 256 * 1024;              // 256 KB
 static constexpr DWORD  MPQ_MMAP_MAX_SIZE   = 512 * 1024 * 1024;      // 512 MB
-static constexpr DWORD  MPQ_MMAP_MAX_TOTAL  = 1024 * 1024 * 1024;     // 1 GB total
+static constexpr DWORD  MPQ_MMAP_MAX_TOTAL  = 768 * 1024 * 1024;      // 768 MB total (safe for 32-bit)
 
 static MpqMapping g_mpqMappings[MAX_MPQ_MAPPINGS] = {};
-static SRWLOCK    g_mpqMapLock = SRWLOCK_INIT;
 static DWORD      g_mpqMapTotalBytes = 0;
 static long       g_mpqMapHits    = 0;
 static long       g_mpqMapMisses  = 0;
@@ -674,6 +674,24 @@ static MpqMapping* CreateMpqMapping(HANDLE hFile, const char* pathForLog = nullp
     void* base = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
     if (!base) {
         CloseHandle(hMapping);
+        if (pathForLog) {
+            Log("MPQ skip: %s (MapViewOfFile failed, error %lu)",
+                pathForLog, GetLastError());
+        }
+        return nullptr;
+    }
+
+    // Verify the mapping is readable (catch files being modified by launchers/patchers)
+    __try {
+        volatile uint8_t test = *(volatile uint8_t*)base;
+        (void)test;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        UnmapViewOfFile(base);
+        CloseHandle(hMapping);
+        if (pathForLog) {
+            Log("MPQ skip: %s (mapped memory not readable)", pathForLog);
+        }
         return nullptr;
     }
 
@@ -1680,6 +1698,7 @@ static void ScanExistingMpqHandles() {
             displayPath = pathBuf + 4;
         }
 
+        // Try to memory-map
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
         AcquireSRWLockExclusive(&g_mpqMapLock);
         MpqMapping* m = CreateMpqMapping(handle, displayPath);
@@ -1735,8 +1754,7 @@ static void ResolvePrefetch() {
 static void PrefetchMappedMPQs() {
 #if CRASH_TEST_DISABLE_MPQ_MMAP
     return;
-#endif
-
+#else
     // Only prefetch once per loading screen
     if (InterlockedCompareExchange(&g_prefetchDone, 1, 0) != 0) return;
 
@@ -1748,14 +1766,12 @@ static void PrefetchMappedMPQs() {
         if (!g_mpqMappings[i].active) continue;
 
         if (g_prefetchAvailable && pPrefetchVirtualMemory) {
-            // Win8+ path: single syscall to prefetch entire region
             WIN32_MEMORY_RANGE_ENTRY entry;
             entry.VirtualAddress = g_mpqMappings[i].baseAddress;
             entry.NumberOfBytes  = g_mpqMappings[i].fileSize;
             pPrefetchVirtualMemory(GetCurrentProcess(), 1, &entry, 0);
             prefetched++;
         } else {
-            // Fallback: touch every 4KB page to fault it in
             volatile uint8_t* base = (volatile uint8_t*)g_mpqMappings[i].baseAddress;
             DWORD size = g_mpqMappings[i].fileSize;
             __try {
@@ -1766,9 +1782,7 @@ static void PrefetchMappedMPQs() {
                 (void)dummy;
                 prefetched++;
             }
-            __except(EXCEPTION_EXECUTE_HANDLER) {
-                // Page fault on mapped file — skip this one
-            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {}
         }
     }
 
@@ -1778,6 +1792,7 @@ static void PrefetchMappedMPQs() {
         Log("MPQ prefetch: %d archives prefetched (%.1f MB)",
             prefetched, g_mpqMapTotalBytes / (1024.0 * 1024.0));
     }
+#endif
 }
 
 static void ResetPrefetchFlag() {
@@ -2191,8 +2206,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     #if !CRASH_TEST_DISABLE_MPQ_MMAP
         Log("  [ OK ] MPQ memory mapping (1-256MB files)");
     #else
-        Log("  [SKIP] MPQ memory mapping (crash isolation)");
-    #endif    
+        Log("  [SKIP] MPQ memory mapping (disabled — stability)");
+    #endif  
     Log("  [%s] CloseHandle (cache cleanup)",  closeOk     ? " OK " : "FAIL");
     Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
     Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
