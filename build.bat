@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   wow_optimize v2.4.0 build script
+echo   wow_optimize v3.0.0 build script
 echo   Builds: wow_optimize.dll + version.dll
 echo   Requires: Visual Studio 2026 + CMake
 echo ============================================

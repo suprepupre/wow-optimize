@@ -1,18 +1,18 @@
 LIBRARY version
 EXPORTS
-    GetFileVersionInfoA       = Export_GetFileVersionInfoA
-    GetFileVersionInfoW       = Export_GetFileVersionInfoW
-    GetFileVersionInfoSizeA   = Export_GetFileVersionInfoSizeA
-    GetFileVersionInfoSizeW   = Export_GetFileVersionInfoSizeW
-    GetFileVersionInfoExA     = Export_GetFileVersionInfoExA
-    GetFileVersionInfoExW     = Export_GetFileVersionInfoExW
+    GetFileVersionInfoA = Export_GetFileVersionInfoA
+    GetFileVersionInfoW = Export_GetFileVersionInfoW
+    GetFileVersionInfoSizeA = Export_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeW = Export_GetFileVersionInfoSizeW
+    GetFileVersionInfoExA = Export_GetFileVersionInfoExA
+    GetFileVersionInfoExW = Export_GetFileVersionInfoExW
     GetFileVersionInfoSizeExA = Export_GetFileVersionInfoSizeExA
     GetFileVersionInfoSizeExW = Export_GetFileVersionInfoSizeExW
-    VerQueryValueA            = Export_VerQueryValueA
-    VerQueryValueW            = Export_VerQueryValueW
-    VerFindFileA              = Export_VerFindFileA
-    VerFindFileW              = Export_VerFindFileW
-    VerInstallFileA           = Export_VerInstallFileA
-    VerInstallFileW           = Export_VerInstallFileW
-    VerLanguageNameA          = Export_VerLanguageNameA
-    VerLanguageNameW          = Export_VerLanguageNameW
+    VerQueryValueA = Export_VerQueryValueA
+    VerQueryValueW = Export_VerQueryValueW
+    VerFindFileA = Export_VerFindFileA
+    VerFindFileW = Export_VerFindFileW
+    VerInstallFileA = Export_VerInstallFileA
+    VerInstallFileW = Export_VerInstallFileW
+    VerLanguageNameA = Export_VerLanguageNameA
+    VerLanguageNameW = Export_VerLanguageNameW
