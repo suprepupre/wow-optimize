@@ -79,12 +79,11 @@ struct StrCacheEntry {
     uint32_t  hash;
     uint32_t  len;
     void*     result;
-    uint32_t  generation;
-    uintptr_t globalState;  // per-VM scoping (fixes glue/game VM cross-contamination)
+    uintptr_t globalState;
+    // NO generation counter — TString header validation is sufficient
 };
 
 static StrCacheEntry g_strCache[STR_CACHE_SIZE] = {};
-static volatile uint32_t g_strCacheGen = 1;
 
 static inline uint32_t FNV1a(const char* data, size_t len) {
     uint32_t h = 0x811C9DC5u;
@@ -100,11 +99,9 @@ static inline uint32_t FNV1a(const char* data, size_t len) {
 // ================================================================
 
 static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l) {
-    // Skip cache for empty or long strings
     if (l == 0 || l > STR_CACHE_MAX_LEN)
         return orig_luaS_newlstr(L, str, l);
 
-    // Read global_State* for per-VM scoping
     uintptr_t gs = 0;
     __try {
         gs = *(uintptr_t*)((uintptr_t)L + 0x14);
@@ -116,11 +113,9 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
     uint32_t hash = FNV1a(str, l);
     int slot = hash & STR_CACHE_MASK;
     StrCacheEntry* e = &g_strCache[slot];
-    uint32_t gen = g_strCacheGen;
 
-    // === Cache hit check ===
-    if (e->generation == gen &&
-        e->globalState == gs &&
+    // Cache hit check — no generation, rely on TString validation
+    if (e->globalState == gs &&
         e->hash == hash &&
         e->len == (uint32_t)l &&
         e->result != nullptr)
@@ -128,11 +123,6 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
         bool valid = false;
         __try {
             uintptr_t ts = (uintptr_t)e->result;
-
-            // Validate TString is still alive and correct:
-            //   +0x04 = tt (type tag, must be LUA_TSTRING = 4)
-            //   +0x10 = len (must match requested length)
-            //   +0x14 = data (must match requested content)
             uint8_t tt = *(uint8_t*)(ts + 0x04);
             if (tt == LUA_TSTRING) {
                 uint32_t cachedLen = *(uint32_t*)(ts + 0x10);
@@ -143,28 +133,22 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
                 }
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
-            // Memory was freed/unmapped — clear entry
             e->result = nullptr;
-            e->generation = 0;
+            e->globalState = 0;
         }
 
         if (valid) {
             g_strCacheHits++;
             return e->result;
         }
-
-        // Validation failed — stale entry
         g_strCacheStale++;
     }
 
-    // === Cache miss — call original ===
     void* result = orig_luaS_newlstr(L, str, l);
 
-    // Store fresh result
     e->hash        = hash;
     e->len         = (uint32_t)l;
     e->result      = result;
-    e->generation  = g_strCacheGen;
     e->globalState = gs;
 
     g_strCacheMisses++;
@@ -400,13 +384,11 @@ void Shutdown() {
 }
 
 void OnGCStep() {
-    g_strCacheGen++;
-    if (g_strCacheGen == 0) g_strCacheGen = 1; // skip 0 (reserved for invalid)
 }
 
 void InvalidateCache() {
-    g_strCacheGen++;
-    if (g_strCacheGen == 0) g_strCacheGen = 1;
+    // Full clear on explicit invalidation (VM reload, lua_State change)
+    memset(g_strCache, 0, sizeof(g_strCache));
 }
 
 Stats GetStats() {

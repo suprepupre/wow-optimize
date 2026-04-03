@@ -1867,12 +1867,23 @@ static void SetHighTimerResolution() {
     // Single client: 0.5ms for best frame pacing
     ULONG requested = g_isMultiClient ? 10000 : 5000;
     double requestedMs = requested / 10000.0;
-    if (p(requested, TRUE, &actual) == 0)
-        Log("Timer resolution: %.3f ms (requested %.3f ms%s)",
-            actual / 10000.0, requestedMs,
-            g_isMultiClient ? ", multi-client mode" : "");
-    else
+    if (p(requested, TRUE, &actual) == 0) {
+        double actualMs = actual / 10000.0;
+        // Sanity check: valid range is 0.5ms - 100ms (Wine/VM can return garbage)
+        if (actualMs >= 0.1 && actualMs <= 100.0) {
+            Log("Timer resolution: %.3f ms (requested %.3f ms%s)",
+                actualMs, requestedMs,
+                g_isMultiClient ? ", multi-client mode" : "");
+        } else {
+            Log("Timer resolution: SET (actual value invalid: %.0f ms — Wine/VM detected, ignoring)",
+                actualMs);
+            Log("Timer resolution: requested %.3f ms%s",
+                requestedMs,
+                g_isMultiClient ? " (multi-client mode)" : "");
+        }
+    } else {
         Log("WARNING: Timer resolution change failed");
+    }
 }
 
 // ================================================================

@@ -801,6 +801,14 @@ bool InitPhase2(lua_State* L) {
     Log("[FastPath]  Phase 2: Runtime Function Discovery");
     Log("[FastPath] ====================================");
 
+    // TEMPORARY — add right after the discovery loop, before "int hooked = 0;"
+    uintptr_t addr_match  = DiscoverFunc(L, "string", "match");
+    uintptr_t addr_gmatch = DiscoverFunc(L, "string", "gmatch");
+    uintptr_t addr_gsub   = DiscoverFunc(L, "string", "gsub");
+    Log("[FastPath] string.match  = 0x%08X", (unsigned)addr_match);
+    Log("[FastPath] string.gmatch = 0x%08X", (unsigned)addr_gmatch);
+    Log("[FastPath] string.gsub   = 0x%08X", (unsigned)addr_gsub);
+
     if (!CalibrateStackLayout(L)) {
         Log("[FastPath]  Phase 2 FAILED — calibration unsuccessful");
         return false;
