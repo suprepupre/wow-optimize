@@ -1,11 +1,11 @@
 #pragma once
 
-#define WOW_OPTIMIZE_VERSION_MAJOR  2
-#define WOW_OPTIMIZE_VERSION_MINOR  4
+#define WOW_OPTIMIZE_VERSION_MAJOR  3
+#define WOW_OPTIMIZE_VERSION_MINOR  0
 #define WOW_OPTIMIZE_VERSION_PATCH  0
 #define WOW_OPTIMIZE_VERSION_BUILD  0
 
-#define WOW_OPTIMIZE_VERSION_STR    "2.4.0"
+#define WOW_OPTIMIZE_VERSION_STR    "3.0.0"
 #define WOW_OPTIMIZE_AUTHOR         "SUPREMATIST"
 
 // Crash isolation toggle for Phase 2 Lua fast paths

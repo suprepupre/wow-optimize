@@ -3,6 +3,7 @@
 #include "ui_cache.h"
 #include "api_cache.h"
 #include "lua_fastpath.h"
+#include "lua_internals.h"
 
 #include <cstdio>
 #include <cstring>
@@ -12,6 +13,7 @@
 
 #include "version.h"
 
+extern bool g_isMultiClient;
 extern "C" void Log(const char* fmt, ...);
 
 // ================================================================
@@ -623,6 +625,7 @@ static void StepGC(lua_State* L) {
         State.gcOptimized = false;
         return;
     }
+    LuaInternals::OnGCStep();    
 
     QueryPerformanceCounter(&after);
     double gcMs = (double)(after.QuadPart - before.QuadPart) * 1000.0 / (double)g_gcPerfFreq.QuadPart;
@@ -661,10 +664,11 @@ static void StepGC(lua_State* L) {
         Api.lua_gc(L, LUA_GCCOLLECT, 0);
         State.fullCollects++;
         Log("[LuaOpt] EMERGENCY GC: memory was %.1f MB", State.luaMemoryKB / 1024.0);
+        LuaInternals::OnGCStep();        
         int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
         int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
         State.luaMemoryKB = kb + (b / 1024.0);
-        Log("[LuaOpt] After emergency GC: %.1f MB", State.luaMemoryKB / 1024.0);
+        Log("[LuaOpt] After emergency GC: %.1f MB", State.luaMemoryKB / 1024.0);        
     }
 }
 
@@ -921,10 +925,12 @@ static void ProcessGCRequests(lua_State* L) {
             if (val < 0) {
                 Api.lua_gc(L, LUA_GCCOLLECT, 0);
                 State.fullCollects++;
+                LuaInternals::OnGCStep();
                 Log("[LuaOpt] Addon requested full GC collect");
             } else if (val > 0) {
                 Api.lua_gc(L, LUA_GCSTEP, (int)val);
                 State.gcStepsTotal++;
+                LuaInternals::OnGCStep();
             }
         } else {
             Api.lua_settop(L, -2);
@@ -1104,9 +1110,14 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         UpdateLuaStats(Api.L);
     }
 
-    if (!slowFrame && g_luaAllocReplaced && (State.statsUpdateCounter & 4095) == 0) {
-        LogLuaAllocStats();
-        mi_collect(false);
+    if (!slowFrame && g_luaAllocReplaced) {
+        // Single client: collect every ~4096 steps (~68 seconds at 60fps)
+        // Multi-client: collect every ~1024 steps (~17 seconds at 60fps)
+        int collectInterval = g_isMultiClient ? 1023 : 4095;
+        if ((State.statsUpdateCounter & collectInterval) == 0) {
+            LogLuaAllocStats();
+            mi_collect(g_isMultiClient);  // true = aggressive in multi-client
+        }
     }
 }
 

@@ -14,6 +14,7 @@
 #include "ui_cache.h"
 #include "api_cache.h"
 #include "lua_fastpath.h"
+#include "lua_internals.h"
 
 #include "MinHook.h"
 #include <mimalloc.h>
@@ -35,6 +36,7 @@
 #define CRASH_TEST_DISABLE_ISBADPTR        0
 #define CRASH_TEST_DISABLE_MPQ_MMAP        1
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
+#define CRASH_TEST_DISABLE_LUA_INTERNALS   0
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -42,7 +44,7 @@
 // ================================================================
 // Forward Declarations
 // ================================================================
-static bool   g_isMultiClient = false;
+bool   g_isMultiClient = false;
 static HANDLE g_instanceMutex = NULL;
 static int    g_periodicStatsCounter = 0;
 static void   DumpPeriodicStats();
@@ -315,6 +317,14 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         if ((g_periodicStatsCounter == 1800) ||
             (g_periodicStatsCounter > 0 && (g_periodicStatsCounter % 18000) == 0)) {
             DumpPeriodicStats();
+        }
+
+        // Multi-client: periodic aggressive memory return
+        // Every ~60 seconds, force mimalloc to return unused pages
+        // Prevents 32-bit address space exhaustion on HD clients
+        if (g_isMultiClient && g_periodicStatsCounter > 0 &&
+            (g_periodicStatsCounter % 3600) == 0) {
+            mi_collect(true);
         }
 
         PreciseSleep((double)ms);
@@ -1938,11 +1948,24 @@ static void OptimizeProcess() {
 // ================================================================
 // 14. Working Set
 // ================================================================
+// ================================================================
+// 14. Working Set
+// ================================================================
 static void OptimizeWorkingSet() {
-    SIZE_T minWS = 256 * 1024 * 1024;
-    SIZE_T maxWS = 2048ULL * 1024 * 1024;
+    SIZE_T minWS, maxWS;
+    if (g_isMultiClient) {
+        // Multi-client: reduce footprint to ease 32-bit address space pressure
+        minWS = 64 * 1024 * 1024;    // 64 MB
+        maxWS = 512ULL * 1024 * 1024; // 512 MB
+    } else {
+        minWS = 256 * 1024 * 1024;    // 256 MB
+        maxWS = 2048ULL * 1024 * 1024; // 2048 MB
+    }
     if (SetProcessWorkingSetSize(GetCurrentProcess(), minWS, maxWS))
-        Log("Working set: min 256 MB, max 2048 MB");
+        Log("Working set: min %u MB, max %u MB%s",
+            (unsigned)(minWS / (1024 * 1024)),
+            (unsigned)(maxWS / (1024 * 1024)),
+            g_isMultiClient ? " (multi-client reduced)" : "");
     else
         Log("WARNING: Working set failed (error %lu)", GetLastError());
 }
@@ -1952,10 +1975,27 @@ static void OptimizeWorkingSet() {
 // ================================================================
 static void ConfigureMimalloc() {
     mi_option_set(mi_option_allow_large_os_pages, 1);
+
+    // purge_delay: how quickly mimalloc returns unused pages to OS
+    // Single client: never purge (keep pages warm, less page faults)
+    // Multi-client: purge after 100ms (reduce address space pressure)
+    // NOTE: g_isMultiClient is not yet set at this point,
+    //       so we set a moderate default and update later in AdjustMimallocForMultiClient()
     mi_option_set(mi_option_purge_delay, 0);
+
     void* warmup = mi_malloc(64 * 1024 * 1024);
     if (warmup) { memset(warmup, 0, 64 * 1024 * 1024); mi_free(warmup); }
     Log("mimalloc configured (large pages, pre-warmed 64MB)");
+}
+
+static void AdjustMimallocForMultiClient() {
+    if (g_isMultiClient) {
+        // In multi-client mode: allow mimalloc to return pages to OS
+        // This prevents 32-bit address space exhaustion on HD clients
+        mi_option_set(mi_option_purge_delay, 100);  // 100ms delay before returning pages
+        mi_collect(true);  // force immediate purge of any unused pages
+        Log("mimalloc: multi-client purge mode (100ms delay, aggressive collect)");
+    }
 }
 
 // ================================================================
@@ -2028,6 +2068,39 @@ static void TryRemoveFPSCap() {
 // ================================================================
 
 static void DumpPeriodicStats() {
+    // Process memory diagnostics (helps diagnose HD/custom client OOM)
+    PROCESS_MEMORY_COUNTERS pmc = {};
+    pmc.cb = sizeof(pmc);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        Log("[Stats] Process: WS=%.0fMB Peak=%.0fMB PageFaults=%lu",
+            pmc.WorkingSetSize / (1024.0 * 1024.0),
+            pmc.PeakWorkingSetSize / (1024.0 * 1024.0),
+            pmc.PageFaultCount);
+    }
+
+    // Virtual address space scan (32-bit fragmentation indicator)
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        uintptr_t addr = 0x10000;
+        SIZE_T largestFree = 0;
+        SIZE_T totalFree = 0;
+        while (addr < 0x7FFF0000) {
+            if (VirtualQuery((void*)addr, &mbi, sizeof(mbi))) {
+                if (mbi.State == MEM_FREE) {
+                    if (mbi.RegionSize > largestFree) largestFree = mbi.RegionSize;
+                    totalFree += mbi.RegionSize;
+                }
+                addr += mbi.RegionSize;
+                if (mbi.RegionSize == 0) addr += 0x10000;
+            } else {
+                addr += 0x10000;
+            }
+        }
+        Log("[Stats] VA Space: Free=%.0fMB LargestBlock=%.0fMB%s",
+            totalFree / (1024.0 * 1024.0),
+            largestFree / (1024.0 * 1024.0),
+            (largestFree < 64 * 1024 * 1024) ? " WARNING: fragmented" : "");
+    }    
     Log("[Stats] ====================================");
 
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
@@ -2076,8 +2149,28 @@ static void DumpPeriodicStats() {
         Log("[Stats] Phase2: %d hooks | find=%ld type=%ld math=%ld strlen=%ld byte=%ld",
             fps.phase2Hooks, fps.findPlainHits, fps.typeHits,
             fps.mathHits, fps.strlenHits, fps.strbyteHits);
-    }        
+        Log("[Stats] Phase2: tostr=%ld tonum=%ld sub=%ld lower=%ld upper=%ld",
+            fps.tostringHits, fps.tonumberHits, fps.strsubHits,
+            fps.strlowerHits, fps.strupperHits);
+    }
+    
+    LuaInternals::Stats lis = LuaInternals::GetStats();
+    if (lis.active) {
+        long strTotal = lis.strCacheHits + lis.strCacheMisses;
+        if (strTotal > 0)
+            Log("[Stats] StrCache: %ld hits, %ld misses (%.1f%%)",
+                lis.strCacheHits, lis.strCacheMisses,
+                (double)lis.strCacheHits / strTotal * 100.0);
+        long catTotal = lis.concatFastHits + lis.concatFallbacks;
+        if (catTotal > 0)
+            Log("[Stats] Concat: %ld fast, %ld fallback (%.1f%%)",
+                lis.concatFastHits, lis.concatFallbacks,
+                (double)lis.concatFastHits / catTotal * 100.0);
+    }    
+
     Log("[Stats] ====================================");
+
+
 }
 
 // ================================================================
@@ -2145,6 +2238,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool gaOk  = InstallGlobalAllocHooks();    
     Log("--- Multi-Client ---");
     DetectMultiClient();
+    AdjustMimallocForMultiClient();    
     Log("--- System Timer ---");
     SetHighTimerResolution();
     Log("--- Threads ---");
@@ -2179,6 +2273,20 @@ static DWORD WINAPI MainThread(LPVOID param) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log("[FastPath] EXCEPTION 0x%08X — SKIPPED", GetExceptionCode());
     }
+
+    bool internalsOk = false;
+    Log("");
+    Log("--- Lua VM Internals ---");
+#if !CRASH_TEST_DISABLE_LUA_INTERNALS
+    __try {
+        internalsOk = LuaInternals::Init();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("[LuaVM] EXCEPTION 0x%08X — SKIPPED", GetExceptionCode());
+    }
+#else
+    Log("[LuaVM] DISABLED (crash isolation)");
+#endif
+
 
     Log("");
     Log("========================================");
@@ -2215,7 +2323,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [SKIP] GlobalAlloc fast path (disabled hotfix)");  
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
-    Log("  [ OK ] Working set (256MB-2GB)");
+    if (g_isMultiClient)
+        Log("  [ OK ] Working set (64MB-512MB, multi-client)");
+    else
+        Log("  [ OK ] Working set (256MB-2GB)");
     Log("  [ OK ] Process priority (Above Normal)");
     Log("  [ OK ] FPS cap removal (200 -> 999)");
     if (g_isMultiClient) {
@@ -2226,6 +2337,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] UI widget cache",              uiCacheOk   ? " OK " : "SKIP");
     Log("  [%s] API cache (ItemInfo only)",    apiCacheOk  ? " OK " : "SKIP");
     Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
+    Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
 
     return 0;
 }
@@ -2255,6 +2367,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
             // Dynamic FreeLibrary — safe to clean up
             LuaFastPath::Shutdown();            
+            LuaInternals::Shutdown();
             ApiCache::Shutdown();            
             UICache::Shutdown();                       
             CombatLogOpt::Shutdown();

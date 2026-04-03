@@ -29,7 +29,13 @@ struct Stats {
     long mathFallbacks;
     long strlenHits;
     long strbyteHits;
-    long phase2Hooks;
+    long tostringHits;
+    long tostringFallbacks;
+    long tonumberHits;
+    long strsubHits;
+    long strlowerHits;
+    long strupperHits;
+    int  phase2Hooks;
     bool active;
     bool phase2Active;
 };
