@@ -2160,8 +2160,8 @@ static void DumpPeriodicStats() {
         Log("[Stats] Phase2: %d hooks | find=%ld type=%ld math=%ld strlen=%ld byte=%ld",
             fps.phase2Hooks, fps.findPlainHits, fps.typeHits,
             fps.mathHits, fps.strlenHits, fps.strbyteHits);
-        Log("[Stats] Phase2: tostr=%ld tonum=%ld sub=%ld lower=%ld upper=%ld",
-            fps.tostringHits, fps.tonumberHits, fps.strsubHits,
+        Log("[Stats] Phase2: match=%ld tostr=%ld tonum=%ld sub=%ld lower=%ld upper=%ld",
+            fps.matchHits, fps.tostringHits, fps.tonumberHits, fps.strsubHits,
             fps.strlowerHits, fps.strupperHits);
     }
     

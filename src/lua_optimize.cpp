@@ -1070,9 +1070,10 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);
         SetupLuaInterface(Api.L);
+        LuaFastPath::ResetPhase2Discovery();
         __try {
             LuaFastPath::InitPhase2(Api.L);
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}        
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}     
         g_addonReadCounter = 0;
         g_gcRequestCounter = 0;
         g_lastSyncNormal = -1;

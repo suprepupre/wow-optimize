@@ -55,11 +55,13 @@ static lua_CFunction_t orig_str_format = nullptr;
 //  Stats
 // ================================================================
 
-static long g_formatFastHits  = 0;
-static long g_formatFallbacks = 0;
-static long g_findPlainHits   = 0;
-static long g_findFallbacks   = 0;
-static long g_typeHits        = 0;
+static long g_formatFastHits    = 0;
+static long g_formatFallbacks   = 0;
+static long g_findPlainHits     = 0;
+static long g_findFallbacks     = 0;
+static long g_matchHits         = 0;
+static long g_matchFallbacks    = 0;
+static long g_typeHits          = 0;
 static long g_typeFallbacks   = 0;
 static long g_mathHits        = 0;
 static long g_mathFallbacks   = 0;
@@ -351,6 +353,60 @@ static uintptr_t DiscoverFunc(lua_State* L, const char* table, const char* name)
     return addr;
 }
 
+static inline bool HasEmbeddedNul(const char* s, size_t len) {
+    if (!s) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\0') return true;
+    }
+    return false;
+}
+
+static inline bool IsPatternMagicChar(char c) {
+    switch (c) {
+        case '^': case '$': case '(': case ')':
+        case '%': case '.': case '[': case ']':
+        case '*': case '+': case '-': case '?':
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool IsPlainLiteralPattern(const char* p, size_t len) {
+    if (!p) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (IsPatternMagicChar(p[i])) return false;
+    }
+    return true;
+}
+
+static bool MatchAsciiClass(unsigned char c, char cls) {
+    if (c > 127) return false;
+
+    switch (cls) {
+        case 'd': return (c >= '0' && c <= '9');
+        case 'a': return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+        case 'w': return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') || c == '_');
+        case 'l': return (c >= 'a' && c <= 'z');
+        case 'u': return (c >= 'A' && c <= 'Z');
+        case 's': return (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+                          c == '\f' || c == '\v');
+        default:  return false;
+    }
+}
+
+static bool PushSubstring(lua_State* L, const char* s, size_t len) {
+    if (!s) return false;
+    if (len > 4096) return false;
+    if (HasEmbeddedNul(s, len)) return false;
+
+    char buf[4097];
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+    lua_pushstring_(L, buf);
+    return true;
+}
 // --- string.find (plain mode fast path) ---
 static lua_CFunction_t orig_str_find = nullptr;
 
@@ -414,6 +470,154 @@ static int __cdecl Hooked_StrFind(lua_State* L) {
     }
     g_findPlainHits++;
     return found ? 2 : 1;
+}
+
+// --- string.match() partial fast path ---
+// Safe fast cases only:
+//   1) plain literal pattern: "abc"
+//   2) anchored literal: "^abc"
+//   3) anchored ASCII classes: ^%d+ ^%a+ ^%w+ ^%l+ ^%u+ ^%s+
+static lua_CFunction_t orig_str_match = nullptr;
+
+static int __cdecl Hooked_StrMatch(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs < 2) return orig_str_match(L);
+
+    if (lua_type_(L, 1) != LUA_TSTRING || lua_type_(L, 2) != LUA_TSTRING) {
+        g_matchFallbacks++;
+        return orig_str_match(L);
+    }
+
+    size_t sLen = 0, pLen = 0;
+    const char* s = lua_tolstring_(L, 1, &sLen);
+    const char* p = lua_tolstring_(L, 2, &pLen);
+    if (!s || !p) {
+        g_matchFallbacks++;
+        return orig_str_match(L);
+    }
+
+    // Avoid long / binary strings for safety
+    if (sLen > 4096 || pLen > 256 || HasEmbeddedNul(s, sLen) || HasEmbeddedNul(p, pLen)) {
+        g_matchFallbacks++;
+        return orig_str_match(L);
+    }
+
+    int init = 1;
+    if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
+        init = (int)lua_tonumber_(L, 3);
+
+    if (init < 0) init = (int)sLen + init + 1;
+    if (init < 1) init = 1;
+    if (init > (int)sLen + 1) {
+        lua_pushnil_(L);
+        g_matchHits++;
+        return 1;
+    }
+
+    const char* searchStart = s + (init - 1);
+    size_t searchLen = sLen - (size_t)(init - 1);
+
+    // Empty pattern => empty match
+    if (pLen == 0) {
+        lua_pushstring_(L, "");
+        g_matchHits++;
+        return 1;
+    }
+
+    // Case 1: anchored literal "^literal"
+    if (pLen > 1 && p[0] == '^' && IsPlainLiteralPattern(p + 1, pLen - 1)) {
+        if (init != 1) {
+            lua_pushnil_(L);
+            g_matchHits++;
+            return 1;
+        }
+        if ((pLen - 1) <= sLen && memcmp(s, p + 1, pLen - 1) == 0) {
+            if (PushSubstring(L, s, pLen - 1)) {
+                g_matchHits++;
+                return 1;
+            }
+        } else {
+            lua_pushnil_(L);
+            g_matchHits++;
+            return 1;
+        }
+
+        g_matchFallbacks++;
+        return orig_str_match(L);
+    }
+
+    // Case 2: anchored ASCII class "^%x+"
+    if (pLen == 4 && p[0] == '^' && p[1] == '%' && p[3] == '+') {
+        if (init != 1) {
+            lua_pushnil_(L);
+            g_matchHits++;
+            return 1;
+        }
+
+        char cls = p[2];
+        if (cls == 'd' || cls == 'a' || cls == 'w' || cls == 'l' || cls == 'u' || cls == 's') {
+            size_t i = 0;
+            while (i < sLen && MatchAsciiClass((unsigned char)s[i], cls)) {
+                i++;
+            }
+
+            if (i == 0) {
+                lua_pushnil_(L);
+                g_matchHits++;
+                return 1;
+            }
+
+            if (PushSubstring(L, s, i)) {
+                g_matchHits++;
+                return 1;
+            }
+
+            g_matchFallbacks++;
+            return orig_str_match(L);
+        }
+    }
+
+    // Case 3: plain literal pattern
+    if (IsPlainLiteralPattern(p, pLen)) {
+        if (pLen > searchLen) {
+            lua_pushnil_(L);
+            g_matchHits++;
+            return 1;
+        }
+
+        const char* found = nullptr;
+
+        if (pLen == 1) {
+            found = (const char*)memchr(searchStart, p[0], searchLen);
+        } else {
+            size_t limit = searchLen - pLen + 1;
+            char first = p[0];
+            for (size_t i = 0; i < limit; i++) {
+                if (searchStart[i] == first &&
+                    memcmp(searchStart + i, p, pLen) == 0) {
+                    found = searchStart + i;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            lua_pushnil_(L);
+            g_matchHits++;
+            return 1;
+        }
+
+        if (PushSubstring(L, found, pLen)) {
+            g_matchHits++;
+            return 1;
+        }
+
+        g_matchFallbacks++;
+        return orig_str_match(L);
+    }
+
+    g_matchFallbacks++;
+    return orig_str_match(L);
 }
 
 // --- type() fast path ---
@@ -737,8 +941,9 @@ struct FuncHookEntry {
 
 static FuncHookEntry g_funcHooks[] = {
     // --- Existing hooks ---
-    {"string", "find",  (void*)Hooked_StrFind,         &orig_str_find,        0, false},
-    {nullptr,  "type",  (void*)Hooked_Type,             &orig_luaB_type,       0, false},
+    {"string", "find",   (void*)Hooked_StrFind,         &orig_str_find,         0, false},
+    {"string", "match",  (void*)Hooked_StrMatch,        &orig_str_match,        0, false},
+    {nullptr,  "type",   (void*)Hooked_Type,            &orig_luaB_type,        0, false},
     {"math",   "floor", (void*)Hooked_MathFloor,        &orig_math_floor,      0, false},
     {"math",   "ceil",  (void*)Hooked_MathCeil,         &orig_math_ceil,       0, false},
     {"math",   "abs",   (void*)Hooked_MathAbs,          &orig_math_abs,        0, false},
@@ -794,48 +999,59 @@ bool Init() {
 }
 
 bool InitPhase2(lua_State* L) {
-    if (g_phase2Active) return true;
     if (!L) return false;
 
     Log("[FastPath] ====================================");
     Log("[FastPath]  Phase 2: Runtime Function Discovery");
     Log("[FastPath] ====================================");
 
-    // TEMPORARY — add right after the discovery loop, before "int hooked = 0;"
-    uintptr_t addr_match  = DiscoverFunc(L, "string", "match");
-    uintptr_t addr_gmatch = DiscoverFunc(L, "string", "gmatch");
-    uintptr_t addr_gsub   = DiscoverFunc(L, "string", "gsub");
-    Log("[FastPath] string.match  = 0x%08X", (unsigned)addr_match);
-    Log("[FastPath] string.gmatch = 0x%08X", (unsigned)addr_gmatch);
-    Log("[FastPath] string.gsub   = 0x%08X", (unsigned)addr_gsub);
-
+    // Recalibrate for current VM (glue/game VM may differ in stack base)
+    g_layout.valid = false;
     if (!CalibrateStackLayout(L)) {
+        if (g_phase2Active) {
+            Log("[FastPath]  Phase 2 calibration failed — keeping existing hooks");
+            return true;
+        }
         Log("[FastPath]  Phase 2 FAILED — calibration unsuccessful");
         return false;
     }
 
-    int discovered = 0;
+    int discoveredNow = 0;
+    int discoveredTotal = 0;
+
     for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
         FuncHookEntry& e = g_funcHooks[i];
-        e.address = DiscoverFunc(L, e.table, e.name);
-        if (e.address) {
-            discovered++;
-            Log("[FastPath]   %-8s.%-8s  0x%08X  discovered",
-                e.table ? e.table : "_G", e.name, (unsigned)e.address);
-        } else {
-            Log("[FastPath]   %-8s.%-8s  NOT FOUND", e.table ? e.table : "_G", e.name);
+
+        if (e.address == 0) {
+            e.address = DiscoverFunc(L, e.table, e.name);
+            if (e.address) {
+                discoveredNow++;
+                Log("[FastPath]   %-8s.%-8s  0x%08X  discovered",
+                    e.table ? e.table : "_G", e.name, (unsigned)e.address);
+            } else {
+                Log("[FastPath]   %-8s.%-8s  NOT FOUND",
+                    e.table ? e.table : "_G", e.name);
+            }
         }
+
+        if (e.address)
+            discoveredTotal++;
     }
 
-    if (discovered == 0) {
-        Log("[FastPath]  Phase 2 FAILED — no functions discovered");
-        return false;
-    }
+    int hookedNow = 0;
+    int hookedTotal = 0;
 
-    int hooked = 0;
     for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
         FuncHookEntry& e = g_funcHooks[i];
-        if (e.address == 0) continue;
+
+        if (e.hooked) {
+            hookedTotal++;
+            continue;
+        }
+
+        if (e.address == 0)
+            continue;
+
         if (e.address == ADDR_str_format) {
             Log("[FastPath]   %-8s.%-8s  SKIP (already hooked in Phase 1)",
                 e.table ? e.table : "_G", e.name);
@@ -855,8 +1071,10 @@ bool InitPhase2(lua_State* L) {
                     e.table ? e.table : "_G", e.name, (int)s);
                 continue;
             }
+
             e.hooked = true;
-            hooked++;
+            hookedNow++;
+            hookedTotal++;
             Log("[FastPath]   %-8s.%-8s  0x%08X  [ OK ]",
                 e.table ? e.table : "_G", e.name, (unsigned)e.address);
         }
@@ -866,14 +1084,21 @@ bool InitPhase2(lua_State* L) {
         }
     }
 
-    g_phase2Hooks = hooked;
-    g_phase2Active = (hooked > 0);
+    g_phase2Hooks  = hookedTotal;
+    g_phase2Active = (hookedTotal > 0);
 
     Log("[FastPath] ====================================");
-    Log("[FastPath]  Phase 2: %d/%d discovered, %d/%d hooked",
-        discovered, NUM_FUNC_HOOKS, hooked, discovered);
+    Log("[FastPath]  Phase 2: %d/%d discovered total, %d new | %d/%d hooked total, %d new",
+        discoveredTotal, NUM_FUNC_HOOKS, discoveredNow,
+        hookedTotal, discoveredTotal, hookedNow);
     Log("[FastPath] ====================================");
     return g_phase2Active;
+}
+
+void ResetPhase2Discovery() {
+    // Do NOT remove already installed hooks.
+    // We only want late rediscovery for functions that were not found in glue VM.
+    g_layout.valid = false;
 }
 
 void Shutdown() {
@@ -894,8 +1119,10 @@ void Shutdown() {
             g_formatFastHits, g_formatFallbacks,
             (double)g_formatFastHits / fmtTotal * 100.0);
     }
-    if (g_findPlainHits > 0)
+    if (g_findPlainHits > 0 || g_findFallbacks > 0)
         Log("[FastPath] Find(plain): %ld fast, %ld fallback", g_findPlainHits, g_findFallbacks);
+    if (g_matchHits > 0 || g_matchFallbacks > 0)
+        Log("[FastPath] Match: %ld fast, %ld fallback", g_matchHits, g_matchFallbacks);
     if (g_typeHits > 0)
         Log("[FastPath] Type: %ld fast, %ld fallback", g_typeHits, g_typeFallbacks);
     if (g_mathHits > 0)
@@ -919,6 +1146,8 @@ Stats GetStats() {
     s.formatFallbacks   = g_formatFallbacks;
     s.findPlainHits     = g_findPlainHits;
     s.findFallbacks     = g_findFallbacks;
+    s.matchHits         = g_matchHits;
+    s.matchFallbacks    = g_matchFallbacks;
     s.typeHits          = g_typeHits;
     s.typeFallbacks     = g_typeFallbacks;
     s.mathHits          = g_mathHits;

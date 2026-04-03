@@ -14,6 +14,8 @@ bool Init();
 
 // Phase 2: Discover and hook more functions at runtime (called after Lua state ready)
 bool InitPhase2(lua_State* L);
+// Allow Phase 2 discovery to re-run after lua_State / VM change
+void ResetPhase2Discovery();
 
 // Disable all hooks
 void Shutdown();
@@ -23,6 +25,8 @@ struct Stats {
     long formatFallbacks;
     long findPlainHits;
     long findFallbacks;
+    long matchHits;
+    long matchFallbacks;
     long typeHits;
     long typeFallbacks;
     long mathHits;
