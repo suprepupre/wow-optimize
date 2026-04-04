@@ -6,10 +6,7 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// ================================================================
-//  Lua VM Internal Optimizations — v3.0.0 hardened
-//  Build 12340 — addresses from IDA Pro
-// ================================================================
+// Lua VM internals for build 12340.
 
 typedef struct lua_State lua_State;
 
@@ -62,14 +59,7 @@ static long g_concatFastHits  = 0;
 static long g_concatFallbacks = 0;
 static bool g_active = false;
 
-// ================================================================
-//  String Interning Cache — v3.0.0
-//
-//  Direct-mapped, 4096 entries, FNV-1a keyed.
-//  Scoped per Lua VM via globalState pointer.
-//  Validated on hit via TString header checks.
-//  Generation counter bumped every GC step.
-// ================================================================
+// Short-string interning cache scoped per Lua VM.
 
 static constexpr int    STR_CACHE_SIZE    = 4096;
 static constexpr int    STR_CACHE_MASK    = STR_CACHE_SIZE - 1;
@@ -155,12 +145,7 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
     return result;
 }
 
-// ================================================================
-//  String Concatenation Fast Path — v3.0.0 hardened
-//
-//  Handles total==2 and total==3 (all strings) using a stack
-//  buffer. Falls back to original for anything else.
-// ================================================================
+// Small concat fast path.
 
 static constexpr size_t CONCAT_BUF_SIZE = 2048;
 

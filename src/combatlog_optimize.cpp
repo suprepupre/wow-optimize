@@ -1,12 +1,4 @@
-// ================================================================
-//  Combat Log Buffer Optimizer — Implementation
-//  WoW 3.3.5a build 12340 (Warmane)
-//
-//  Two-layer fix for combat log issues:
-//
-//  Layer 1: Retention increase (300 -> 1800 sec)
-//  Layer 2: Guaranteed Periodic Clear (fixes the break bug)
-// ================================================================
+// Combat log optimizer for build 12340.
 
 #include "combatlog_optimize.h"
 #include <cstdio>
@@ -15,9 +7,7 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// ================================================================
-//  Known Addresses — build 12340
-// ================================================================
+// Known addresses for build 12340.
 
 namespace Addr {
     static constexpr uintptr_t CVar_RetentionPtr     = 0x00BD09F0;
@@ -25,24 +15,18 @@ namespace Addr {
     static constexpr uintptr_t CombatLogClearEntries  = 0x00751120;
 }
 
-// ================================================================
-//  Configuration
-// ================================================================
+// Configuration.
 
 static constexpr int TARGET_RETENTION_SEC    = 1800;
 static constexpr int RETENTION_CHECK_FRAMES  = 600;
 static constexpr int CVAR_INT_OFFSET         = 0x30;
 static bool g_combatActive = false;
 
-// ================================================================
-//  Function Types
-// ================================================================
+// Function types.
 
 typedef int (__cdecl *ClearEntries_fn)();
 
-// ================================================================
-//  State
-// ================================================================
+// State.
 
 static bool    g_initialized       = false;
 
@@ -58,9 +42,7 @@ static int     g_totalClears       = 0;
 
 static ClearEntries_fn g_clearEntries = nullptr;
 
-// ================================================================
-//  Helpers
-// ================================================================
+// Helpers.
 
 static bool IsReadable(uintptr_t addr) {
     if (addr == 0) return false;
@@ -85,9 +67,7 @@ static double GetTimeMs() {
     return (double)li.QuadPart / g_qpcFreqMs;
 }
 
-// ================================================================
-//  Layer 1: Retention
-// ================================================================
+// Layer 1: retention.
 
 static int ReadRetention() {
     __try {
@@ -120,9 +100,7 @@ static int TryPatchRetention() {
     return 1;
 }
 
-// ================================================================
-//  Layer 2: Guaranteed Clear
-// ================================================================
+// Layer 2: periodic clear.
 
 static double GetClearIntervalMs() {
     if (g_combatActive) return 10000.0;
@@ -137,9 +115,7 @@ static void TryClearProcessedEntries(double nowMs) {
     g_totalClears++;
 }
 
-// ================================================================
-//  API
-// ================================================================
+// API.
 
 namespace CombatLogOpt {
 

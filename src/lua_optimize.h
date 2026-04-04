@@ -1,15 +1,5 @@
 #pragma once
-// ================================================================
-//  Lua VM Optimizer Module for wow_optimize.dll
-//  WoW 3.3.5a build 12340 (Warmane)
-//  
-//  Thanks for addresses to some ppl(my friend Choko especially) and also IDA Pro.
-//
-//  Usage:
-//    Worker thread: LuaOpt::PrepareFromWorkerThread()
-//    Main thread:   LuaOpt::OnMainThreadSleep(mainThreadId)
-//    DLL unload:    LuaOpt::Shutdown()
-// ================================================================
+// Lua VM optimizer for WoW 3.3.5a build 12340.
 
 #ifndef LUA_OPTIMIZE_H
 #define LUA_OPTIMIZE_H

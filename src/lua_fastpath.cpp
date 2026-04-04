@@ -78,9 +78,7 @@ static bool g_active       = false;
 static bool g_phase2Active = false;
 static int  g_phase2Hooks  = 0;
 
-// ================================================================
-//  string.format fast path (Phase 1 — unchanged logic)
-// ================================================================
+// string.format fast path.
 
 static int __cdecl Hooked_StrFormat(lua_State* L) {
     int nargs = lua_gettop_(L);
@@ -472,11 +470,7 @@ static int __cdecl Hooked_StrFind(lua_State* L) {
     return found ? 2 : 1;
 }
 
-// --- string.match() partial fast path ---
-// Safe fast cases only:
-//   1) plain literal pattern: "abc"
-//   2) anchored literal: "^abc"
-//   3) anchored ASCII classes: ^%d+ ^%a+ ^%w+ ^%l+ ^%u+ ^%s+
+// string.match fast path for plain and simple anchored patterns.
 static lua_CFunction_t orig_str_match = nullptr;
 
 static int __cdecl Hooked_StrMatch(lua_State* L) {
@@ -750,10 +744,7 @@ static int __cdecl Hooked_StrByte(lua_State* L) {
     return orig_str_byte(L);
 }
 
-// --- tostring() fast path ---
-//  Skips __tostring metamethod check for primitive types.
-//  For table/function/userdata/thread, falls back to original
-//  (which handles __tostring and pointer formatting).
+// tostring fast path for primitive types.
 static lua_CFunction_t orig_luaB_tostring = nullptr;
 
 static int __cdecl Hooked_ToString(lua_State* L) {
@@ -806,9 +797,7 @@ tostring_fallback:
     return orig_luaB_tostring(L);
 }
 
-// --- tonumber() fast path ---
-//  Fast path for the common case: tonumber(x) where x is already a number.
-//  String parsing and base conversion are complex — fall back for those.
+// tonumber fast path for numeric input.
 static lua_CFunction_t orig_luaB_tonumber = nullptr;
 
 static int __cdecl Hooked_ToNumber_Global(lua_State* L) {
@@ -827,8 +816,7 @@ static int __cdecl Hooked_ToNumber_Global(lua_State* L) {
     return orig_luaB_tonumber(L);
 }
 
-// --- string.sub() fast path ---
-//  Direct substring extraction. Falls back for embedded NULs or long strings.
+// string.sub fast path.
 static lua_CFunction_t orig_str_sub = nullptr;
 
 static int __cdecl Hooked_StrSub(lua_State* L) {
@@ -878,9 +866,7 @@ static int __cdecl Hooked_StrSub(lua_State* L) {
     return 1;
 }
 
-// --- string.lower() fast path (ASCII only) ---
-//  Converts A-Z to a-z directly. Bails on any non-ASCII byte
-//  (Cyrillic, Korean, UTF-8, etc.) to preserve locale correctness.
+// string.lower fast path (ASCII only).
 static lua_CFunction_t orig_str_lower = nullptr;
 
 static int __cdecl Hooked_StrLower(lua_State* L) {
@@ -903,7 +889,7 @@ static int __cdecl Hooked_StrLower(lua_State* L) {
     return 1;
 }
 
-// --- string.upper() fast path (ASCII only) ---
+// string.upper fast path (ASCII only).
 static lua_CFunction_t orig_str_upper = nullptr;
 
 static int __cdecl Hooked_StrUpper(lua_State* L) {

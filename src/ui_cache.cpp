@@ -11,10 +11,7 @@ bool Init() {
     Log("[UICache] ====================================");
     Log("[UICache]  UI Widget Cache");
     Log("[UICache]  DISABLED in test build");
-    Log("[UICache]  Reason: real-world addon regressions");
-    Log("[UICache]  - WeakAuras spec-switch missing auras");
-    Log("[UICache]  - Raid frames: dead names red, HP bars not empty");
-    Log("[UICache]  C-level StatusBar caching is not release-safe");
+    Log("[UICache]  Disabled due to addon regressions");
     Log("[UICache] ====================================");
     g_active = false;
     return false;
