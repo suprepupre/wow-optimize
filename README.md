@@ -1,4 +1,4 @@
-# wow_optimize v3.0.1
+# wow_optimize
 
 Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)  
 Author: SUPREMATIST
