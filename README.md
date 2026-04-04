@@ -1,44 +1,48 @@
-# 🚀 wow_optimize
+# wow_optimize v3.0.1
 
-**Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)**  
-Author: **SUPREMATIST**
+Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)  
+Author: SUPREMATIST
 
-wow_optimize improves WoW 3.3.5a at the **engine/runtime level**: memory allocation, Lua VM behavior, Lua library fast paths, deeper Lua VM internals, timers, file I/O, networking, heap fragmentation, lock contention, and other low-level bottlenecks.
+wow_optimize improves WoW 3.3.5a at the engine and runtime level: memory allocation, Lua VM behavior, Lua library fast paths, timers, file I/O, networking, heap fragmentation, lock contention, and other low-level bottlenecks.
 
-The current branch is focused on **real frametime stability, long-session smoothness, addon-heavy gameplay, and lower VM/runtime overhead** while keeping historically unsafe public features disabled.
+The current public build is focused on real frametime stability, long-session smoothness, addon-heavy gameplay, and lower Lua/runtime overhead while keeping historically unsafe public features disabled.
 
-> ⚠️ **Disclaimer:** This project is provided as-is for educational purposes. DLL injection may violate the Terms of Service of private servers. Use at your own risk.
-
----
-
-## ⭐ Reviews
-
-See what other players say: [**Reviews & Testimonials**](https://github.com/suprepupre/wow-optimize/discussions/10)
+> Disclaimer: This project is provided as-is for educational purposes. DLL injection may violate the Terms of Service of private servers. Use at your own risk.
 
 ---
 
-## ✅ Current Feature Set
+## Reviews
 
-### Memory / Allocator
-- **mimalloc CRT replacement** for `malloc/free/realloc/calloc/_msize`
-- **Lua VM allocator replacement** with mimalloc
-- **Lua string table pre-sizing** to reduce hash resize freezes
-- **Low Fragmentation Heap (LFH)** enabled for process heap and new heaps
-- **Periodic mimalloc purge** (`mi_collect`) for long-session memory stability
+See what other players say: [Reviews and Testimonials](https://github.com/suprepupre/wow-optimize/discussions/10)
 
-### Lua Runtime
-- **Adaptive manual Lua GC**
-- **4-tier GC stepping** (normal / combat / idle / loading)
-- **GC step sync with !LuaBoost**
-- **Safe Lua stats export to addon**
-- **Lua reload detection and clean reinitialization**
+---
 
-### Lua Fast Paths
-- **Phase 1: string.format fast path**
-  - common format patterns accelerated
-  - embedded-NUL / long-string safety retained
-- **Phase 2: runtime-discovered Lua library hooks**
+## Current Feature Set
+
+### Memory and allocator
+- mimalloc CRT replacement for `malloc/free/realloc/calloc/_msize`
+- Lua VM allocator replacement with mimalloc
+- Lua string table pre-sizing to reduce hash resize spikes
+- Low Fragmentation Heap (LFH) enabled for process heap and new heaps
+- periodic mimalloc purge for long-session memory stability
+
+### Lua runtime
+- adaptive manual Lua GC
+- 4-tier GC stepping:
+  - normal
+  - combat
+  - idle
+  - loading
+- GC step sync with !LuaBoost
+- safe Lua stats export to addon
+- Lua reload detection and clean reinitialization
+
+### Lua fast paths
+- Phase 1:
+  - `string.format`
+- Phase 2:
   - `string.find` (plain mode)
+  - `string.match` (safe partial fast path)
   - `type`
   - `math.floor`
   - `math.ceil`
@@ -46,105 +50,105 @@ See what other players say: [**Reviews & Testimonials**](https://github.com/supr
   - `math.max` (2 args)
   - `math.min` (2 args)
   - `string.len`
-  - `string.byte` (single-byte fast path)
+  - `string.byte`
   - `tostring`
   - `tonumber`
   - `string.sub`
   - `string.lower`
   - `string.upper`
 
-### Lua VM Internals
-- **String interning cache** in `luaS_newlstr`
-  - reduces repeated string interning lookup overhead for short hot strings
-- **Fast small-string concatenation path** in `luaV_concat`
-  - reduces overhead for common 2–3 operand concat cases
+### Lua VM internals
+- string interning cache in `luaS_newlstr`
+  - scoped per Lua VM
+  - validated on cache hit
+- fast small-string concatenation path in `luaV_concat`
+  - optimized 2-3 operand concat
+  - SEH-guarded fallback to original path
 
-### Timers / Frame Pacing
-- **PreciseSleep** on the main thread (adaptive for multi-client)
-- **GetTickCount → QPC**
-- **timeGetTime → same QPC timeline**
-- **QueryPerformanceCounter coalescing cache**
-- **Adaptive timer resolution**
-  - single client: 0.5ms
-  - multi-client: 1.0ms
-- **Hardcoded FPS cap raised** (200 → 999)
-- **Automatic multi-client detection**
+### Timers and frame pacing
+- PreciseSleep on the main thread
+- automatic single-client / multi-client timing behavior
+- `GetTickCount` redirected to QPC-based timing
+- `timeGetTime` redirected to the same QPC timeline
+- QueryPerformanceCounter coalescing cache
+- adaptive timer resolution
+- hardcoded FPS cap raised from 200 to 999
 
 ### File I/O
-- **MPQ handle tracking**
-- **Retroactive MPQ handle scanner**
-- **CreateFile sequential-scan hints for MPQ**
-- **Adaptive MPQ read-ahead cache**
-- **FlushFileBuffers skipped for MPQ handles**
-- **GetFileAttributesA cache**
-- **SetFilePointer redirected to SetFilePointerEx**
+- MPQ handle tracking
+- retroactive MPQ handle scanner
+- sequential-scan hints for MPQ access
+- adaptive MPQ read-ahead cache
+- skip `FlushFileBuffers` for tracked MPQ handles
+- `GetFileAttributesA` cache
+- `SetFilePointer` redirected to `SetFilePointerEx`
 
-### Threading / Synchronization
-- **SRWLOCK-based file cache**
-- **Main thread priority ABOVE_NORMAL**
-- **Ideal processor assignment**
-- **Process priority ABOVE_NORMAL**
-- **CriticalSection spin count + TryEnter spin-first path**
-- **TLS-cached GetCurrentThreadId / pseudo-handle fast path**
+### Threading and synchronization
+- SRWLOCK-based file cache locking
+- main thread priority ABOVE_NORMAL
+- ideal processor assignment
+- process priority ABOVE_NORMAL
+- CriticalSection spin count and spin-first entry path
+- TLS-cached `GetCurrentThreadId` and pseudo-handle fast path
 
 ### Networking
-- **TCP_NODELAY**
-- **Immediate ACK frequency**
-- **Socket buffer tuning**
-- **QoS / low-delay TOS**
-- **Fast keepalive settings**
+- `TCP_NODELAY`
+- immediate ACK frequency
+- socket buffer tuning
+- low-delay TOS
+- fast keepalive settings
 
-### Other Runtime Optimizations
-- **Combat log optimizer**
-- **GetItemInfo cache**
-- **CompareStringA fast ASCII path**
-- **OutputDebugStringA no-op when no debugger**
-- **Fast VirtualQuery-based IsBadReadPtr / IsBadWritePtr**
-- **Periodic stats dump**
-
----
-
-## 🔒 Intentionally Disabled in Public-Safe Builds
-
-These features are kept out of public-safe builds because they previously caused real regressions or crashes:
-
-- **MPQ memory mapping**
-- **UI widget cache**
-- **GetSpellInfo cache**
-- **dynamic unit API caching**
-- **GlobalAlloc fast path**
+### Other runtime optimizations
+- combat log optimizer
+- `GetItemInfo` cache
+- `CompareStringA` fast ASCII path
+- `OutputDebugStringA` no-op when no debugger
+- fast `IsBadReadPtr` / `IsBadWritePtr`
+- periodic stats dump
 
 ---
 
-## 🧠 What Improves In Practice
+## Intentionally Disabled in Public-Safe Builds
 
-### You WILL notice
-- ✅ smoother frametimes
-- ✅ fewer random microstutters
-- ✅ better long-session stability
-- ✅ lower Lua/runtime overhead in addon-heavy gameplay
-- ✅ less allocator fragmentation over time
-- ✅ better responsiveness during heavy UI/addon workloads
+These features remain disabled in public-safe builds because they previously caused regressions or crashes:
+
+- MPQ memory mapping
+- UI widget cache
+- GetSpellInfo cache
+- dynamic unit API caching
+- GlobalAlloc fast path
+
+---
+
+## What Improves In Practice
+
+### You will notice
+- smoother frametimes
+- fewer random microstutters
+- better long-session smoothness
+- lower Lua overhead in addon-heavy gameplay
+- less allocator fragmentation over time
+- better responsiveness during heavy UI and addon workloads
 
 ### You may notice
-- ✅ slightly better minimum FPS in cities/raids
-- ✅ less “client gets heavier after long play”
-- ✅ faster Lua-heavy UI behavior
-- ✅ smoother loading transitions
+- slightly better minimum FPS in cities and raids
+- less "client gets heavier after long play"
+- smoother loading transitions
+- faster Lua-heavy addon behavior
 
-### You should NOT expect
-- ✗ a giant average FPS increase from one hook alone
-- ✗ visual changes
-- ✗ gameplay automation
-- ✗ magical fixes for broken addons
+### You should not expect
+- a giant average FPS increase from one hook alone
+- visual changes
+- magical fixes for broken addons
+- gameplay automation
 
-This is an **engine/runtime optimization DLL**, not a UI overhaul.
+This is an engine and runtime optimization DLL, not a UI overhaul.
 
 ---
 
-## 🔧 Recommended Combo
+## Recommended Combo
 
-For best results, use wow_optimize together with **[!LuaBoost](https://github.com/suprepupre/LuaBoost)**.
+For best results, use wow_optimize together with [!LuaBoost](https://github.com/suprepupre/LuaBoost).
 
 | Layer | Tool | Purpose |
 |------|------|---------|
@@ -153,23 +157,23 @@ For best results, use wow_optimize together with **[!LuaBoost](https://github.co
 
 ---
 
-## 📦 Installation
+## Installation
 
-### Option A — Proxy Load
+### Option A - Proxy load
 Copy into your WoW folder:
 - `version.dll`
 - `wow_optimize.dll`
 
 Then launch WoW normally.
 
-### Option B — Loader
+### Option B - Loader
 Copy:
 - `wow_loader.exe`
 - `wow_optimize.dll`
 
 Then launch `wow_loader.exe`.
 
-### Option C — Manual Injection
+### Option C - Manual injection
 Copy:
 - `wow_optimize.dll`
 - your injector
@@ -178,24 +182,29 @@ Then inject after WoW starts.
 
 ---
 
-## 🎮 Multi-Client Support
+## Multi-client Support
 
 wow_optimize automatically detects when multiple WoW instances are running.
 
-- **Single client:** precise sleep + 0.5ms timer
-- **Multi-client:** yield-based sleep + 1.0ms timer
+- Single client:
+  - precise sleep
+  - 0.5 ms timer
+- Multi-client:
+  - yield-based sleep
+  - 1.0 ms timer
+  - reduced working set targets
 
 This reduces CPU pressure compared to forcing aggressive single-client timing on all clients.
 
 ---
 
-## 🛠 Building
+## Building
 
 ### Requirements
-- Windows 10/11
+- Windows 10 or 11
 - Visual Studio with C++
 - CMake
-- **Win32 / 32-bit build**
+- Win32 / 32-bit build
 
 ### Build
 ```bash
@@ -211,44 +220,44 @@ Output:
 
 ---
 
-## 📋 Core Architecture
+## Core Architecture
 
 ### Main modules
-- `dllmain.cpp` — Win32 hooks, allocator, timers, file I/O, networking, threading
-- `lua_optimize.cpp` — Lua VM allocator, adaptive GC, Lua globals bridge
-- `lua_fastpath.cpp` — string.format + runtime-discovered Phase 2 hooks
-- `lua_internals.cpp` — deeper Lua VM hooks for string interning and concat
-- `combatlog_optimize.cpp` — combat log retention + cleanup behavior
-- `api_cache.cpp` — GetItemInfo cache
-- `ui_cache.cpp` — disabled in public-safe build
-- `version_proxy.cpp` — proxy loader
-- `wow_loader.cpp` — standalone loader executable
+- `dllmain.cpp` - Win32 hooks, allocator, timers, file I/O, networking, threading
+- `lua_optimize.cpp` - Lua VM allocator, adaptive GC, Lua globals bridge
+- `lua_fastpath.cpp` - `string.format` and runtime-discovered Phase 2 hooks
+- `lua_internals.cpp` - string interning and concat VM hooks
+- `combatlog_optimize.cpp` - combat log retention and cleanup behavior
+- `api_cache.cpp` - `GetItemInfo` cache
+- `ui_cache.cpp` - disabled in public-safe build
+- `version_proxy.cpp` - proxy loader
+- `wow_loader.cpp` - standalone loader executable
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### "The DLL loads but some old cache feature is missing"
 That is expected. Several historically risky caches are intentionally disabled in public-safe builds.
 
 ### "Why is only GetItemInfo cached?"
-Because `GetItemInfo` is stable once data is loaded. Many other APIs are not safe enough to cache without semantic regressions.
+Because `GetItemInfo` is stable once item data is loaded. Several other APIs are not safe enough to cache without semantic regressions.
 
 ### "Antivirus flags the DLL"
-Hooking/injection tools often trigger false positives. Review the source if needed.
+Hooking and injection tools often trigger false positives. Review the source if needed.
 
-### "I use DXVK/Vulkan"
+### "I use DXVK or Vulkan"
 That is fine. The project does not depend on D3D9 state-cache tricks.
 
 ### "Large pages: no permission"
 This is informational, not a crash cause. Most systems do not have that policy enabled.
 
-### "I use a custom / HD client"
-Use extra caution. Public-safe builds keep the historically unsafe MPQ mapping path disabled, but heavily modified clients can still behave differently from stock clients.
+### "I use a custom or HD client"
+Use extra caution. Public-safe builds keep historically risky MPQ mapping disabled, but heavily modified clients can still behave differently from stock clients.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 wow-optimize/
@@ -272,6 +281,6 @@ wow-optimize/
 
 ---
 
-## 📜 License
+## License
 
-MIT License — use, modify, and distribute freely.
+MIT License - use, modify, and distribute freely.
