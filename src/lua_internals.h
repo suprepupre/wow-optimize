@@ -17,6 +17,11 @@ struct Stats {
     long strCacheStale;
     long strCacheEligible;
     long strCacheOverwrites;
+    long strCacheFaults;
+    long strCacheKeyMismatch;
+    long strCacheTtMismatch;
+    long strCacheLenMismatch;
+    long strCacheDataMismatch;
     long concatFastHits;
     long concatFallbacks;
     bool active;

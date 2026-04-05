@@ -2131,8 +2131,11 @@ static void DumpPeriodicStats() {
             Log("[Stats] StrCache: %ld hits, %ld misses, %ld stale (%.1f%% hit)",
                 lis.strCacheHits, lis.strCacheMisses, lis.strCacheStale,
                 (double)lis.strCacheHits / strTotal * 100.0);
-            Log("[Stats] StrCache: eligible=%ld overwrites=%ld",
-                lis.strCacheEligible, lis.strCacheOverwrites);
+            Log("[Stats] StrCache: eligible=%ld overwrites=%ld faults=%ld",
+                lis.strCacheEligible, lis.strCacheOverwrites, lis.strCacheFaults);
+            Log("[Stats] StrCache: keymis=%ld ttmis=%ld lenmis=%ld datamis=%ld",
+                lis.strCacheKeyMismatch, lis.strCacheTtMismatch,
+                lis.strCacheLenMismatch, lis.strCacheDataMismatch);
         }
 
         long catTotal = lis.concatFastHits + lis.concatFallbacks;
@@ -2140,7 +2143,7 @@ static void DumpPeriodicStats() {
             Log("[Stats] Concat: %ld fast, %ld fallback (%.1f%%)",
                 lis.concatFastHits, lis.concatFallbacks,
                 (double)lis.concatFastHits / catTotal * 100.0);
-    }   
+    } 
 
     Log("[Stats] ====================================");
 
