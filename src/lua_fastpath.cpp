@@ -102,6 +102,7 @@ static long g_strlowerHits        = 0;
 static long g_strupperHits        = 0;
 static long g_rawgetHits          = 0;
 static long g_rawgetFallbacks     = 0;
+static long g_rawgetFirstHitLogged = 0;
 
 static bool g_active       = false;
 static bool g_phase2Active = false;
@@ -982,6 +983,11 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
         }
 
         g_rawgetHits++;
+
+        if (InterlockedCompareExchange(&g_rawgetFirstHitLogged, 1, 0) == 0) {
+            Log("[FastPath] RawGet fast path: first hit");
+        }
+
         return 1;
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -1212,6 +1218,8 @@ Stats GetStats() {
     s.tostringHits      = g_tostringHits;
     s.tostringFallbacks = g_tostringFallbacks;
     s.tonumberHits      = g_tonumberHits;
+    s.rawgetHits        = g_rawgetHits;
+    s.rawgetFallbacks   = g_rawgetFallbacks;
     s.strsubHits        = g_strsubHits;
     s.strlowerHits      = g_strlowerHits;
     s.strupperHits      = g_strupperHits;

@@ -2102,9 +2102,9 @@ static void DumpPeriodicStats() {
         Log("[Stats] Phase2: %d hooks | find=%ld match=%ld type=%ld math=%ld strlen=%ld byte=%ld",
             fps.phase2Hooks, fps.findPlainHits, fps.matchHits, fps.typeHits,
             fps.mathHits, fps.strlenHits, fps.strbyteHits);
-        Log("[Stats] Phase2: tostr=%ld tonum=%ld sub=%ld lower=%ld upper=%ld",
-            fps.tostringHits, fps.tonumberHits, fps.strsubHits,
-            fps.strlowerHits, fps.strupperHits);
+        Log("[Stats] Phase2: tostr=%ld tonum=%ld rawget=%ld/%ld sub=%ld lower=%ld upper=%ld",
+            fps.tostringHits, fps.tonumberHits, fps.rawgetHits, fps.rawgetFallbacks,
+            fps.strsubHits, fps.strlowerHits, fps.strupperHits);
     }
     LuaInternals::Stats lis = LuaInternals::GetStats();
     if (lis.active) {
