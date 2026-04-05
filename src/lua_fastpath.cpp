@@ -82,27 +82,50 @@ static constexpr uintptr_t ADDR_str_format = 0x00853C50;
 static lua_CFunction_t orig_str_format = nullptr;
 
 
-static long g_formatFastHits      = 0;
-static long g_formatFallbacks     = 0;
-static long g_findPlainHits       = 0;
-static long g_findFallbacks       = 0;
-static long g_matchHits           = 0;
-static long g_matchFallbacks      = 0;
-static long g_typeHits            = 0;
-static long g_typeFallbacks       = 0;
-static long g_mathHits            = 0;
-static long g_mathFallbacks       = 0;
-static long g_strlenHits          = 0;
-static long g_strbyteHits         = 0;
-static long g_tostringHits        = 0;
-static long g_tostringFallbacks   = 0;
-static long g_tonumberHits        = 0;
-static long g_strsubHits          = 0;
-static long g_strlowerHits        = 0;
-static long g_strupperHits        = 0;
-static long g_rawgetHits          = 0;
-static long g_rawgetFallbacks     = 0;
-static long g_rawgetFirstHitLogged = 0;
+static long g_formatFastHits       = 0;
+static long g_formatFallbacks      = 0;
+static long g_findPlainHits        = 0;
+static long g_findFallbacks        = 0;
+static long g_matchHits            = 0;
+static long g_matchFallbacks       = 0;
+static long g_typeHits             = 0;
+static long g_typeFallbacks        = 0;
+static long g_mathHits             = 0;
+static long g_mathFallbacks        = 0;
+static long g_strlenHits           = 0;
+static long g_strbyteHits          = 0;
+static long g_tostringHits         = 0;
+static long g_tostringFallbacks    = 0;
+static long g_tonumberHits         = 0;
+static long g_strsubHits           = 0;
+static long g_strlowerHits         = 0;
+static long g_strupperHits         = 0;
+static long g_rawgetHits           = 0;
+static long g_rawgetFallbacks      = 0;
+
+static inline void NoteRawGetHit() {
+    ++g_rawgetHits;
+
+    if (g_rawgetHits == 1 ||
+        g_rawgetHits == 100 ||
+        g_rawgetHits == 1000 ||
+        g_rawgetHits == 10000 ||
+        g_rawgetHits == 50000 ||
+        g_rawgetHits == 100000) {
+        Log("[FastPath] RawGet fast path: %ld hits", g_rawgetHits);
+    }
+}
+
+static inline void NoteRawGetFallback() {
+    ++g_rawgetFallbacks;
+
+    if (g_rawgetFallbacks == 1 ||
+        g_rawgetFallbacks == 100 ||
+        g_rawgetFallbacks == 1000 ||
+        g_rawgetFallbacks == 10000) {
+        Log("[FastPath] RawGet fast path: %ld fallbacks", g_rawgetFallbacks);
+    }
+}
 
 static bool g_active       = false;
 static bool g_phase2Active = false;
@@ -927,14 +950,14 @@ static lua_CFunction_t orig_luaB_rawget = nullptr;
 static int __cdecl Hooked_RawGet_Global(lua_State* L) {
     int nargs = lua_gettop_(L);
     if (nargs != 2) {
-        g_rawgetFallbacks++;
+        NoteRawGetFallback();
         return orig_luaB_rawget(L);
     }
 
     __try {
         RawTValue* base = GetStackBaseFast(L);
         if (!base) {
-            g_rawgetFallbacks++;
+            NoteRawGetFallback();
             return orig_luaB_rawget(L);
         }
 
@@ -942,13 +965,13 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
         RawTValue* keySlot   = base + 1;
 
         if (tableSlot->tt != LUA_TTABLE) {
-            g_rawgetFallbacks++;
+            NoteRawGetFallback();
             return orig_luaB_rawget(L);
         }
 
         void* tablePtr = tableSlot->value.gc;
         if (!tablePtr) {
-            g_rawgetFallbacks++;
+            NoteRawGetFallback();
             return orig_luaB_rawget(L);
         }
 
@@ -969,7 +992,7 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
         }
 
         if (!resultSlot) {
-            g_rawgetFallbacks++;
+            NoteRawGetFallback();
             return orig_luaB_rawget(L);
         }
 
@@ -982,16 +1005,11 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
             keySlot->taint = *(uint32_t*)ADDR_taint_global;
         }
 
-        g_rawgetHits++;
-
-        if (InterlockedCompareExchange(&g_rawgetFirstHitLogged, 1, 0) == 0) {
-            Log("[FastPath] RawGet fast path: first hit");
-        }
-
+        NoteRawGetHit();
         return 1;
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        g_rawgetFallbacks++;
+        NoteRawGetFallback();
         return orig_luaB_rawget(L);
     }
 }
