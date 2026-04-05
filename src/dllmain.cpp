@@ -40,7 +40,8 @@
 
 bool   g_isMultiClient = false;
 static HANDLE g_instanceMutex = NULL;
-static int    g_periodicStatsCounter = 0;
+static DWORD  g_nextStatsDumpTick = 0;
+static DWORD  g_nextMiCollectTick = 0;
 static void   DumpPeriodicStats();
 // Forward declarations for MPQ prefetch
 static void PrefetchMappedMPQs();
@@ -276,11 +277,40 @@ static void PreciseSleep(double milliseconds) {
     }
 }
 
+static void RunPeriodicMaintenanceOnMainThread() {
+    if (g_mainThreadId == 0 || GetCurrentThreadId() != g_mainThreadId)
+        return;
+
+    DWORD nowTick = GetTickCount();
+
+    if (g_nextStatsDumpTick == 0) {
+        g_nextStatsDumpTick = nowTick + 30000;
+    } else if ((LONG)(nowTick - g_nextStatsDumpTick) >= 0) {
+        DumpPeriodicStats();
+        g_nextStatsDumpTick = nowTick + 300000;
+    }
+
+    if (g_isMultiClient) {
+        if (g_nextMiCollectTick == 0) {
+            g_nextMiCollectTick = nowTick + 60000;
+        } else if ((LONG)(nowTick - g_nextMiCollectTick) >= 0) {
+            mi_collect(true);
+            g_nextMiCollectTick = nowTick + 60000;
+        }
+    }
+}
 static LARGE_INTEGER g_lastSleepTime = {};
 static double g_lastFrameMs = 0.0;
 
 static void WINAPI hooked_Sleep(DWORD ms) {
-    if (ms == 0) { orig_Sleep(0); return; }
+    if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
+        RunPeriodicMaintenanceOnMainThread();
+    }
+
+    if (ms == 0) {
+        orig_Sleep(0);
+        return;
+    }
 
     if (ms <= 3 && g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
         LARGE_INTEGER now;
@@ -293,28 +323,10 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         LuaOpt::OnMainThreadSleep(g_mainThreadId, g_lastFrameMs);
         CombatLogOpt::OnFrame(g_mainThreadId);
 
-        // Prefetch mapped MPQ data when entering loading screen
         if (LuaOpt::IsLoadingMode()) {
             PrefetchMappedMPQs();
         } else {
             ResetPrefetchFlag();
-        }
-
-        // Periodic stats dump:
-        // First dump after ~30 seconds (1800 frames at 60fps)
-        // Subsequent dumps every ~5 minutes (18000 frames)
-        g_periodicStatsCounter++;
-        if ((g_periodicStatsCounter == 1800) ||
-            (g_periodicStatsCounter > 0 && (g_periodicStatsCounter % 18000) == 0)) {
-            DumpPeriodicStats();
-        }
-
-        // Multi-client: periodic aggressive memory return
-        // Every ~60 seconds, force mimalloc to return unused pages
-        // Prevents 32-bit address space exhaustion on HD clients
-        if (g_isMultiClient && g_periodicStatsCounter > 0 &&
-            (g_periodicStatsCounter % 3600) == 0) {
-            mi_collect(true);
         }
 
         PreciseSleep((double)ms);
@@ -2151,6 +2163,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     ConfigureMimalloc();
     TryEnableLargePages();
+    g_nextStatsDumpTick = 0;
+    g_nextMiCollectTick = 0;
 
     Log("--- Memory Allocator ---");
     bool allocOk = InstallAllocatorHooks();
