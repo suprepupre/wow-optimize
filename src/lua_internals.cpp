@@ -64,7 +64,8 @@ static constexpr int    STR_CACHE_MASK    = STR_CACHE_SIZE - 1;
 static constexpr size_t STR_CACHE_MAX_LEN = 64;
 
 struct StrCacheEntry {
-    uint32_t  hash;
+    uint32_t  hash;        // cache slot hash (FNV1a)
+    uint32_t  luaHash;     // TString->hash from WoW Lua
     uint32_t  len;
     void*     result;
     uintptr_t globalState;
@@ -116,8 +117,8 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
             __try {
                 uintptr_t ts = (uintptr_t)e->result;
 
-                uint32_t cachedHash = *(uint32_t*)(ts + 0x0C);
-                if (cachedHash != hash) {
+                uint32_t cachedLuaHash = *(uint32_t*)(ts + 0x0C);
+                if (cachedLuaHash != e->luaHash) {
                     g_strCacheHashMismatch++;
                 } else {
                     uint32_t cachedLen = *(uint32_t*)(ts + 0x10);
@@ -153,7 +154,17 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
         g_strCacheOverwrites++;
     }
 
+    uint32_t luaHash = 0;
+    __try {
+        if (result != nullptr) {
+            luaHash = *(uint32_t*)((uintptr_t)result + 0x0C);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        luaHash = 0;
+    }
+
     e->hash        = hash;
+    e->luaHash     = luaHash;
     e->len         = (uint32_t)l;
     e->result      = result;
     e->globalState = gs;
