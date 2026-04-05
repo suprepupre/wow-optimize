@@ -6,7 +6,7 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// WoW API result cache.
+// WoW API result cache for build 12340.
 
 typedef struct lua_State lua_State;
 typedef double lua_Number;
@@ -37,8 +37,6 @@ static fn_lua_toboolean   lua_toboolean_  = (fn_lua_toboolean)0x0084E0B0;
 #define LUA_TNUMBER  3
 #define LUA_TSTRING  4
 
-// Addresses for build 12340.
-
 static constexpr uintptr_t ADDR_GetItemInfo  = 0x00516C60;
 
 static ScriptFunc_fn orig_GetItemInfo  = nullptr;
@@ -65,13 +63,9 @@ struct CacheEntry {
 
 static CacheEntry g_itemCache[CACHE_SIZE]  = {};
 
-// Stats.
-
 static long g_itemHits    = 0;
 static long g_itemMisses  = 0;
 static bool g_active      = false;
-
-// Hash.
 
 static inline uint32_t HashStr(const char* s) {
     uint32_t h = 0x811C9DC5;
@@ -81,8 +75,6 @@ static inline uint32_t HashStr(const char* s) {
     }
     return h;
 }
-
-// Store return values from stack into cache entry.
 
 static void CaptureReturnValues(lua_State* L, CacheEntry* e,
                                  uint32_t keyHash,
@@ -123,8 +115,6 @@ static void CaptureReturnValues(lua_State* L, CacheEntry* e,
     }
 }
 
-// Replay cached values onto the Lua stack.
-
 static inline void ReplayCachedValues(lua_State* L, CacheEntry* e) {
     for (int i = 0; i < e->pushed; i++) {
         switch (e->vals[i].type) {
@@ -136,8 +126,7 @@ static inline void ReplayCachedValues(lua_State* L, CacheEntry* e) {
     }
 }
 
-// GetItemInfo permanent cache. Do not cache nil or partial results.
-
+// Do not cache nil or partial results.
 static int __cdecl Hooked_GetItemInfo(lua_State* L) {
     uint32_t keyHash;
     int argType = lua_type_(L, 1);
@@ -177,8 +166,6 @@ static int __cdecl Hooked_GetItemInfo(lua_State* L) {
     return ret;
 }
 
-// Hook helper.
-
 static bool HookFunc(const char* name, uintptr_t addr, void* hookFn, void** origFn) {
     MH_STATUS s = MH_CreateHook((void*)addr, hookFn, origFn);
     if (s != MH_OK) {
@@ -194,16 +181,10 @@ static bool HookFunc(const char* name, uintptr_t addr, void* hookFn, void** orig
     return true;
 }
 
-// Public API.
-
 namespace ApiCache {
 
 bool Init() {
-    Log("[ApiCache] ====================================");
-    Log("[ApiCache]  WoW API Result Cache");
-    Log("[ApiCache]  Build 12340");
-    Log("[ApiCache]  v2.0.5 hotfix: GetSpellInfo disabled");
-    Log("[ApiCache] ====================================");
+    Log("[ApiCache] Init (build 12340)");
 
     int hooked = 0;
 
@@ -217,12 +198,7 @@ bool Init() {
 
     g_active = true;
 
-    Log("[ApiCache] ====================================");
-    Log("[ApiCache]  Hooks: %d/1 active", hooked);
-    Log("[ApiCache]  GetItemInfo: %d slots, permanent (nil not cached)", CACHE_SIZE);
-    Log("[ApiCache]  GetSpellInfo: DISABLED (spec/talent rebuild safety)");
-    Log("[ApiCache]  [ OK ] ACTIVE");
-    Log("[ApiCache] ====================================");
+    Log("[ApiCache] Hooks: %d/1 active | GetItemInfo: %d slots | GetSpellInfo: disabled", hooked, CACHE_SIZE);
     return true;
 }
 

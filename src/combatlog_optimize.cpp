@@ -1,5 +1,3 @@
-// Combat log optimizer for build 12340.
-
 #include "combatlog_optimize.h"
 #include <cstdio>
 #include <cstring>
@@ -7,26 +5,18 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// Known addresses for build 12340.
-
 namespace Addr {
     static constexpr uintptr_t CVar_RetentionPtr     = 0x00BD09F0;
     static constexpr uintptr_t ActiveListHead        = 0x00ADB97C;
     static constexpr uintptr_t CombatLogClearEntries  = 0x00751120;
 }
 
-// Configuration.
-
 static constexpr int TARGET_RETENTION_SEC    = 1800;
 static constexpr int RETENTION_CHECK_FRAMES  = 600;
 static constexpr int CVAR_INT_OFFSET         = 0x30;
 static bool g_combatActive = false;
 
-// Function types.
-
 typedef int (__cdecl *ClearEntries_fn)();
-
-// State.
 
 static bool    g_initialized       = false;
 
@@ -41,8 +31,6 @@ static double  g_lastClearTime     = 0.0;
 static int     g_totalClears       = 0;
 
 static ClearEntries_fn g_clearEntries = nullptr;
-
-// Helpers.
 
 static bool IsReadable(uintptr_t addr) {
     if (addr == 0) return false;
@@ -66,8 +54,6 @@ static double GetTimeMs() {
     QueryPerformanceCounter(&li);
     return (double)li.QuadPart / g_qpcFreqMs;
 }
-
-// Layer 1: retention.
 
 static int ReadRetention() {
     __try {
@@ -100,8 +86,6 @@ static int TryPatchRetention() {
     return 1;
 }
 
-// Layer 2: periodic clear.
-
 static double GetClearIntervalMs() {
     if (g_combatActive) return 10000.0;
     return 5000.0;
@@ -115,15 +99,10 @@ static void TryClearProcessedEntries(double nowMs) {
     g_totalClears++;
 }
 
-// API.
-
 namespace CombatLogOpt {
 
 bool Init() {
-    Log("[CombatLog] ====================================");
-    Log("[CombatLog]  Combat Log Optimizer (Retention + Clear)");
-    Log("[CombatLog]  Build 12340");
-    Log("[CombatLog] ====================================");
+    Log("[CombatLog] Init (build 12340)");
 
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
@@ -135,7 +114,7 @@ bool Init() {
     int ret = TryPatchRetention();
     if (ret == 1) Log("[CombatLog]  [ OK ] Retention patched (1800s)");
 
-    Log("[CombatLog]  [ OK ] Guaranteed Clear (5s normal, 10s combat)");
+    Log("[CombatLog] Guaranteed clear: 5s normal, 10s combat");
 
     g_initialized = true;
     return true;

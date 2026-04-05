@@ -38,19 +38,11 @@ static constexpr uintptr_t ADDR_taint_global = 0x00D4139C;
 #define CRASH_TEST_DISABLE_CONCAT 0
 #endif
 
-// ================================================================
-//  Function pointer types (both __cdecl)
-// ================================================================
-
 typedef void* (__cdecl *fn_luaS_newlstr)(lua_State* L, const char* str, size_t l);
 typedef void  (__cdecl *fn_luaV_concat)(lua_State* L, int total, int last);
 
 static fn_luaS_newlstr orig_luaS_newlstr = nullptr;
 static fn_luaV_concat  orig_luaV_concat  = nullptr;
-
-// ================================================================
-//  Stats
-// ================================================================
 
 static long g_strCacheHits    = 0;
 static long g_strCacheMisses  = 0;
@@ -59,8 +51,7 @@ static long g_concatFastHits  = 0;
 static long g_concatFallbacks = 0;
 static bool g_active = false;
 
-// Short-string interning cache scoped per Lua VM.
-
+// Short-string interning cache, scoped per Lua VM (by global_State pointer).
 static constexpr int    STR_CACHE_SIZE    = 4096;
 static constexpr int    STR_CACHE_MASK    = STR_CACHE_SIZE - 1;
 static constexpr size_t STR_CACHE_MAX_LEN = 64;
@@ -145,8 +136,7 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
     return result;
 }
 
-// Small concat fast path.
-
+// Fast path for 2 and 3 operand string concat.
 static constexpr size_t CONCAT_BUF_SIZE = 2048;
 
 static bool TryConcatFast(lua_State* L, int total, int last) {
@@ -272,17 +262,10 @@ static void __cdecl Hooked_luaV_concat(lua_State* L, int total, int last) {
     orig_luaV_concat(L, total, last);
 }
 
-// ================================================================
-//  Public API
-// ================================================================
-
 namespace LuaInternals {
 
 bool Init() {
-    Log("[LuaVM] ====================================");
-    Log("[LuaVM]  Lua VM Internal Optimizations v3.0.0");
-    Log("[LuaVM]  Build 12340");
-    Log("[LuaVM] ====================================");
+    Log("[LuaVM] Init Lua VM internals (build 12340)");
 
     int hooked = 0;
 

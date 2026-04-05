@@ -1,11 +1,7 @@
 #pragma once
-// ================================================================
-//  Combat Log Buffer Optimizer for wow_optimize.dll
-//  WoW 3.3.5a build 12340
-//
-//  1. Retention time increase (300 -> 1800 sec)
-//  2. Periodic CombatLogClearEntries from C level
-// ================================================================
+// Combat log optimizer for wow_optimize.dll — build 12340.
+// 1. Retention time increase (300 -> 1800 sec)
+// 2. Periodic CombatLogClearEntries from C level
 
 #ifndef COMBATLOG_OPTIMIZE_H
 #define COMBATLOG_OPTIMIZE_H
