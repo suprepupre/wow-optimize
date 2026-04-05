@@ -53,6 +53,8 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
   - `string.byte`
   - `tostring`
   - `tonumber`
+  - `rawget`
+  - `rawset`
   - `string.sub`
   - `string.lower`
   - `string.upper`

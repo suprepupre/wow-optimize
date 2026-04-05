@@ -110,50 +110,18 @@ static long g_rawsetFallbacks      = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
-
-    if (g_rawgetHits == 1 ||
-        g_rawgetHits == 100 ||
-        g_rawgetHits == 1000 ||
-        g_rawgetHits == 10000 ||
-        g_rawgetHits == 50000 ||
-        g_rawgetHits == 100000) {
-        Log("[FastPath] RawGet fast path: %ld hits", g_rawgetHits);
-    }
 }
 
 static inline void NoteRawGetFallback() {
     ++g_rawgetFallbacks;
-
-    if (g_rawgetFallbacks == 1 ||
-        g_rawgetFallbacks == 100 ||
-        g_rawgetFallbacks == 1000 ||
-        g_rawgetFallbacks == 10000) {
-        Log("[FastPath] RawGet fast path: %ld fallbacks", g_rawgetFallbacks);
-    }
 }
 
 static inline void NoteRawSetHit() {
     ++g_rawsetHits;
-
-    if (g_rawsetHits == 1 ||
-        g_rawsetHits == 100 ||
-        g_rawsetHits == 1000 ||
-        g_rawsetHits == 10000 ||
-        g_rawsetHits == 50000 ||
-        g_rawsetHits == 100000) {
-        Log("[FastPath] RawSet fast path: %ld hits", g_rawsetHits);
-    }
 }
 
 static inline void NoteRawSetFallback() {
     ++g_rawsetFallbacks;
-
-    if (g_rawsetFallbacks == 1 ||
-        g_rawsetFallbacks == 100 ||
-        g_rawsetFallbacks == 1000 ||
-        g_rawsetFallbacks == 10000) {
-        Log("[FastPath] RawSet fast path: %ld fallbacks", g_rawsetFallbacks);
-    }
 }
 
 static bool g_active       = false;
@@ -1336,6 +1304,8 @@ Stats GetStats() {
     s.tonumberHits      = g_tonumberHits;
     s.rawgetHits        = g_rawgetHits;
     s.rawgetFallbacks   = g_rawgetFallbacks;
+    s.rawsetHits        = g_rawsetHits;
+    s.rawsetFallbacks   = g_rawsetFallbacks;
     s.strsubHits        = g_strsubHits;
     s.strlowerHits      = g_strlowerHits;
     s.strupperHits      = g_strupperHits;

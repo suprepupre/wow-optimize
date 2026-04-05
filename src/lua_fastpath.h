@@ -38,6 +38,8 @@ struct Stats {
     long tonumberHits;
     long rawgetHits;
     long rawgetFallbacks;
+    long rawsetHits;
+    long rawsetFallbacks;
     long strsubHits;
     long strlowerHits;
     long strupperHits;
