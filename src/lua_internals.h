@@ -14,6 +14,9 @@ void InvalidateCache();
 struct Stats {
     long strCacheHits;
     long strCacheMisses;
+    long strCacheStale;
+    long strCacheEligible;
+    long strCacheOverwrites;
     long concatFastHits;
     long concatFallbacks;
     bool active;

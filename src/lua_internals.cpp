@@ -44,11 +44,13 @@ typedef void  (__cdecl *fn_luaV_concat)(lua_State* L, int total, int last);
 static fn_luaS_newlstr orig_luaS_newlstr = nullptr;
 static fn_luaV_concat  orig_luaV_concat  = nullptr;
 
-static long g_strCacheHits    = 0;
-static long g_strCacheMisses  = 0;
-static long g_strCacheStale   = 0;  // validation rejected stale entries
-static long g_concatFastHits  = 0;
-static long g_concatFallbacks = 0;
+static long g_strCacheHits        = 0;
+static long g_strCacheMisses      = 0;
+static long g_strCacheStale       = 0;  // validation rejected stale entries
+static long g_strCacheEligible    = 0;  // short strings that entered cache path
+static long g_strCacheOverwrites  = 0;  // direct-mapped slot replaced by another key
+static long g_concatFastHits      = 0;
+static long g_concatFallbacks     = 0;
 static bool g_active = false;
 
 // Short-string interning cache, scoped per Lua VM (by global_State pointer).
@@ -82,6 +84,8 @@ static inline uint32_t FNV1a(const char* data, size_t len) {
 static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l) {
     if (l == 0 || l > STR_CACHE_MAX_LEN)
         return orig_luaS_newlstr(L, str, l);
+
+    g_strCacheEligible++;
 
     uintptr_t gs = 0;
     __try {
@@ -126,6 +130,13 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
     }
 
     void* result = orig_luaS_newlstr(L, str, l);
+
+    if (e->result != nullptr &&
+        (e->globalState != gs ||
+         e->hash != hash ||
+         e->len != (uint32_t)l)) {
+        g_strCacheOverwrites++;
+    }
 
     e->hash        = hash;
     e->len         = (uint32_t)l;
@@ -361,11 +372,14 @@ void InvalidateCache() {
 
 Stats GetStats() {
     Stats s;
-    s.strCacheHits    = g_strCacheHits;
-    s.strCacheMisses  = g_strCacheMisses;
-    s.concatFastHits  = g_concatFastHits;
-    s.concatFallbacks = g_concatFallbacks;
-    s.active          = g_active;
+    s.strCacheHits       = g_strCacheHits;
+    s.strCacheMisses     = g_strCacheMisses;
+    s.strCacheStale      = g_strCacheStale;
+    s.strCacheEligible   = g_strCacheEligible;
+    s.strCacheOverwrites = g_strCacheOverwrites;
+    s.concatFastHits     = g_concatFastHits;
+    s.concatFallbacks    = g_concatFallbacks;
+    s.active             = g_active;
     return s;
 }
 
