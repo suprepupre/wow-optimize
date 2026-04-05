@@ -44,18 +44,18 @@ typedef void  (__cdecl *fn_luaV_concat)(lua_State* L, int total, int last);
 static fn_luaS_newlstr orig_luaS_newlstr = nullptr;
 static fn_luaV_concat  orig_luaV_concat  = nullptr;
 
-static long g_strCacheHits         = 0;
-static long g_strCacheMisses       = 0;
-static long g_strCacheStale        = 0;  // validation rejected cached entry
-static long g_strCacheEligible     = 0;  // short strings that entered cache path
-static long g_strCacheOverwrites   = 0;  // slot replaced by different key/globalState
-static long g_strCacheFaults       = 0;  // SEH fault while validating cached TString
-static long g_strCacheKeyMismatch  = 0;  // stored key copy does not match incoming bytes
-static long g_strCacheTtMismatch   = 0;  // cached object type check failed
-static long g_strCacheLenMismatch  = 0;  // cached TString length mismatch
-static long g_strCacheDataMismatch = 0;  // cached TString bytes mismatch
-static long g_concatFastHits       = 0;
-static long g_concatFallbacks      = 0;
+static long g_strCacheHits           = 0;
+static long g_strCacheMisses         = 0;
+static long g_strCacheStale          = 0;  // validation rejected cached entry
+static long g_strCacheEligible       = 0;  // short strings that entered cache path
+static long g_strCacheOverwrites     = 0;  // slot replaced by different key/globalState
+static long g_strCacheFaults         = 0;  // SEH fault while validating cached TString
+static long g_strCacheKeyMismatch    = 0;  // stored key copy does not match incoming bytes
+static long g_strCacheHashMismatch   = 0;  // cached TString hash mismatch
+static long g_strCacheLenMismatch    = 0;  // cached TString length mismatch
+static long g_strCacheDataMismatch   = 0;  // cached TString bytes mismatch
+static long g_concatFastHits         = 0;
+static long g_concatFallbacks        = 0;
 static bool g_active = false;
 
 // Short-string interning cache, scoped per Lua VM (by global_State pointer).
@@ -116,9 +116,9 @@ static void* __cdecl Hooked_luaS_newlstr(lua_State* L, const char* str, size_t l
             __try {
                 uintptr_t ts = (uintptr_t)e->result;
 
-                uint8_t tt = *(uint8_t*)(ts + 0x04);
-                if (tt != LUA_TSTRING) {
-                    g_strCacheTtMismatch++;
+                uint32_t cachedHash = *(uint32_t*)(ts + 0x0C);
+                if (cachedHash != hash) {
+                    g_strCacheHashMismatch++;
                 } else {
                     uint32_t cachedLen = *(uint32_t*)(ts + 0x10);
                     if (cachedLen != (uint32_t)l) {
@@ -395,7 +395,7 @@ Stats GetStats() {
     s.strCacheOverwrites   = g_strCacheOverwrites;
     s.strCacheFaults       = g_strCacheFaults;
     s.strCacheKeyMismatch  = g_strCacheKeyMismatch;
-    s.strCacheTtMismatch   = g_strCacheTtMismatch;
+    s.strCacheHashMismatch = g_strCacheHashMismatch;
     s.strCacheLenMismatch  = g_strCacheLenMismatch;
     s.strCacheDataMismatch = g_strCacheDataMismatch;
     s.concatFastHits       = g_concatFastHits;

@@ -19,7 +19,7 @@ struct Stats {
     long strCacheOverwrites;
     long strCacheFaults;
     long strCacheKeyMismatch;
-    long strCacheTtMismatch;
+    long strCacheHashMismatch;
     long strCacheLenMismatch;
     long strCacheDataMismatch;
     long concatFastHits;

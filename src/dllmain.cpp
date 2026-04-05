@@ -2133,8 +2133,8 @@ static void DumpPeriodicStats() {
                 (double)lis.strCacheHits / strTotal * 100.0);
             Log("[Stats] StrCache: eligible=%ld overwrites=%ld faults=%ld",
                 lis.strCacheEligible, lis.strCacheOverwrites, lis.strCacheFaults);
-            Log("[Stats] StrCache: keymis=%ld ttmis=%ld lenmis=%ld datamis=%ld",
-                lis.strCacheKeyMismatch, lis.strCacheTtMismatch,
+            Log("[Stats] StrCache: keymis=%ld hashmis=%ld lenmis=%ld datamis=%ld",
+                lis.strCacheKeyMismatch, lis.strCacheHashMismatch,
                 lis.strCacheLenMismatch, lis.strCacheDataMismatch);
         }
 
