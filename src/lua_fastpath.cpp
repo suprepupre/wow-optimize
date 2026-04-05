@@ -38,14 +38,18 @@ typedef void* (__cdecl *fn_luaH_get)(void* t, const void* key);
 typedef void* (__cdecl *fn_luaH_getnum)(void* t, int key);
 typedef void* (__cdecl *fn_luaH_getstr)(void* t, void* key);
 typedef void* (__cdecl *fn_luaH_set)(lua_State* L, void* t, const void* key);
+typedef void* (__cdecl *fn_luaH_setnum)(lua_State* L, void* t, int key);
+typedef unsigned int (__cdecl *fn_luaH_getn)(void* t);
 typedef void  (__cdecl *fn_table_barrier)(lua_State* L, void* t);
 typedef int   (__cdecl *fn_lua_next_helper)(lua_State* L, void* t, void* keyslot);
 
-static fn_luaH_get      luaH_get_      = (fn_luaH_get)0x0085C470;
-static fn_luaH_getnum   luaH_getnum_   = (fn_luaH_getnum)0x0085C3A0;
-static fn_luaH_getstr   luaH_getstr_   = (fn_luaH_getstr)0x0085C430;
-static fn_luaH_set      luaH_set_      = (fn_luaH_set)0x0085C520;
-static fn_table_barrier table_barrier_ = (fn_table_barrier)0x0085BA90;
+static fn_luaH_get        luaH_get_        = (fn_luaH_get)0x0085C470;
+static fn_luaH_getnum     luaH_getnum_     = (fn_luaH_getnum)0x0085C3A0;
+static fn_luaH_getstr     luaH_getstr_     = (fn_luaH_getstr)0x0085C430;
+static fn_luaH_set        luaH_set_        = (fn_luaH_set)0x0085C520;
+static fn_luaH_setnum     luaH_setnum_     = (fn_luaH_setnum)0x0085C590;
+static fn_luaH_getn       luaH_getn_       = (fn_luaH_getn)0x0085C690;
+static fn_table_barrier   table_barrier_   = (fn_table_barrier)0x0085BA90;
 static fn_lua_next_helper lua_next_helper_ = (fn_lua_next_helper)0x0085BE30;
 
 static constexpr uintptr_t ADDR_taint_global  = 0x00D4139C;
@@ -119,6 +123,8 @@ static long g_rawsetHits           = 0;
 static long g_rawsetFallbacks      = 0;
 static long g_nextHits             = 0;
 static long g_nextFallbacks        = 0;
+static long g_tblInsertHits        = 0;
+static long g_tblInsertFallbacks   = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
@@ -189,6 +195,30 @@ static inline void NoteNextFallback() {
         g_nextFallbacks == 1000 ||
         g_nextFallbacks == 10000) {
         Log("[FastPath] Next fast path: %ld fallbacks", g_nextFallbacks);
+    }
+}
+
+static inline void NoteTableInsertHit() {
+    ++g_tblInsertHits;
+
+    if (g_tblInsertHits == 1 ||
+        g_tblInsertHits == 100 ||
+        g_tblInsertHits == 1000 ||
+        g_tblInsertHits == 10000 ||
+        g_tblInsertHits == 50000 ||
+        g_tblInsertHits == 100000) {
+        Log("[FastPath] TableInsert fast path: %ld hits", g_tblInsertHits);
+    }
+}
+
+static inline void NoteTableInsertFallback() {
+    ++g_tblInsertFallbacks;
+
+    if (g_tblInsertFallbacks == 1 ||
+        g_tblInsertFallbacks == 100 ||
+        g_tblInsertFallbacks == 1000 ||
+        g_tblInsertFallbacks == 10000) {
+        Log("[FastPath] TableInsert fast path: %ld fallbacks", g_tblInsertFallbacks);
     }
 }
 
@@ -1213,6 +1243,80 @@ static int __cdecl Hooked_Next_Global(lua_State* L) {
     }
 }
 
+static lua_CFunction_t orig_tbl_insert = nullptr;
+
+static int __cdecl Hooked_TableInsert(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs != 2) {
+        NoteTableInsertFallback();
+        return orig_tbl_insert(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        RawTValue* tableSlot = base;
+        RawTValue* valueSlot = base + 1;
+
+        if (tableSlot->tt != LUA_TTABLE) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        if (valueSlot->tt == LUA_TNIL) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        unsigned int len = luaH_getn_(tablePtr);
+        if (len >= 0x7FFFFFFF) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        RawTValue* dst = (RawTValue*)luaH_setnum_(L, tablePtr, (int)(len + 1));
+        if (!dst) {
+            NoteTableInsertFallback();
+            return orig_tbl_insert(L);
+        }
+
+        *dst = *valueSlot;
+
+        if (valueSlot->taint) {
+            if (*(int*)ADDR_taint_enabled && !*(int*)ADDR_taint_skip)
+                *(uint32_t*)ADDR_taint_global = valueSlot->taint;
+        }
+
+        if (valueSlot->tt >= LUA_TSTRING) {
+            uintptr_t valueGc = (uintptr_t)valueSlot->value.gc;
+            uintptr_t tableGc = (uintptr_t)tablePtr;
+
+            if (valueGc &&
+                ((*(uint8_t*)(valueGc + 9) & 3) != 0) &&
+                ((*(uint8_t*)(tableGc + 9) & 4) != 0)) {
+                table_barrier_(L, tablePtr);
+            }
+        }
+
+        NoteTableInsertHit();
+        return 0;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        NoteTableInsertFallback();
+        return orig_tbl_insert(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1240,6 +1344,7 @@ static FuncHookEntry g_funcHooks[] = {
     {nullptr,  "next",      (void*)Hooked_Next_Global,      &orig_luaB_next,        0, false},
     {nullptr,  "rawget",    (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
     {nullptr,  "rawset",    (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
+    {"table",  "insert",    (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
@@ -1416,6 +1521,8 @@ void Shutdown() {
         Log("[FastPath] RawGet: %ld fast, %ld fallback", g_rawgetHits, g_rawgetFallbacks);
     if (g_rawsetHits > 0 || g_rawsetFallbacks > 0)
         Log("[FastPath] RawSet: %ld fast, %ld fallback", g_rawsetHits, g_rawsetFallbacks);
+    if (g_tblInsertHits > 0 || g_tblInsertFallbacks > 0)
+        Log("[FastPath] TableInsert: %ld fast, %ld fallback", g_tblInsertHits, g_tblInsertFallbacks);
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
