@@ -2127,23 +2127,17 @@ static void DumpPeriodicStats() {
     LuaInternals::Stats lis = LuaInternals::GetStats();
     if (lis.active) {
         long strTotal = lis.strCacheHits + lis.strCacheMisses;
-        if (strTotal > 0) {
-            Log("[Stats] StrCache: %ld hits, %ld misses, %ld stale (%.1f%% hit)",
-                lis.strCacheHits, lis.strCacheMisses, lis.strCacheStale,
+        if (strTotal > 0)
+            Log("[Stats] StrCache: %ld hits, %ld misses (%.1f%%)",
+                lis.strCacheHits, lis.strCacheMisses,
                 (double)lis.strCacheHits / strTotal * 100.0);
-            Log("[Stats] StrCache: eligible=%ld overwrites=%ld faults=%ld",
-                lis.strCacheEligible, lis.strCacheOverwrites, lis.strCacheFaults);
-            Log("[Stats] StrCache: keymis=%ld hashmis=%ld lenmis=%ld datamis=%ld",
-                lis.strCacheKeyMismatch, lis.strCacheHashMismatch,
-                lis.strCacheLenMismatch, lis.strCacheDataMismatch);
-        }
 
         long catTotal = lis.concatFastHits + lis.concatFallbacks;
         if (catTotal > 0)
             Log("[Stats] Concat: %ld fast, %ld fallback (%.1f%%)",
                 lis.concatFastHits, lis.concatFallbacks,
                 (double)lis.concatFastHits / catTotal * 100.0);
-    } 
+    }
 
     Log("[Stats] ====================================");
 
