@@ -23,16 +23,13 @@
 
 #include "version.h"
 
-// ================================================================
-// Crash Isolation Toggles (test builds only)
-// Set ONE of these to 1 when preparing a test DLL.
-// Keep all 0 for normal build.
-// ================================================================
+// Crash isolation toggles. Set to 1 only in test builds.
 #define CRASH_TEST_DISABLE_COMPARESTRING   0
 #define CRASH_TEST_DISABLE_GETFILEATTR     0
 #define CRASH_TEST_DISABLE_GLOBALALLOC     1
 #define CRASH_TEST_DISABLE_CS_ENTER        0
 #define CRASH_TEST_DISABLE_SETFILEPOINTER  0
+#define CRASH_TEST_DISABLE_READFILE        0
 #define CRASH_TEST_DISABLE_ISBADPTR        0
 #define CRASH_TEST_DISABLE_MPQ_MMAP        1
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
@@ -41,9 +38,6 @@
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-// ================================================================
-// Forward Declarations
-// ================================================================
 bool   g_isMultiClient = false;
 static HANDLE g_instanceMutex = NULL;
 static int    g_periodicStatsCounter = 0;
@@ -145,9 +139,7 @@ extern "C" void Log(const char* fmt, ...) {
     SetEvent(g_logEvent);
 }
 
-// ================================================================
-// 1. Memory Allocator Replacement (mimalloc)
-// ================================================================
+// 1. Memory allocator replacement (mimalloc).
 typedef void*  (__cdecl* malloc_fn)(size_t);
 typedef void   (__cdecl* free_fn)(void*);
 typedef void*  (__cdecl* realloc_fn)(void*, size_t);
@@ -244,9 +236,7 @@ static bool InstallAllocatorHooks() {
     return true;
 }
 
-// ================================================================
-// 2. Sleep Hook + Lua GC Stepping + Combat Log Cleanup
-// ================================================================
+// 2. Sleep hook + frame pacing, GC stepping, combat log cleanup.
 static DWORD g_mainThreadId = 0;
 
 typedef void (WINAPI* Sleep_fn)(DWORD);
@@ -347,9 +337,7 @@ static bool InstallSleepHook() {
     return true;
 }
 
-// ================================================================
-// 3. TCP_NODELAY + Immediate ACK + QoS + Keepalive
-// ================================================================
+// 3. Network optimization - TCP_NODELAY, immediate ACK, QoS, keepalive.
 
 #ifndef SIO_TCP_SET_ACK_FREQUENCY
 #define SIO_TCP_SET_ACK_FREQUENCY _WSAIOW(IOC_VENDOR, 23)
@@ -746,9 +734,7 @@ static void DestroyMpqMapping(HANDLE hFile) {
 
 #endif // !CRASH_TEST_DISABLE_MPQ_MMAP
 
-// ================================================================
-// 5. ReadFile Cache (MPQ-only)
-// ================================================================
+// 5. ReadFile cache MPQ adaptive read-ahead.
 typedef BOOL (WINAPI* ReadFile_fn)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 static ReadFile_fn orig_ReadFile = nullptr;
 
@@ -960,15 +946,8 @@ static bool InstallTimeGetTimeHook() {
     return true;
 }
 
-// ================================================================
-// 7. CriticalSection
-//
-//  If CRASH_TEST_DISABLE_CS_ENTER == 1:
-//    keep only InitializeCriticalSection spin-count tuning
-//
-//  Else:
-//    use full v2.1.0 behavior (spin count + TryEnter spin-first)
-// ================================================================
+// 7. CriticalSection spin count tuning + TryEnter spin-first path.
+// CRASH_TEST_DISABLE_CS_ENTER disables the TryEnter path for isolation.
 
 typedef void (WINAPI* InitCS_fn)(LPCRITICAL_SECTION);
 typedef void (WINAPI* EnterCS_fn)(LPCRITICAL_SECTION);
@@ -1655,9 +1634,7 @@ static bool InstallCloseHandleHook() {
     return true;
 }
 
-// ================================================================
-// 9c. Retroactive MPQ Handle Scanner
-// ================================================================
+// 9c. Retroactive MPQ handle scanner finds MPQ handles opened before DLL loaded.
 
 typedef DWORD (WINAPI* GetFinalPathNameByHandleA_fn)(HANDLE, LPSTR, DWORD, DWORD);
 static GetFinalPathNameByHandleA_fn pGetFinalPathNameByHandleA = nullptr;
@@ -1731,16 +1708,8 @@ static void ScanExistingMpqHandles() {
 #endif
 }
 
-// ================================================================
-// 9e. MPQ Prefetch During Loading
-//
-//  When entering a loading screen, proactively tell the OS
-//  to page in all memory-mapped MPQ data. This converts
-//  random page faults during asset loading into a single
-//  sequential prefetch operation.
-//
-//  Uses PrefetchVirtualMemory (Win8+) or sequential touch.
-// ================================================================
+// 9e. MPQ prefetch during loading pages in mapped MPQ data.
+// Uses PrefetchVirtualMemory (Win8+) or sequential touch fallback.
 
 typedef BOOL (WINAPI* PrefetchVirtualMemory_fn)(
     HANDLE, ULONG_PTR, PVOID, ULONG);
@@ -1834,13 +1803,7 @@ static bool InstallFlushFileBuffersHook() {
     return true;
 }
 
-// ================================================================
-// 9d. Multi-Client Detection
-//
-//  If multiple WoW instances run with wow_optimize.dll,
-//  PreciseSleep busy-wait causes excessive CPU usage.
-//  Detect via named mutex, adjust timer and sleep behavior.
-// ================================================================
+// 9d. Multi-client detection via named mutex, adjusts timer and sleep behavior.
 
 static void DetectMultiClient() {
     g_instanceMutex = CreateMutexA(NULL, FALSE, "wow_optimize_instance_v2");
@@ -1853,9 +1816,7 @@ static void DetectMultiClient() {
     }
 }
 
-// ================================================================
-// 10. System Timer Resolution
-// ================================================================
+// 10. System timer resolution.
 static void SetHighTimerResolution() {
     typedef LONG (WINAPI* NtSetTimerRes_fn)(ULONG, BOOLEAN, PULONG);
     HMODULE h = GetModuleHandleA("ntdll.dll");
@@ -1886,9 +1847,7 @@ static void SetHighTimerResolution() {
     }
 }
 
-// ================================================================
-// 11. Large Pages
-// ================================================================
+// 11. Large pages requires SeLockMemoryPrivilege.
 static void TryEnableLargePages() {
     HANDLE hToken;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
@@ -1907,9 +1866,7 @@ static void TryEnableLargePages() {
     Log("Large pages: enabled for mimalloc");
 }
 
-// ================================================================
-// 12. Thread Optimization
-// ================================================================
+// 12. Thread optimization : ideal processor, priority.
 static void OptimizeThreads() {
     DWORD pid = GetCurrentProcessId();
     DWORD mainTid = 0;
@@ -1947,21 +1904,14 @@ static void OptimizeThreads() {
     Log("Main thread %lu: ideal core %lu, priority ABOVE_NORMAL (of %lu cores)", mainTid, core, si.dwNumberOfProcessors);
 }
 
-// ================================================================
-// 13. Process Priority
-// ================================================================
+// 13. Process priority.
 static void OptimizeProcess() {
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
     SetProcessPriorityBoost(GetCurrentProcess(), TRUE);
     Log("Process: Above Normal priority, priority boost disabled");
 }
 
-// ================================================================
-// 14. Working Set
-// ================================================================
-// ================================================================
-// 14. Working Set
-// ================================================================
+// 14. Working set.
 static void OptimizeWorkingSet() {
     SIZE_T minWS, maxWS;
     if (g_isMultiClient) {
@@ -1981,9 +1931,7 @@ static void OptimizeWorkingSet() {
         Log("WARNING: Working set failed (error %lu)", GetLastError());
 }
 
-// ================================================================
-// 15. mimalloc Configuration
-// ================================================================
+// 15. mimalloc configuration.
 static void ConfigureMimalloc() {
     mi_option_set(mi_option_allow_large_os_pages, 1);
 
@@ -2009,9 +1957,7 @@ static void AdjustMimallocForMultiClient() {
     }
 }
 
-// ================================================================
-// 16. FPS Cap Removal
-// ================================================================
+// 16. FPS cap removal - patches CMP EAX, 200 to CMP EAX, 999.
 static uintptr_t FindPattern(uintptr_t base, size_t size, const uint8_t* pat, const char* mask) {
     for (size_t i = 0; i < size; i++) {
         bool found = true;
@@ -2071,12 +2017,8 @@ static void TryRemoveFPSCap() {
     }
 }
 
-// ================================================================
-// Periodic Stats Dump
-//
-//  WoW often hangs on exit, so DLL_PROCESS_DETACH stats never
-//  get written. Dump key stats every 5 minutes from hooked_Sleep.
-// ================================================================
+// Periodic stats dump called from hooked_Sleep.
+// WoW often hangs on exit so DLL_PROCESS_DETACH stats are unreliable.
 
 static void DumpPeriodicStats() {
     // Process memory diagnostics (helps diagnose HD/custom client OOM)
@@ -2183,9 +2125,7 @@ static void DumpPeriodicStats() {
 
 }
 
-// ================================================================
-// Main Thread
-// ================================================================
+// Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
     Sleep(5000);
 
@@ -2352,9 +2292,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     return 0;
 }
 
-// ================================================================
-// DLL Entry Point
-// ================================================================
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:

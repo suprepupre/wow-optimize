@@ -7,9 +7,7 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// ================================================================
-//  Lua types and API (known addresses build 12340)
-// ================================================================
+// Lua types and API — known addresses build 12340.
 
 typedef double lua_Number;
 typedef int (__cdecl *lua_CFunction_t)(lua_State* L);
@@ -44,16 +42,11 @@ static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 #define LUA_TFUNCTION 6
 #define LUA_GLOBALSINDEX (-10002)
 
-// ================================================================
-//  Phase 1: string.format hook (hardcoded address)
-// ================================================================
+// Phase 1: string.format hook (hardcoded address).
 
 static constexpr uintptr_t ADDR_str_format = 0x00853C50;
 static lua_CFunction_t orig_str_format = nullptr;
 
-// ================================================================
-//  Stats
-// ================================================================
 
 static long g_formatFastHits    = 0;
 static long g_formatFallbacks   = 0;
@@ -77,8 +70,6 @@ static long g_strupperHits    = 0;
 static bool g_active       = false;
 static bool g_phase2Active = false;
 static int  g_phase2Hooks  = 0;
-
-// string.format fast path.
 
 static int __cdecl Hooked_StrFormat(lua_State* L) {
     int nargs = lua_gettop_(L);
@@ -230,9 +221,7 @@ fallback:
     return orig_str_format(L);
 }
 
-// ================================================================
-//  Phase 2: Runtime-Discovered Lua Function Hooks
-// ================================================================
+// Phase 2: runtime-discovered Lua function hooks.
 
 static bool IsReadableMemory(uintptr_t addr) {
     if (addr == 0) return false;
@@ -242,7 +231,6 @@ static bool IsReadableMemory(uintptr_t addr) {
     return !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD);
 }
 
-// Calibrated stack layout
 struct StackLayout {
     int baseOffset;
     int tvalueSize;
@@ -405,7 +393,6 @@ static bool PushSubstring(lua_State* L, const char* s, size_t len) {
     lua_pushstring_(L, buf);
     return true;
 }
-// --- string.find (plain mode fast path) ---
 static lua_CFunction_t orig_str_find = nullptr;
 
 static int __cdecl Hooked_StrFind(lua_State* L) {
@@ -470,7 +457,6 @@ static int __cdecl Hooked_StrFind(lua_State* L) {
     return found ? 2 : 1;
 }
 
-// string.match fast path for plain and simple anchored patterns.
 static lua_CFunction_t orig_str_match = nullptr;
 
 static int __cdecl Hooked_StrMatch(lua_State* L) {
@@ -614,7 +600,6 @@ static int __cdecl Hooked_StrMatch(lua_State* L) {
     return orig_str_match(L);
 }
 
-// --- type() fast path ---
 static lua_CFunction_t orig_luaB_type = nullptr;
 
 static const char* const TYPE_NAMES[] = {
@@ -634,7 +619,6 @@ static int __cdecl Hooked_Type(lua_State* L) {
     return orig_luaB_type(L);
 }
 
-// --- math.floor fast path ---
 static lua_CFunction_t orig_math_floor = nullptr;
 
 static int __cdecl Hooked_MathFloor(lua_State* L) {
@@ -647,7 +631,6 @@ static int __cdecl Hooked_MathFloor(lua_State* L) {
     return orig_math_floor(L);
 }
 
-// --- math.ceil fast path ---
 static lua_CFunction_t orig_math_ceil = nullptr;
 
 static int __cdecl Hooked_MathCeil(lua_State* L) {
@@ -660,7 +643,6 @@ static int __cdecl Hooked_MathCeil(lua_State* L) {
     return orig_math_ceil(L);
 }
 
-// --- math.abs fast path ---
 static lua_CFunction_t orig_math_abs = nullptr;
 
 static int __cdecl Hooked_MathAbs(lua_State* L) {
@@ -673,7 +655,6 @@ static int __cdecl Hooked_MathAbs(lua_State* L) {
     return orig_math_abs(L);
 }
 
-// --- math.max fast path (2 args) ---
 static lua_CFunction_t orig_math_max = nullptr;
 
 static int __cdecl Hooked_MathMax(lua_State* L) {
@@ -688,7 +669,6 @@ static int __cdecl Hooked_MathMax(lua_State* L) {
     return orig_math_max(L);
 }
 
-// --- math.min fast path (2 args) ---
 static lua_CFunction_t orig_math_min = nullptr;
 
 static int __cdecl Hooked_MathMin(lua_State* L) {
@@ -703,7 +683,6 @@ static int __cdecl Hooked_MathMin(lua_State* L) {
     return orig_math_min(L);
 }
 
-// --- string.len fast path ---
 static lua_CFunction_t orig_str_len = nullptr;
 
 static int __cdecl Hooked_StrLen(lua_State* L) {
@@ -717,7 +696,6 @@ static int __cdecl Hooked_StrLen(lua_State* L) {
     return orig_str_len(L);
 }
 
-// --- string.byte fast path (single byte) ---
 static lua_CFunction_t orig_str_byte = nullptr;
 
 static int __cdecl Hooked_StrByte(lua_State* L) {
@@ -744,7 +722,6 @@ static int __cdecl Hooked_StrByte(lua_State* L) {
     return orig_str_byte(L);
 }
 
-// tostring fast path for primitive types.
 static lua_CFunction_t orig_luaB_tostring = nullptr;
 
 static int __cdecl Hooked_ToString(lua_State* L) {
@@ -797,7 +774,6 @@ tostring_fallback:
     return orig_luaB_tostring(L);
 }
 
-// tonumber fast path for numeric input.
 static lua_CFunction_t orig_luaB_tonumber = nullptr;
 
 static int __cdecl Hooked_ToNumber_Global(lua_State* L) {
@@ -816,7 +792,6 @@ static int __cdecl Hooked_ToNumber_Global(lua_State* L) {
     return orig_luaB_tonumber(L);
 }
 
-// string.sub fast path.
 static lua_CFunction_t orig_str_sub = nullptr;
 
 static int __cdecl Hooked_StrSub(lua_State* L) {
@@ -866,7 +841,6 @@ static int __cdecl Hooked_StrSub(lua_State* L) {
     return 1;
 }
 
-// string.lower fast path (ASCII only).
 static lua_CFunction_t orig_str_lower = nullptr;
 
 static int __cdecl Hooked_StrLower(lua_State* L) {
@@ -889,7 +863,6 @@ static int __cdecl Hooked_StrLower(lua_State* L) {
     return 1;
 }
 
-// string.upper fast path (ASCII only).
 static lua_CFunction_t orig_str_upper = nullptr;
 
 static int __cdecl Hooked_StrUpper(lua_State* L) {
@@ -912,9 +885,7 @@ static int __cdecl Hooked_StrUpper(lua_State* L) {
     return 1;
 }
 
-// ================================================================
-//  Phase 2: Discovery and Hook Installation
-// ================================================================
+// Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
     const char*        table;
@@ -946,10 +917,6 @@ static FuncHookEntry g_funcHooks[] = {
 };
 
 static constexpr int NUM_FUNC_HOOKS = sizeof(g_funcHooks) / sizeof(g_funcHooks[0]);
-
-// ================================================================
-//  Public API
-// ================================================================
 
 namespace LuaFastPath {
 
@@ -987,9 +954,7 @@ bool Init() {
 bool InitPhase2(lua_State* L) {
     if (!L) return false;
 
-    Log("[FastPath] ====================================");
-    Log("[FastPath]  Phase 2: Runtime Function Discovery");
-    Log("[FastPath] ====================================");
+    Log("[FastPath] Phase 2: runtime function discovery");
 
     // Recalibrate for current VM (glue/game VM may differ in stack base)
     g_layout.valid = false;
@@ -1073,11 +1038,9 @@ bool InitPhase2(lua_State* L) {
     g_phase2Hooks  = hookedTotal;
     g_phase2Active = (hookedTotal > 0);
 
-    Log("[FastPath] ====================================");
-    Log("[FastPath]  Phase 2: %d/%d discovered total, %d new | %d/%d hooked total, %d new",
+    Log("[FastPath] Phase 2: %d/%d discovered, %d new | %d/%d hooked, %d new",
         discoveredTotal, NUM_FUNC_HOOKS, discoveredNow,
         hookedTotal, discoveredTotal, hookedNow);
-    Log("[FastPath] ====================================");
     return g_phase2Active;
 }
 

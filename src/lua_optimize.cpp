@@ -16,9 +16,7 @@
 extern bool g_isMultiClient;
 extern "C" void Log(const char* fmt, ...);
 
-// ================================================================
-//  Lua 5.1 Types
-// ================================================================
+// Lua 5.1 types.
 
 typedef struct lua_State lua_State;
 typedef double lua_Number;
@@ -34,9 +32,7 @@ typedef double lua_Number;
 
 #define LUA_GLOBALSINDEX (-10002)
 
-// ================================================================
-//  Function Pointer Types
-// ================================================================
+// Function pointer types.
 
 typedef int         (__cdecl *fn_lua_gc)(lua_State* L, int what, int data);
 typedef int         (__cdecl *fn_lua_gettop)(lua_State* L);
@@ -77,9 +73,6 @@ namespace Addr {
     static constexpr uintptr_t lua_type            = 0x0084DEB0;
 }
 
-// ================================================================
-//  Resolved API
-// ================================================================
 
 static struct {
     lua_State*              L = nullptr;
@@ -118,9 +111,6 @@ static struct {
     bool isLoading      = false;
 } Config;
 
-// ================================================================
-//  Runtime State
-// ================================================================
 
 static volatile LONG g_luaInitState = 0;
 static volatile bool g_addressesValid = false;
@@ -151,9 +141,6 @@ static int g_lastSyncLoading = -1;
 static double g_smoothedGcMs = 0.5;
 static LARGE_INTEGER g_gcPerfFreq = {};
 
-// ================================================================
-//  Memory Validation
-// ================================================================
 
 static bool IsExecutableMemory(uintptr_t addr) {
     if (addr == 0) return false;
@@ -173,9 +160,6 @@ static bool IsReadableMemory(uintptr_t addr) {
            (mbi.Protect & PAGE_GUARD) == 0;
 }
 
-// ================================================================
-//  Address Resolution
-// ================================================================
 
 static bool ResolveAddresses() {
     Log("[LuaOpt] Resolving addresses for build 12340...");
@@ -230,9 +214,6 @@ static bool ResolveAddresses() {
     return true;
 }
 
-// ================================================================
-//  Get lua_State*
-// ================================================================
 
 static lua_State* ReadLuaState() {
     if (!IsReadableMemory(Addr::lua_State_ptr)) return nullptr;
@@ -446,22 +427,10 @@ static void ResetAllocStats() {
     g_luaAllocStats_reallocMigrate = 0;
 }
 
-// ================================================================
-//  String Table Pre-sizer
-//
-//  Lua 5.1 starts with a small string hash table (32-64 buckets).
-//  With heavy addons (DBM + Skada + WA + ElvUI), 30,000-50,000
-//  unique strings accumulate. Each resize rehashes ALL strings,
-//  causing 5-15ms freezes during gameplay.
-//
-//  We pre-size the table to 32768 buckets at startup.
-//  This eliminates all resize events during normal gameplay.
-//
-//  global_State layout:
-//    +0x00 strt.hash  (TString** bucket array)
-//    +0x04 strt.nuse  (int, number of strings)
-//    +0x08 strt.size  (int, number of buckets)
-// ================================================================
+// String table pre-sizer.
+// Lua 5.1 starts with 32-64 buckets. Heavy addon sessions accumulate
+// 30k-50k strings, causing rehash freezes. We pre-size to 32768 at startup.
+// global_State: +0x00 strt.hash, +0x04 strt.nuse, +0x08 strt.size
 
 static constexpr int STRING_TABLE_TARGET_SIZE = 32768;  // 128 KB of pointers
 
@@ -512,9 +481,6 @@ static bool PreSizeStringTable(lua_State* L) {
     }
 }
 
-// ================================================================
-//  GC Optimization
-// ================================================================
 
 static bool OptimizeGC(lua_State* L) {
     if (!Api.lua_gc) return false;
@@ -570,9 +536,7 @@ static void RestoreGC(lua_State* L) {
     State.gcOptimized = false;
 }
 
-// ================================================================
-//  4-tier GC Step Size Selection
-// ================================================================
+// 4-tier GC step size selection.
 
 static const char* GetGCModeName() {
     if (Config.isLoading) return "loading";
@@ -670,9 +634,6 @@ static void StepGC(lua_State* L) {
     }
 }
 
-// ================================================================
-//  Lua Global Helpers
-// ================================================================
 
 static void WriteLuaGlobal_Bool(lua_State* L, const char* name, bool value) {
     if (!Api.lua_pushboolean || !Api.lua_setfield) return;
@@ -713,9 +674,6 @@ static double ReadLuaGlobal_Number(lua_State* L, const char* name, double fallba
     return val;
 }
 
-// ================================================================
-//  Read Addon State from Lua Globals
-// ================================================================
 
 static void ReadAddonStateFromLua(lua_State* L) {
     if (!Api.lua_getfield || !Api.lua_toboolean || !Api.lua_settop) return;
@@ -765,9 +723,6 @@ static void ReadAddonStateFromLua(lua_State* L) {
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// ================================================================
-//  Write DLL Stats to Lua Globals
-// ================================================================
 
 static void UpdateLuaStats(lua_State* L) {
     if (!Api.lua_pushnumber || !Api.lua_setfield) return;
@@ -806,9 +761,6 @@ static void UpdateLuaStats(lua_State* L) {
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// ================================================================
-//  Initial Setup via FrameScript_Execute
-// ================================================================
 
 static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
@@ -899,9 +851,6 @@ static void SetupLuaInterface(lua_State* L) {
     }
 }
 
-// ================================================================
-//  Process GC Requests from Addon
-// ================================================================
 
 static void ProcessGCRequests(lua_State* L) {
     if (!Api.lua_getfield || !Api.lua_type || !Api.lua_tonumber ||
@@ -935,14 +884,9 @@ static void ProcessGCRequests(lua_State* L) {
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// ================================================================
-//  Main Thread Initialization
-// ================================================================
 
 static void DoMainThreadInit() {
-    Log("[LuaOpt] ====================================");
-    Log("[LuaOpt]  Lua VM Init (main thread)");
-    Log("[LuaOpt] ====================================");
+    Log("[LuaOpt] Main thread init");
 
     Api.L = ReadLuaState();
 
@@ -989,10 +933,6 @@ static void DoMainThreadInit() {
     Log("[LuaOpt]      loading = %d", Config.loadingStepKB);
     Log("[LuaOpt] ====================================");
 }
-
-// ================================================================
-//  Public API
-// ================================================================
 
 namespace LuaOpt {
 
