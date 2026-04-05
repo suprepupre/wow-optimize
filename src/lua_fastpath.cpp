@@ -130,122 +130,42 @@ static long g_tblRemoveFallbacks   = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
-
-    if (g_rawgetHits == 1 ||
-        g_rawgetHits == 100 ||
-        g_rawgetHits == 1000 ||
-        g_rawgetHits == 10000 ||
-        g_rawgetHits == 50000 ||
-        g_rawgetHits == 100000) {
-        Log("[FastPath] RawGet fast path: %ld hits", g_rawgetHits);
-    }
 }
 
 static inline void NoteRawGetFallback() {
     ++g_rawgetFallbacks;
-
-    if (g_rawgetFallbacks == 1 ||
-        g_rawgetFallbacks == 100 ||
-        g_rawgetFallbacks == 1000 ||
-        g_rawgetFallbacks == 10000) {
-        Log("[FastPath] RawGet fast path: %ld fallbacks", g_rawgetFallbacks);
-    }
 }
 
 static inline void NoteRawSetHit() {
     ++g_rawsetHits;
-
-    if (g_rawsetHits == 1 ||
-        g_rawsetHits == 100 ||
-        g_rawsetHits == 1000 ||
-        g_rawsetHits == 10000 ||
-        g_rawsetHits == 50000 ||
-        g_rawsetHits == 100000) {
-        Log("[FastPath] RawSet fast path: %ld hits", g_rawsetHits);
-    }
 }
 
 static inline void NoteRawSetFallback() {
     ++g_rawsetFallbacks;
-
-    if (g_rawsetFallbacks == 1 ||
-        g_rawsetFallbacks == 100 ||
-        g_rawsetFallbacks == 1000 ||
-        g_rawsetFallbacks == 10000) {
-        Log("[FastPath] RawSet fast path: %ld fallbacks", g_rawsetFallbacks);
-    }
 }
 
 static inline void NoteNextHit() {
     ++g_nextHits;
-
-    if (g_nextHits == 1 ||
-        g_nextHits == 100 ||
-        g_nextHits == 1000 ||
-        g_nextHits == 10000 ||
-        g_nextHits == 50000 ||
-        g_nextHits == 100000) {
-        Log("[FastPath] Next fast path: %ld hits", g_nextHits);
-    }
 }
 
 static inline void NoteNextFallback() {
     ++g_nextFallbacks;
-
-    if (g_nextFallbacks == 1 ||
-        g_nextFallbacks == 100 ||
-        g_nextFallbacks == 1000 ||
-        g_nextFallbacks == 10000) {
-        Log("[FastPath] Next fast path: %ld fallbacks", g_nextFallbacks);
-    }
 }
 
 static inline void NoteTableInsertHit() {
     ++g_tblInsertHits;
-
-    if (g_tblInsertHits == 1 ||
-        g_tblInsertHits == 100 ||
-        g_tblInsertHits == 1000 ||
-        g_tblInsertHits == 10000 ||
-        g_tblInsertHits == 50000 ||
-        g_tblInsertHits == 100000) {
-        Log("[FastPath] TableInsert fast path: %ld hits", g_tblInsertHits);
-    }
 }
 
 static inline void NoteTableInsertFallback() {
     ++g_tblInsertFallbacks;
-
-    if (g_tblInsertFallbacks == 1 ||
-        g_tblInsertFallbacks == 100 ||
-        g_tblInsertFallbacks == 1000 ||
-        g_tblInsertFallbacks == 10000) {
-        Log("[FastPath] TableInsert fast path: %ld fallbacks", g_tblInsertFallbacks);
-    }
 }
 
 static inline void NoteTableRemoveHit() {
     ++g_tblRemoveHits;
-
-    if (g_tblRemoveHits == 1 ||
-        g_tblRemoveHits == 100 ||
-        g_tblRemoveHits == 1000 ||
-        g_tblRemoveHits == 10000 ||
-        g_tblRemoveHits == 50000 ||
-        g_tblRemoveHits == 100000) {
-        Log("[FastPath] TableRemove fast path: %ld hits", g_tblRemoveHits);
-    }
 }
 
 static inline void NoteTableRemoveFallback() {
     ++g_tblRemoveFallbacks;
-
-    if (g_tblRemoveFallbacks == 1 ||
-        g_tblRemoveFallbacks == 100 ||
-        g_tblRemoveFallbacks == 1000 ||
-        g_tblRemoveFallbacks == 10000) {
-        Log("[FastPath] TableRemove fast path: %ld fallbacks", g_tblRemoveFallbacks);
-    }
 }
 
 static bool g_active       = false;

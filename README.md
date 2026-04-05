@@ -53,8 +53,11 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
   - `string.byte`
   - `tostring`
   - `tonumber`
+  - `next`
   - `rawget`
   - `rawset`
+  - `table.insert` (append-only fast path)
+  - `table.remove` (pop-last fast path)
   - `string.sub`
   - `string.lower`
   - `string.upper`
@@ -239,12 +242,6 @@ Output:
 
 ## Troubleshooting
 
-### "The DLL loads but some old cache feature is missing"
-That is expected. Several historically risky caches are intentionally disabled in public-safe builds.
-
-### "Why is only GetItemInfo cached?"
-Because `GetItemInfo` is stable once item data is loaded. Several other APIs are not safe enough to cache without semantic regressions.
-
 ### "Antivirus flags the DLL"
 Hooking and injection tools often trigger false positives. Review the source if needed.
 
@@ -253,9 +250,6 @@ That is fine. The project does not depend on D3D9 state-cache tricks.
 
 ### "Large pages: no permission"
 This is informational, not a crash cause. Most systems do not have that policy enabled.
-
-### "I use a custom or HD client"
-Use extra caution. Public-safe builds keep historically risky MPQ mapping disabled, but heavily modified clients can still behave differently from stock clients.
 
 ---
 
