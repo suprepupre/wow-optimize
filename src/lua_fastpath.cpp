@@ -39,12 +39,14 @@ typedef void* (__cdecl *fn_luaH_getnum)(void* t, int key);
 typedef void* (__cdecl *fn_luaH_getstr)(void* t, void* key);
 typedef void* (__cdecl *fn_luaH_set)(lua_State* L, void* t, const void* key);
 typedef void  (__cdecl *fn_table_barrier)(lua_State* L, void* t);
+typedef int   (__cdecl *fn_lua_next_helper)(lua_State* L, void* t, void* keyslot);
 
 static fn_luaH_get      luaH_get_      = (fn_luaH_get)0x0085C470;
 static fn_luaH_getnum   luaH_getnum_   = (fn_luaH_getnum)0x0085C3A0;
 static fn_luaH_getstr   luaH_getstr_   = (fn_luaH_getstr)0x0085C430;
 static fn_luaH_set      luaH_set_      = (fn_luaH_set)0x0085C520;
 static fn_table_barrier table_barrier_ = (fn_table_barrier)0x0085BA90;
+static fn_lua_next_helper lua_next_helper_ = (fn_lua_next_helper)0x0085BE30;
 
 static constexpr uintptr_t ADDR_taint_global  = 0x00D4139C;
 static constexpr uintptr_t ADDR_taint_enabled = 0x00D413A0;
@@ -72,6 +74,14 @@ struct RawTValue {
 
 static inline RawTValue* GetStackBaseFast(lua_State* L) {
     return *(RawTValue**)((uintptr_t)L + 0x10);
+}
+
+static inline RawTValue* GetStackTopFast(lua_State* L) {
+    return *(RawTValue**)((uintptr_t)L + 0x0C);
+}
+
+static inline void SetStackTopFast(lua_State* L, RawTValue* top) {
+    *(RawTValue**)((uintptr_t)L + 0x0C) = top;
 }
 
 static inline double ReadRawNumber(const RawTValue* tv) {
@@ -107,21 +117,79 @@ static long g_rawgetHits           = 0;
 static long g_rawgetFallbacks      = 0;
 static long g_rawsetHits           = 0;
 static long g_rawsetFallbacks      = 0;
+static long g_nextHits             = 0;
+static long g_nextFallbacks        = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
+
+    if (g_rawgetHits == 1 ||
+        g_rawgetHits == 100 ||
+        g_rawgetHits == 1000 ||
+        g_rawgetHits == 10000 ||
+        g_rawgetHits == 50000 ||
+        g_rawgetHits == 100000) {
+        Log("[FastPath] RawGet fast path: %ld hits", g_rawgetHits);
+    }
 }
 
 static inline void NoteRawGetFallback() {
     ++g_rawgetFallbacks;
+
+    if (g_rawgetFallbacks == 1 ||
+        g_rawgetFallbacks == 100 ||
+        g_rawgetFallbacks == 1000 ||
+        g_rawgetFallbacks == 10000) {
+        Log("[FastPath] RawGet fast path: %ld fallbacks", g_rawgetFallbacks);
+    }
 }
 
 static inline void NoteRawSetHit() {
     ++g_rawsetHits;
+
+    if (g_rawsetHits == 1 ||
+        g_rawsetHits == 100 ||
+        g_rawsetHits == 1000 ||
+        g_rawsetHits == 10000 ||
+        g_rawsetHits == 50000 ||
+        g_rawsetHits == 100000) {
+        Log("[FastPath] RawSet fast path: %ld hits", g_rawsetHits);
+    }
 }
 
 static inline void NoteRawSetFallback() {
     ++g_rawsetFallbacks;
+
+    if (g_rawsetFallbacks == 1 ||
+        g_rawsetFallbacks == 100 ||
+        g_rawsetFallbacks == 1000 ||
+        g_rawsetFallbacks == 10000) {
+        Log("[FastPath] RawSet fast path: %ld fallbacks", g_rawsetFallbacks);
+    }
+}
+
+static inline void NoteNextHit() {
+    ++g_nextHits;
+
+    if (g_nextHits == 1 ||
+        g_nextHits == 100 ||
+        g_nextHits == 1000 ||
+        g_nextHits == 10000 ||
+        g_nextHits == 50000 ||
+        g_nextHits == 100000) {
+        Log("[FastPath] Next fast path: %ld hits", g_nextHits);
+    }
+}
+
+static inline void NoteNextFallback() {
+    ++g_nextFallbacks;
+
+    if (g_nextFallbacks == 1 ||
+        g_nextFallbacks == 100 ||
+        g_nextFallbacks == 1000 ||
+        g_nextFallbacks == 10000) {
+        Log("[FastPath] Next fast path: %ld fallbacks", g_nextFallbacks);
+    }
 }
 
 static bool g_active       = false;
@@ -1077,6 +1145,74 @@ static int __cdecl Hooked_RawSet_Global(lua_State* L) {
     }
 }
 
+static lua_CFunction_t orig_luaB_next = nullptr;
+
+static int __cdecl Hooked_Next_Global(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs != 1 && nargs != 2) {
+        NoteNextFallback();
+        return orig_luaB_next(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        RawTValue* top  = GetStackTopFast(L);
+        if (!base || !top) {
+            NoteNextFallback();
+            return orig_luaB_next(L);
+        }
+
+        RawTValue* tableSlot = base;
+        if (tableSlot->tt != LUA_TTABLE) {
+            NoteNextFallback();
+            return orig_luaB_next(L);
+        }
+
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) {
+            NoteNextFallback();
+            return orig_luaB_next(L);
+        }
+
+        RawTValue* keySlot = nullptr;
+
+        if (nargs == 2) {
+            keySlot = base + 1;
+        } else {
+            keySlot = top;
+            keySlot->value.ptr = 0;
+            keySlot->tt = LUA_TNIL;
+            keySlot->taint = *(uint32_t*)ADDR_taint_global;
+        }
+
+        int more = lua_next_helper_(L, tablePtr, keySlot);
+        if (more) {
+            if (nargs == 2) {
+                SetStackTopFast(L, top + 1);
+            } else {
+                SetStackTopFast(L, keySlot + 2);
+            }
+
+            NoteNextHit();
+            return 2;
+        }
+
+        keySlot->value.ptr = 0;
+        keySlot->tt = LUA_TNIL;
+        keySlot->taint = *(uint32_t*)ADDR_taint_global;
+
+        if (nargs == 1)
+            SetStackTopFast(L, keySlot + 1);
+
+        NoteNextHit();
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        NoteNextFallback();
+        return orig_luaB_next(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1101,6 +1237,7 @@ static FuncHookEntry g_funcHooks[] = {
     {"string", "byte",      (void*)Hooked_StrByte,          &orig_str_byte,         0, false},
     {nullptr,  "tostring",  (void*)Hooked_ToString,         &orig_luaB_tostring,    0, false},
     {nullptr,  "tonumber",  (void*)Hooked_ToNumber_Global,  &orig_luaB_tonumber,    0, false},
+    {nullptr,  "next",      (void*)Hooked_Next_Global,      &orig_luaB_next,        0, false},
     {nullptr,  "rawget",    (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
     {nullptr,  "rawset",    (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
@@ -1273,6 +1410,8 @@ void Shutdown() {
     if (g_tostringHits > 0)
         Log("[FastPath] ToString: %ld fast, %ld fallback", g_tostringHits, g_tostringFallbacks);
     if (g_tonumberHits > 0) Log("[FastPath] ToNumber: %ld fast", g_tonumberHits);
+    if (g_nextHits > 0 || g_nextFallbacks > 0)
+        Log("[FastPath] Next: %ld fast, %ld fallback", g_nextHits, g_nextFallbacks);
     if (g_rawgetHits > 0 || g_rawgetFallbacks > 0)
         Log("[FastPath] RawGet: %ld fast, %ld fallback", g_rawgetHits, g_rawgetFallbacks);
     if (g_rawsetHits > 0 || g_rawsetFallbacks > 0)
@@ -1302,6 +1441,8 @@ Stats GetStats() {
     s.tostringHits      = g_tostringHits;
     s.tostringFallbacks = g_tostringFallbacks;
     s.tonumberHits      = g_tonumberHits;
+    s.nextHits          = g_nextHits;
+    s.nextFallbacks     = g_nextFallbacks;
     s.rawgetHits        = g_rawgetHits;
     s.rawgetFallbacks   = g_rawgetFallbacks;
     s.rawsetHits        = g_rawsetHits;
