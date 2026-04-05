@@ -37,10 +37,14 @@ static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 typedef void* (__cdecl *fn_luaH_get)(void* t, const void* key);
 typedef void* (__cdecl *fn_luaH_getnum)(void* t, int key);
 typedef void* (__cdecl *fn_luaH_getstr)(void* t, void* key);
+typedef void* (__cdecl *fn_luaH_set)(lua_State* L, void* t, const void* key);
+typedef void  (__cdecl *fn_table_barrier)(lua_State* L, void* t);
 
-static fn_luaH_get    luaH_get_    = (fn_luaH_get)0x0085C470;
-static fn_luaH_getnum luaH_getnum_ = (fn_luaH_getnum)0x0085C3A0;
-static fn_luaH_getstr luaH_getstr_ = (fn_luaH_getstr)0x0085C430;
+static fn_luaH_get      luaH_get_      = (fn_luaH_get)0x0085C470;
+static fn_luaH_getnum   luaH_getnum_   = (fn_luaH_getnum)0x0085C3A0;
+static fn_luaH_getstr   luaH_getstr_   = (fn_luaH_getstr)0x0085C430;
+static fn_luaH_set      luaH_set_      = (fn_luaH_set)0x0085C520;
+static fn_table_barrier table_barrier_ = (fn_table_barrier)0x0085BA90;
 
 static constexpr uintptr_t ADDR_taint_global  = 0x00D4139C;
 static constexpr uintptr_t ADDR_taint_enabled = 0x00D413A0;
@@ -81,7 +85,6 @@ static inline double ReadRawNumber(const RawTValue* tv) {
 static constexpr uintptr_t ADDR_str_format = 0x00853C50;
 static lua_CFunction_t orig_str_format = nullptr;
 
-
 static long g_formatFastHits       = 0;
 static long g_formatFallbacks      = 0;
 static long g_findPlainHits        = 0;
@@ -102,6 +105,8 @@ static long g_strlowerHits         = 0;
 static long g_strupperHits         = 0;
 static long g_rawgetHits           = 0;
 static long g_rawgetFallbacks      = 0;
+static long g_rawsetHits           = 0;
+static long g_rawsetFallbacks      = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
@@ -124,6 +129,30 @@ static inline void NoteRawGetFallback() {
         g_rawgetFallbacks == 1000 ||
         g_rawgetFallbacks == 10000) {
         Log("[FastPath] RawGet fast path: %ld fallbacks", g_rawgetFallbacks);
+    }
+}
+
+static inline void NoteRawSetHit() {
+    ++g_rawsetHits;
+
+    if (g_rawsetHits == 1 ||
+        g_rawsetHits == 100 ||
+        g_rawsetHits == 1000 ||
+        g_rawsetHits == 10000 ||
+        g_rawsetHits == 50000 ||
+        g_rawsetHits == 100000) {
+        Log("[FastPath] RawSet fast path: %ld hits", g_rawsetHits);
+    }
+}
+
+static inline void NoteRawSetFallback() {
+    ++g_rawsetFallbacks;
+
+    if (g_rawsetFallbacks == 1 ||
+        g_rawsetFallbacks == 100 ||
+        g_rawsetFallbacks == 1000 ||
+        g_rawsetFallbacks == 10000) {
+        Log("[FastPath] RawSet fast path: %ld fallbacks", g_rawsetFallbacks);
     }
 }
 
@@ -1014,6 +1043,72 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
     }
 }
 
+static lua_CFunction_t orig_luaB_rawset = nullptr;
+
+static int __cdecl Hooked_RawSet_Global(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs != 3) {
+        NoteRawSetFallback();
+        return orig_luaB_rawset(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) {
+            NoteRawSetFallback();
+            return orig_luaB_rawset(L);
+        }
+
+        RawTValue* tableSlot = base;
+        RawTValue* keySlot   = base + 1;
+        RawTValue* valueSlot = base + 2;
+
+        if (tableSlot->tt != LUA_TTABLE) {
+            NoteRawSetFallback();
+            return orig_luaB_rawset(L);
+        }
+
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) {
+            NoteRawSetFallback();
+            return orig_luaB_rawset(L);
+        }
+
+        RawTValue* dst = (RawTValue*)luaH_set_(L, tablePtr, keySlot);
+        if (!dst) {
+            NoteRawSetFallback();
+            return orig_luaB_rawset(L);
+        }
+
+        *dst = *valueSlot;
+
+        if (valueSlot->taint) {
+            if (*(int*)ADDR_taint_enabled && !*(int*)ADDR_taint_skip)
+                *(uint32_t*)ADDR_taint_global = valueSlot->taint;
+        }
+
+        if (valueSlot->tt >= LUA_TSTRING) {
+            uintptr_t valueGc = (uintptr_t)valueSlot->value.gc;
+            uintptr_t tableGc = (uintptr_t)tablePtr;
+
+            if (valueGc &&
+                ((*(uint8_t*)(valueGc + 9) & 3) != 0) &&
+                ((*(uint8_t*)(tableGc + 9) & 4) != 0)) {
+                table_barrier_(L, tablePtr);
+            }
+        }
+
+        *valueSlot = *tableSlot;
+
+        NoteRawSetHit();
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        NoteRawSetFallback();
+        return orig_luaB_rawset(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1039,6 +1134,7 @@ static FuncHookEntry g_funcHooks[] = {
     {nullptr,  "tostring",  (void*)Hooked_ToString,         &orig_luaB_tostring,    0, false},
     {nullptr,  "tonumber",  (void*)Hooked_ToNumber_Global,  &orig_luaB_tonumber,    0, false},
     {nullptr,  "rawget",    (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
+    {nullptr,  "rawset",    (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
@@ -1211,6 +1307,8 @@ void Shutdown() {
     if (g_tonumberHits > 0) Log("[FastPath] ToNumber: %ld fast", g_tonumberHits);
     if (g_rawgetHits > 0 || g_rawgetFallbacks > 0)
         Log("[FastPath] RawGet: %ld fast, %ld fallback", g_rawgetHits, g_rawgetFallbacks);
+    if (g_rawsetHits > 0 || g_rawsetFallbacks > 0)
+        Log("[FastPath] RawSet: %ld fast, %ld fallback", g_rawsetHits, g_rawsetFallbacks);
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
