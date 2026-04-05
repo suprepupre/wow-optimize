@@ -125,6 +125,8 @@ static long g_nextHits             = 0;
 static long g_nextFallbacks        = 0;
 static long g_tblInsertHits        = 0;
 static long g_tblInsertFallbacks   = 0;
+static long g_tblRemoveHits        = 0;
+static long g_tblRemoveFallbacks   = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
@@ -219,6 +221,30 @@ static inline void NoteTableInsertFallback() {
         g_tblInsertFallbacks == 1000 ||
         g_tblInsertFallbacks == 10000) {
         Log("[FastPath] TableInsert fast path: %ld fallbacks", g_tblInsertFallbacks);
+    }
+}
+
+static inline void NoteTableRemoveHit() {
+    ++g_tblRemoveHits;
+
+    if (g_tblRemoveHits == 1 ||
+        g_tblRemoveHits == 100 ||
+        g_tblRemoveHits == 1000 ||
+        g_tblRemoveHits == 10000 ||
+        g_tblRemoveHits == 50000 ||
+        g_tblRemoveHits == 100000) {
+        Log("[FastPath] TableRemove fast path: %ld hits", g_tblRemoveHits);
+    }
+}
+
+static inline void NoteTableRemoveFallback() {
+    ++g_tblRemoveFallbacks;
+
+    if (g_tblRemoveFallbacks == 1 ||
+        g_tblRemoveFallbacks == 100 ||
+        g_tblRemoveFallbacks == 1000 ||
+        g_tblRemoveFallbacks == 10000) {
+        Log("[FastPath] TableRemove fast path: %ld fallbacks", g_tblRemoveFallbacks);
     }
 }
 
@@ -1317,6 +1343,99 @@ static int __cdecl Hooked_TableInsert(lua_State* L) {
     }
 }
 
+static lua_CFunction_t orig_tbl_remove = nullptr;
+
+static int __cdecl Hooked_TableRemove(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs != 1 && nargs != 2) {
+        NoteTableRemoveFallback();
+        return orig_tbl_remove(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) {
+            NoteTableRemoveFallback();
+            return orig_tbl_remove(L);
+        }
+
+        RawTValue* tableSlot = base;
+        if (tableSlot->tt != LUA_TTABLE) {
+            NoteTableRemoveFallback();
+            return orig_tbl_remove(L);
+        }
+
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) {
+            NoteTableRemoveFallback();
+            return orig_tbl_remove(L);
+        }
+
+        unsigned int len = luaH_getn_(tablePtr);
+
+        if (nargs == 1) {
+            if (len == 0) {
+                memset(&tableSlot->value, 0, sizeof(tableSlot->value));
+                tableSlot->tt = LUA_TNIL;
+                tableSlot->taint = *(uint32_t*)ADDR_taint_global;
+                NoteTableRemoveHit();
+                return 1;
+            }
+        } else {
+            if (len == 0) {
+                NoteTableRemoveFallback();
+                return orig_tbl_remove(L);
+            }
+
+            RawTValue* indexSlot = base + 1;
+            if (indexSlot->tt != LUA_TNUMBER) {
+                NoteTableRemoveFallback();
+                return orig_tbl_remove(L);
+            }
+
+            double n = ReadRawNumber(indexSlot);
+            int iv = (int)n;
+            if ((double)iv != n || iv <= 0 || (unsigned int)iv != len) {
+                NoteTableRemoveFallback();
+                return orig_tbl_remove(L);
+            }
+        }
+
+        RawTValue* src = (RawTValue*)luaH_getnum_(tablePtr, (int)len);
+        if (!src || src->tt == LUA_TNIL) {
+            NoteTableRemoveFallback();
+            return orig_tbl_remove(L);
+        }
+
+        RawTValue* dst = (RawTValue*)luaH_setnum_(L, tablePtr, (int)len);
+        if (!dst) {
+            NoteTableRemoveFallback();
+            return orig_tbl_remove(L);
+        }
+
+        RawTValue* resultSlot = (nargs == 1) ? tableSlot : (base + 1);
+        *resultSlot = *src;
+
+        if (resultSlot->taint) {
+            if (*(int*)ADDR_taint_enabled && !*(int*)ADDR_taint_skip)
+                *(uint32_t*)ADDR_taint_global = resultSlot->taint;
+        } else {
+            resultSlot->taint = *(uint32_t*)ADDR_taint_global;
+        }
+
+        memset(&dst->value, 0, sizeof(dst->value));
+        dst->tt = LUA_TNIL;
+        dst->taint = *(uint32_t*)ADDR_taint_global;
+
+        NoteTableRemoveHit();
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        NoteTableRemoveFallback();
+        return orig_tbl_remove(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1345,6 +1464,7 @@ static FuncHookEntry g_funcHooks[] = {
     {nullptr,  "rawget",    (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
     {nullptr,  "rawset",    (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
     {"table",  "insert",    (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
+    {"table",  "remove",    (void*)Hooked_TableRemove,      &orig_tbl_remove,       0, false},
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
@@ -1523,6 +1643,8 @@ void Shutdown() {
         Log("[FastPath] RawSet: %ld fast, %ld fallback", g_rawsetHits, g_rawsetFallbacks);
     if (g_tblInsertHits > 0 || g_tblInsertFallbacks > 0)
         Log("[FastPath] TableInsert: %ld fast, %ld fallback", g_tblInsertHits, g_tblInsertFallbacks);
+    if (g_tblRemoveHits > 0 || g_tblRemoveFallbacks > 0)
+        Log("[FastPath] TableRemove: %ld fast, %ld fallback", g_tblRemoveHits, g_tblRemoveFallbacks);
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
@@ -1533,33 +1655,37 @@ void Shutdown() {
 
 Stats GetStats() {
     Stats s;
-    s.formatFastHits    = g_formatFastHits;
-    s.formatFallbacks   = g_formatFallbacks;
-    s.findPlainHits     = g_findPlainHits;
-    s.findFallbacks     = g_findFallbacks;
-    s.matchHits         = g_matchHits;
-    s.matchFallbacks    = g_matchFallbacks;
-    s.typeHits          = g_typeHits;
-    s.typeFallbacks     = g_typeFallbacks;
-    s.mathHits          = g_mathHits;
-    s.mathFallbacks     = g_mathFallbacks;
-    s.strlenHits        = g_strlenHits;
-    s.strbyteHits       = g_strbyteHits;
-    s.tostringHits      = g_tostringHits;
-    s.tostringFallbacks = g_tostringFallbacks;
-    s.tonumberHits      = g_tonumberHits;
-    s.nextHits          = g_nextHits;
-    s.nextFallbacks     = g_nextFallbacks;
-    s.rawgetHits        = g_rawgetHits;
-    s.rawgetFallbacks   = g_rawgetFallbacks;
-    s.rawsetHits        = g_rawsetHits;
-    s.rawsetFallbacks   = g_rawsetFallbacks;
-    s.strsubHits        = g_strsubHits;
-    s.strlowerHits      = g_strlowerHits;
-    s.strupperHits      = g_strupperHits;
-    s.phase2Hooks       = g_phase2Hooks;
-    s.active            = g_active;
-    s.phase2Active      = g_phase2Active;
+    s.formatFastHits      = g_formatFastHits;
+    s.formatFallbacks     = g_formatFallbacks;
+    s.findPlainHits       = g_findPlainHits;
+    s.findFallbacks       = g_findFallbacks;
+    s.matchHits           = g_matchHits;
+    s.matchFallbacks      = g_matchFallbacks;
+    s.typeHits            = g_typeHits;
+    s.typeFallbacks       = g_typeFallbacks;
+    s.mathHits            = g_mathHits;
+    s.mathFallbacks       = g_mathFallbacks;
+    s.strlenHits          = g_strlenHits;
+    s.strbyteHits         = g_strbyteHits;
+    s.tostringHits        = g_tostringHits;
+    s.tostringFallbacks   = g_tostringFallbacks;
+    s.tonumberHits        = g_tonumberHits;
+    s.nextHits            = g_nextHits;
+    s.nextFallbacks       = g_nextFallbacks;
+    s.rawgetHits          = g_rawgetHits;
+    s.rawgetFallbacks     = g_rawgetFallbacks;
+    s.rawsetHits          = g_rawsetHits;
+    s.rawsetFallbacks     = g_rawsetFallbacks;
+    s.tableInsertHits     = g_tblInsertHits;
+    s.tableInsertFallbacks= g_tblInsertFallbacks;
+    s.tableRemoveHits     = g_tblRemoveHits;
+    s.tableRemoveFallbacks= g_tblRemoveFallbacks;
+    s.strsubHits          = g_strsubHits;
+    s.strlowerHits        = g_strlowerHits;
+    s.strupperHits        = g_strupperHits;
+    s.phase2Hooks         = g_phase2Hooks;
+    s.active              = g_active;
+    s.phase2Active        = g_phase2Active;
     return s;
 }
 

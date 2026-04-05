@@ -42,6 +42,10 @@ struct Stats {
     long rawgetFallbacks;
     long rawsetHits;
     long rawsetFallbacks;
+    long tableInsertHits;
+    long tableInsertFallbacks;
+    long tableRemoveHits;
+    long tableRemoveFallbacks;
     long strsubHits;
     long strlowerHits;
     long strupperHits;
