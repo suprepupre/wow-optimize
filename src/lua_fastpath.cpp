@@ -34,6 +34,18 @@ static fn_lua_toboolean   lua_toboolean_   = (fn_lua_toboolean)0x0084E0B0;
 static fn_lua_settop      lua_settop_      = (fn_lua_settop)0x0084DBF0;
 static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 
+typedef void* (__cdecl *fn_luaH_get)(void* t, const void* key);
+typedef void* (__cdecl *fn_luaH_getnum)(void* t, int key);
+typedef void* (__cdecl *fn_luaH_getstr)(void* t, void* key);
+
+static fn_luaH_get    luaH_get_    = (fn_luaH_get)0x0085C470;
+static fn_luaH_getnum luaH_getnum_ = (fn_luaH_getnum)0x0085C3A0;
+static fn_luaH_getstr luaH_getstr_ = (fn_luaH_getstr)0x0085C430;
+
+static constexpr uintptr_t ADDR_taint_global  = 0x00D4139C;
+static constexpr uintptr_t ADDR_taint_enabled = 0x00D413A0;
+static constexpr uintptr_t ADDR_taint_skip    = 0x00D413A4;
+
 #define LUA_TNIL     0
 #define LUA_TBOOLEAN 1
 #define LUA_TNUMBER  3
@@ -42,30 +54,54 @@ static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 #define LUA_TFUNCTION 6
 #define LUA_GLOBALSINDEX (-10002)
 
+union RawValue {
+    void*     gc;
+    uintptr_t ptr;
+    double    n;
+};
+
+struct RawTValue {
+    RawValue  value;
+    int       tt;
+    uint32_t  taint;
+};
+
+static inline RawTValue* GetStackBaseFast(lua_State* L) {
+    return *(RawTValue**)((uintptr_t)L + 0x10);
+}
+
+static inline double ReadRawNumber(const RawTValue* tv) {
+    double d;
+    memcpy(&d, &tv->value, sizeof(double));
+    return d;
+}
+
 // Phase 1: string.format hook (hardcoded address).
 
 static constexpr uintptr_t ADDR_str_format = 0x00853C50;
 static lua_CFunction_t orig_str_format = nullptr;
 
 
-static long g_formatFastHits    = 0;
-static long g_formatFallbacks   = 0;
-static long g_findPlainHits     = 0;
-static long g_findFallbacks     = 0;
-static long g_matchHits         = 0;
-static long g_matchFallbacks    = 0;
-static long g_typeHits          = 0;
-static long g_typeFallbacks   = 0;
-static long g_mathHits        = 0;
-static long g_mathFallbacks   = 0;
-static long g_strlenHits      = 0;
-static long g_strbyteHits     = 0;
-static long g_tostringHits    = 0;
-static long g_tostringFallbacks = 0;
-static long g_tonumberHits    = 0;
-static long g_strsubHits      = 0;
-static long g_strlowerHits    = 0;
-static long g_strupperHits    = 0;
+static long g_formatFastHits      = 0;
+static long g_formatFallbacks     = 0;
+static long g_findPlainHits       = 0;
+static long g_findFallbacks       = 0;
+static long g_matchHits           = 0;
+static long g_matchFallbacks      = 0;
+static long g_typeHits            = 0;
+static long g_typeFallbacks       = 0;
+static long g_mathHits            = 0;
+static long g_mathFallbacks       = 0;
+static long g_strlenHits          = 0;
+static long g_strbyteHits         = 0;
+static long g_tostringHits        = 0;
+static long g_tostringFallbacks   = 0;
+static long g_tonumberHits        = 0;
+static long g_strsubHits          = 0;
+static long g_strlowerHits        = 0;
+static long g_strupperHits        = 0;
+static long g_rawgetHits          = 0;
+static long g_rawgetFallbacks     = 0;
 
 static bool g_active       = false;
 static bool g_phase2Active = false;
@@ -885,6 +921,75 @@ static int __cdecl Hooked_StrUpper(lua_State* L) {
     return 1;
 }
 
+static lua_CFunction_t orig_luaB_rawget = nullptr;
+
+static int __cdecl Hooked_RawGet_Global(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs != 2) {
+        g_rawgetFallbacks++;
+        return orig_luaB_rawget(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) {
+            g_rawgetFallbacks++;
+            return orig_luaB_rawget(L);
+        }
+
+        RawTValue* tableSlot = base;
+        RawTValue* keySlot   = base + 1;
+
+        if (tableSlot->tt != LUA_TTABLE) {
+            g_rawgetFallbacks++;
+            return orig_luaB_rawget(L);
+        }
+
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) {
+            g_rawgetFallbacks++;
+            return orig_luaB_rawget(L);
+        }
+
+        RawTValue* resultSlot = nullptr;
+
+        if (keySlot->tt == LUA_TSTRING) {
+            void* ts = keySlot->value.gc;
+            resultSlot = (RawTValue*)luaH_getstr_(tablePtr, ts);
+        } else if (keySlot->tt == LUA_TNUMBER) {
+            double n = ReadRawNumber(keySlot);
+            int iv = (int)n;
+            if ((double)iv == n)
+                resultSlot = (RawTValue*)luaH_getnum_(tablePtr, iv);
+            else
+                resultSlot = (RawTValue*)luaH_get_(tablePtr, keySlot);
+        } else {
+            resultSlot = (RawTValue*)luaH_get_(tablePtr, keySlot);
+        }
+
+        if (!resultSlot) {
+            g_rawgetFallbacks++;
+            return orig_luaB_rawget(L);
+        }
+
+        *keySlot = *resultSlot;
+
+        if (keySlot->taint) {
+            if (*(int*)ADDR_taint_enabled && !*(int*)ADDR_taint_skip)
+                *(uint32_t*)ADDR_taint_global = keySlot->taint;
+        } else {
+            keySlot->taint = *(uint32_t*)ADDR_taint_global;
+        }
+
+        g_rawgetHits++;
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_rawgetFallbacks++;
+        return orig_luaB_rawget(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -897,23 +1002,22 @@ struct FuncHookEntry {
 };
 
 static FuncHookEntry g_funcHooks[] = {
-    // --- Existing hooks ---
-    {"string", "find",   (void*)Hooked_StrFind,         &orig_str_find,         0, false},
-    {"string", "match",  (void*)Hooked_StrMatch,        &orig_str_match,        0, false},
-    {nullptr,  "type",   (void*)Hooked_Type,            &orig_luaB_type,        0, false},
-    {"math",   "floor", (void*)Hooked_MathFloor,        &orig_math_floor,      0, false},
-    {"math",   "ceil",  (void*)Hooked_MathCeil,         &orig_math_ceil,       0, false},
-    {"math",   "abs",   (void*)Hooked_MathAbs,          &orig_math_abs,        0, false},
-    {"math",   "max",   (void*)Hooked_MathMax,          &orig_math_max,        0, false},
-    {"math",   "min",   (void*)Hooked_MathMin,          &orig_math_min,        0, false},
-    {"string", "len",   (void*)Hooked_StrLen,           &orig_str_len,         0, false},
-    {"string", "byte",  (void*)Hooked_StrByte,          &orig_str_byte,        0, false},
-    // --- New hooks ---
-    {nullptr,  "tostring",  (void*)Hooked_ToString,         &orig_luaB_tostring,   0, false},
-    {nullptr,  "tonumber",  (void*)Hooked_ToNumber_Global,  &orig_luaB_tonumber,   0, false},
-    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,         0, false},
-    {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,       0, false},
-    {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,       0, false},
+    {"string", "find",      (void*)Hooked_StrFind,          &orig_str_find,         0, false},
+    {"string", "match",     (void*)Hooked_StrMatch,         &orig_str_match,        0, false},
+    {nullptr,  "type",      (void*)Hooked_Type,             &orig_luaB_type,        0, false},
+    {"math",   "floor",     (void*)Hooked_MathFloor,        &orig_math_floor,       0, false},
+    {"math",   "ceil",      (void*)Hooked_MathCeil,         &orig_math_ceil,        0, false},
+    {"math",   "abs",       (void*)Hooked_MathAbs,          &orig_math_abs,         0, false},
+    {"math",   "max",       (void*)Hooked_MathMax,          &orig_math_max,         0, false},
+    {"math",   "min",       (void*)Hooked_MathMin,          &orig_math_min,         0, false},
+    {"string", "len",       (void*)Hooked_StrLen,           &orig_str_len,          0, false},
+    {"string", "byte",      (void*)Hooked_StrByte,          &orig_str_byte,         0, false},
+    {nullptr,  "tostring",  (void*)Hooked_ToString,         &orig_luaB_tostring,    0, false},
+    {nullptr,  "tonumber",  (void*)Hooked_ToNumber_Global,  &orig_luaB_tonumber,    0, false},
+    {nullptr,  "rawget",    (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
+    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
+    {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
+    {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
 };
 
 static constexpr int NUM_FUNC_HOOKS = sizeof(g_funcHooks) / sizeof(g_funcHooks[0]);
@@ -1081,6 +1185,8 @@ void Shutdown() {
     if (g_tostringHits > 0)
         Log("[FastPath] ToString: %ld fast, %ld fallback", g_tostringHits, g_tostringFallbacks);
     if (g_tonumberHits > 0) Log("[FastPath] ToNumber: %ld fast", g_tonumberHits);
+    if (g_rawgetHits > 0 || g_rawgetFallbacks > 0)
+        Log("[FastPath] RawGet: %ld fast, %ld fallback", g_rawgetHits, g_rawgetFallbacks);
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
