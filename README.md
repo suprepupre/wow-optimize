@@ -58,17 +58,18 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
   - `rawset`
   - `table.insert` (append-only fast path)
   - `table.remove` (pop-last fast path)
+  - `table.concat` (single-pass, SEH-guarded)
+  - `unpack` (dense array fast path)
+  - `select` (fast index & "#" count)
+  - `rawequal` (direct TValue comparison)
   - `string.sub`
   - `string.lower`
   - `string.upper`
 
 ### Lua VM internals
-- string interning cache in `luaS_newlstr`
-  - scoped per Lua VM
-  - validated on cache hit
-- fast small-string concatenation path in `luaV_concat`
-  - optimized 2-3 operand concat
-  - SEH-guarded fallback to original path
+- `luaV_concat` and `luaS_newlstr` hooks disabled for public stability
+- baseline-safe VM operation with zero overhead
+- string table pre-sizing remains active to prevent rehash freezes
 
 ### Timers and frame pacing
 - PreciseSleep on the main thread
@@ -122,6 +123,8 @@ These features remain disabled in public-safe builds because they previously cau
 - GetSpellInfo cache
 - dynamic unit API caching
 - GlobalAlloc fast path
+- `luaS_newlstr` string cache (removed due to 0xC0000005 crashes on reload)
+- `luaV_concat` hook (removed due to 0% hit-rate overhead)
 
 ---
 
@@ -231,7 +234,7 @@ Output:
 - `dllmain.cpp` - Win32 hooks, allocator, timers, file I/O, networking, threading
 - `lua_optimize.cpp` - Lua VM allocator, adaptive GC, Lua globals bridge
 - `lua_fastpath.cpp` - `string.format` and runtime-discovered Phase 2 hooks
-- `lua_internals.cpp` - string interning and concat VM hooks
+- `lua_internals.cpp` - stable VM baseline (disabled unsafe hooks)
 - `combatlog_optimize.cpp` - combat log retention and cleanup behavior
 - `api_cache.cpp` - `GetItemInfo` cache
 - `ui_cache.cpp` - disabled in public-safe build

@@ -23,6 +23,7 @@ typedef void        (__cdecl *fn_lua_pushnil)(lua_State* L);
 typedef int         (__cdecl *fn_lua_toboolean)(lua_State* L, int index);
 typedef void        (__cdecl *fn_lua_settop)(lua_State* L, int index);
 typedef void        (__cdecl *fn_lua_getfield)(lua_State* L, int index, const char* k);
+typedef void        (__cdecl *fn_lua_pushboolean)(lua_State* L, int b);
 
 static fn_lua_tolstring   lua_tolstring_   = (fn_lua_tolstring)0x0084E0E0;
 static fn_lua_tonumber    lua_tonumber_    = (fn_lua_tonumber)0x0084E030;
@@ -32,6 +33,7 @@ static fn_lua_pushnumber  lua_pushnumber_  = (fn_lua_pushnumber)0x0084E2A0;
 static fn_lua_pushstring  lua_pushstring_  = (fn_lua_pushstring)0x0084E350;
 static fn_lua_pushnil     lua_pushnil_     = (fn_lua_pushnil)0x0084E280;
 static fn_lua_toboolean   lua_toboolean_   = (fn_lua_toboolean)0x0084E0B0;
+static fn_lua_pushboolean lua_pushboolean_ = (fn_lua_pushboolean)0x0084E4D0;
 static fn_lua_settop      lua_settop_      = (fn_lua_settop)0x0084DBF0;
 static fn_lua_getfield    lua_getfield_    = (fn_lua_getfield)0x0084E590;
 
@@ -133,6 +135,16 @@ static long g_tblRemoveFallbacks   = 0;
 static lua_CFunction_t orig_tbl_concat = nullptr;
 static long g_tblConcatHits = 0;
 static long g_tblConcatFallbacks = 0;
+static lua_CFunction_t orig_luaB_rawequal = nullptr;
+static long g_rawequalHits       = 0;
+static long g_rawequalFallbacks  = 0;
+static lua_CFunction_t orig_luaB_unpack = nullptr;
+static long g_unpackHits       = 0;
+static long g_unpackFallbacks  = 0;
+
+static lua_CFunction_t orig_luaB_select = nullptr;
+static long g_selectHits       = 0;
+static long g_selectFallbacks  = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
@@ -1475,6 +1487,146 @@ static int __cdecl Hooked_TableConcat(lua_State* L) {
     }
 }
 
+static int __cdecl Hooked_Unpack(lua_State* L) {
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) goto fallback;
+
+        RawTValue* tableSlot = base;
+        if (tableSlot->tt != LUA_TTABLE) goto fallback;
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) goto fallback;
+
+        int nargs = lua_gettop_(L);
+        int start = 1;
+        int end   = (int)luaH_getn_(tablePtr);
+
+        if (nargs >= 2) {
+            if (lua_type_(L, 2) == LUA_TNUMBER) {
+                double s = ReadRawNumber(base + 1);
+                start = (int)s;
+                if (s != start) goto fallback;
+            } else if (lua_type_(L, 2) != LUA_TNIL) {
+                goto fallback;
+            }
+        }
+        if (nargs >= 3) {
+            if (lua_type_(L, 3) == LUA_TNUMBER) {
+                double e = ReadRawNumber(base + 2);
+                end = (int)e;
+                if (e != end) goto fallback;
+            } else if (lua_type_(L, 3) != LUA_TNIL) {
+                goto fallback;
+            }
+        }
+
+        int count = end - start + 1;
+        if (count <= 0 || count > 256) goto fallback;
+
+        RawTValue* top = GetStackTopFast(L);
+        for (int i = 0; i < count; i++) {
+            RawTValue* val = (RawTValue*)luaH_getnum_(tablePtr, start + i);
+            if (!val || val->tt == LUA_TNIL) goto fallback;
+            *top = *val;
+            top++;
+        }
+        SetStackTopFast(L, top);
+
+        g_unpackHits++;
+        return count;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+fallback:
+    g_unpackFallbacks++;
+    return orig_luaB_unpack(L);
+}
+
+static int __cdecl Hooked_Select(lua_State* L) {
+    __try {
+        int nargs = lua_gettop_(L);
+        if (nargs < 2) goto fallback;
+
+        RawTValue* base = GetStackBaseFast(L);
+        RawTValue* idxSlot = base;
+
+        // select("#", ...)
+        if (idxSlot->tt == LUA_TSTRING) {
+            uintptr_t ts = (uintptr_t)idxSlot->value.gc;
+            if (ts && *(uint32_t*)(ts + 0x10) == 1 && *(const char*)(ts + 0x14) == '#') {
+                lua_pushnumber_(L, (double)(nargs - 1));
+                g_selectHits++;
+                return 1;
+            }
+        }
+
+        // select(n, ...)
+        if (idxSlot->tt == LUA_TNUMBER) {
+            double nd = ReadRawNumber(idxSlot);
+            int n = (int)nd;
+            if (nd != n) goto fallback;
+
+            if (n < 0) n += nargs;
+            if (n < 1) goto fallback;
+            if (n > nargs) n = nargs;
+
+            int ret = nargs - n;
+            g_selectHits++;
+            return ret;
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+fallback:
+    g_selectFallbacks++;
+    return orig_luaB_select(L);
+}
+
+static int __cdecl Hooked_RawEqual(lua_State* L) {
+    __try {
+        if (lua_gettop_(L) != 2) goto fallback;
+
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) goto fallback;
+
+        RawTValue* t1 = base;
+        RawTValue* t2 = base + 1;
+
+        // Type mismatch -> not equal
+        if (t1->tt != t2->tt) {
+            lua_pushboolean_(L, 0);
+            g_rawequalHits++;
+            return 1;
+        }
+
+        bool eq = false;
+        switch (t1->tt) {
+            case LUA_TNIL:
+                eq = true;
+                break;
+            case LUA_TBOOLEAN:
+                // WoW stores booleans in value field; fallback to original for strict safety
+                goto fallback;
+            case LUA_TNUMBER: {
+                double d1 = ReadRawNumber(t1);
+                double d2 = ReadRawNumber(t2);
+                eq = (d1 == d2);
+                break;
+            }
+            default:
+                // All GC types (string, table, userdata, function, thread) compare pointers
+                eq = (t1->value.gc == t2->value.gc);
+                break;
+        }
+
+        lua_pushboolean_(L, eq ? 1 : 0);
+        g_rawequalHits++;
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+fallback:
+    g_rawequalFallbacks++;
+    return orig_luaB_rawequal(L);
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1505,6 +1657,11 @@ static FuncHookEntry g_funcHooks[] = {
     {"table",  "insert",    (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
     {"table",  "remove",    (void*)Hooked_TableRemove,      &orig_tbl_remove,       0, false},
     {"table",  "concat",    (void*)Hooked_TableConcat,      &orig_tbl_concat,         0, false},
+    {nullptr,  "unpack",    (void*)Hooked_Unpack,           &orig_luaB_unpack,        0, false},
+    {nullptr,  "select",    (void*)Hooked_Select,           &orig_luaB_select,        0, false},
+    {nullptr,  "rawequal",  (void*)Hooked_RawEqual,         &orig_luaB_rawequal,      0, false},
+    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
+    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},    
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},    
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
@@ -1687,9 +1844,15 @@ void Shutdown() {
         Log("[FastPath] TableRemove: %ld fast, %ld fallback", g_tblRemoveHits, g_tblRemoveFallbacks);
     if (g_tblConcatHits > 0 || g_tblConcatFallbacks > 0)
         Log("[FastPath] TableConcat: %ld fast, %ld fallback", g_tblConcatHits, g_tblConcatFallbacks);
+    if (g_unpackHits > 0 || g_unpackFallbacks > 0)
+        Log("[FastPath] Unpack: %ld fast, %ld fallback", g_unpackHits, g_unpackFallbacks);
+    if (g_selectHits > 0 || g_selectFallbacks > 0)
+        Log("[FastPath] Select: %ld fast, %ld fallback", g_selectHits, g_selectFallbacks);        
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
+    if (g_rawequalHits > 0 || g_rawequalFallbacks > 0)
+        Log("[FastPath] RawEqual: %ld fast, %ld fallback", g_rawequalHits, g_rawequalFallbacks);    
 
     g_active = false;
     g_phase2Active = false;
@@ -1732,6 +1895,12 @@ Stats GetStats() {
     s.tableRemoveFallbacks= g_tblRemoveFallbacks;
     s.tableConcatHits     = g_tblConcatHits;
     s.tableConcatFallbacks= g_tblConcatFallbacks;
+    s.rawequalHits        = g_rawequalHits;
+    s.rawequalFallbacks   = g_rawequalFallbacks;    
+    s.unpackHits          = g_unpackHits;
+    s.unpackFallbacks     = g_unpackFallbacks;
+    s.selectHits          = g_selectHits;
+    s.selectFallbacks     = g_selectFallbacks;    
     s.strsubHits          = g_strsubHits;
     return s;
 }

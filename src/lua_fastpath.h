@@ -47,7 +47,13 @@ struct Stats {
     long tableRemoveHits;
     long tableRemoveFallbacks;
     long tableConcatHits;           
-    long tableConcatFallbacks;        
+    long tableConcatFallbacks;     
+    long rawequalHits;          
+    long rawequalFallbacks;     
+    long unpackHits;           
+    long unpackFallbacks;       
+    long selectHits;            
+    long selectFallbacks;        
     long strsubHits;
     long strlowerHits;
     long strupperHits;
