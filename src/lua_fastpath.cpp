@@ -1661,8 +1661,6 @@ static FuncHookEntry g_funcHooks[] = {
     {nullptr,  "select",    (void*)Hooked_Select,           &orig_luaB_select,        0, false},
     {nullptr,  "rawequal",  (void*)Hooked_RawEqual,         &orig_luaB_rawequal,      0, false},
     {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
-    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},    
-    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},    
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
 };

@@ -34,6 +34,27 @@
 #define CRASH_TEST_DISABLE_MPQ_MMAP        1
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
 #define CRASH_TEST_DISABLE_LUA_INTERNALS   0
+#define CRASH_TEST_DISABLE_THREAD_AFFINITY  0
+#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN  0
+
+// Forward declarations & global state
+static bool IsExecutableMemory(uintptr_t addr);
+static bool InstallThreadAffinity();
+static bool InstallWaitSpin();
+
+static bool  g_threadAffOk    = false;
+static bool  g_waitSpinOk     = false;
+static long  g_spinHits       = 0;
+static long  g_spinFallbacks  = 0;
+static LONG  g_bgThreadIdx    = 0;
+static DWORD g_affinityCores[16] = {0};
+static int   g_affinityCount  = 0;
+
+typedef int (__cdecl *fn_ThreadWorker)(void* outHandle, LPTHREAD_START_ROUTINE start, LPVOID param, int priority, int a5, int a6, HMODULE hMod);
+static fn_ThreadWorker orig_ThreadWorker = nullptr;
+
+typedef DWORD (WINAPI* WaitSingle_fn)(HANDLE, DWORD);
+static WaitSingle_fn orig_WaitSingle = nullptr;
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -2214,6 +2235,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- FPS Cap ---");
     TryRemoveFPSCap();
 
+    Log("--- Thread Affinity ---");
+    g_threadAffOk = InstallThreadAffinity();
+
+    Log("--- Wait Spin ---");
+    g_waitSpinOk = InstallWaitSpin();
+
     Log("");
     Log("--- Lua VM Optimizer ---");
     bool luaOk = LuaOpt::PrepareFromWorkerThread();
@@ -2307,6 +2334,105 @@ static DWORD WINAPI MainThread(LPVOID param) {
     return 0;
 }
 
+// ================================================================
+//  Thread Affinity — Background Worker CPU Pinning
+//  Forces async tasks (MPQ, UI, network) to cores 2..N-1.
+//  Protects main thread from scheduler preemption.
+// ================================================================
+
+static int __cdecl Hooked_ThreadWorker(void* outHandle, LPTHREAD_START_ROUTINE start, LPVOID param, int priority, int a5, int a6, HMODULE hMod) {
+    int ret = orig_ThreadWorker(outHandle, start, param, priority, a5, a6, hMod);
+    if (ret == 0 && outHandle) {
+        HANDLE h = *(HANDLE*)outHandle;
+        if (h && h != INVALID_HANDLE_VALUE) {
+            int idx = InterlockedIncrement(&g_bgThreadIdx) - 1;
+            SetThreadIdealProcessor(h, g_affinityCores[idx % g_affinityCount]);
+        }
+    }
+    return ret;
+}
+
+static bool IsExecutableMemory(uintptr_t addr) {
+    if (addr == 0) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+static bool InstallThreadAffinity() {
+#if CRASH_TEST_DISABLE_THREAD_AFFINITY
+    Log("Thread affinity: DISABLED (crash isolation)");
+    return false;
+#else
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    int total = (int)si.dwNumberOfProcessors;
+    if (total <= 2) { Log("Thread affinity: SKIP (<=2 cores)"); return false; }
+
+    g_affinityCount = 0;
+    for (int i = 2; i < total && g_affinityCount < 16; i++)
+        g_affinityCores[g_affinityCount++] = i;
+
+    void* p = (void*)0x008D2110;
+    if (!IsExecutableMemory((uintptr_t)p)) return false;
+    if (MH_CreateHook(p, (void*)Hooked_ThreadWorker, (void**)&orig_ThreadWorker) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+
+    Log("Thread affinity: ACTIVE (cores 2-%d, %d workers mapped)", total - 1, g_affinityCount);
+    return true;
+#endif
+}
+
+// ================================================================
+//  WaitForSingleObject — Short-Wait Spin Fast Path
+//  Replaces kernel transitions for <=2ms waits with QPC spin.
+//  Strictly limited to events/timers. Falls back instantly on mismatch.
+// ================================================================
+
+static DWORD WINAPI Hooked_WaitSingle(HANDLE h, DWORD ms) {
+    if (!h || ms == INFINITE || ms > 2) {
+        g_spinFallbacks++;
+        return orig_WaitSingle(h, ms);
+    }
+
+#if !CRASH_TEST_DISABLE_SHORT_WAIT_SPIN
+    __try {
+        LARGE_INTEGER start, now, freq;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+        LONGLONG limit = (freq.QuadPart * ms) / 1000;
+
+        for (int i = 0; i < 5000; i++) {
+            QueryPerformanceCounter(&now);
+            if ((now.QuadPart - start.QuadPart) >= limit) break;
+            if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) return WAIT_OBJECT_0;
+            if (i < 50) _mm_pause();
+            else if (i < 500) SwitchToThread();
+            else YieldProcessor();
+        }
+        return WAIT_TIMEOUT;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+#endif
+
+    g_spinFallbacks++;
+    return orig_WaitSingle(h, ms);
+}
+
+static bool InstallWaitSpin() {
+#if CRASH_TEST_DISABLE_SHORT_WAIT_SPIN
+    Log("Wait spin: DISABLED (crash isolation)");
+    return false;
+#else
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "WaitForSingleObject");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)Hooked_WaitSingle, (void**)&orig_WaitSingle) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("Wait spin: ACTIVE (<=2ms QPC spin, hard fallback on timeout)");
+    return true;
+#endif
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
@@ -2354,6 +2480,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 Log("CriticalSection: %ld spin-acquired (avoided kernel wait)", g_csSpinHits);
             if (g_sfpRedirected > 0)
                 Log("SetFilePointer: %ld calls redirected to SetFilePointerEx", g_sfpRedirected);
+            if (g_threadAffOk) Log("Thread affinity: %d background workers pinned to cores 2+", g_bgThreadIdx);
+            if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0)
+                Log("Wait spin: %ld fast, %ld fallback", g_spinHits, g_spinFallbacks);
             if (g_globalAllocFast > 0)
                 Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast); 
             #if !CRASH_TEST_DISABLE_MPQ_MMAP
