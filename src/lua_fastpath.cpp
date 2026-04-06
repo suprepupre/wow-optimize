@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cmath>
 #include "MinHook.h"
+#include <mimalloc.h>
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -51,6 +52,8 @@ static fn_luaH_setnum     luaH_setnum_     = (fn_luaH_setnum)0x0085C590;
 static fn_luaH_getn       luaH_getn_       = (fn_luaH_getn)0x0085C690;
 static fn_table_barrier   table_barrier_   = (fn_table_barrier)0x0085BA90;
 static fn_lua_next_helper lua_next_helper_ = (fn_lua_next_helper)0x0085BE30;
+typedef void* (__cdecl *fn_luaS_newlstr_fast)(lua_State* L, const char* str, size_t l);
+static fn_luaS_newlstr_fast luaS_newlstr_ = (fn_luaS_newlstr_fast)0x00856C80;
 
 static constexpr uintptr_t ADDR_taint_global  = 0x00D4139C;
 static constexpr uintptr_t ADDR_taint_enabled = 0x00D413A0;
@@ -127,6 +130,9 @@ static long g_tblInsertHits        = 0;
 static long g_tblInsertFallbacks   = 0;
 static long g_tblRemoveHits        = 0;
 static long g_tblRemoveFallbacks   = 0;
+static lua_CFunction_t orig_tbl_concat = nullptr;
+static long g_tblConcatHits = 0;
+static long g_tblConcatFallbacks = 0;
 
 static inline void NoteRawGetHit() {
     ++g_rawgetHits;
@@ -1356,6 +1362,119 @@ static int __cdecl Hooked_TableRemove(lua_State* L) {
     }
 }
 
+static int __cdecl Hooked_TableConcat(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs < 1 || nargs > 4) {
+        g_tblConcatFallbacks++;
+        return orig_tbl_concat(L);
+    }
+
+    __try {
+        RawTValue* base = GetStackBaseFast(L);
+        if (!base) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        RawTValue* tableSlot = base;
+        if (tableSlot->tt != LUA_TTABLE) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+        void* tablePtr = tableSlot->value.gc;
+        if (!tablePtr) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        // Separator (default "")
+        const char* sep = "";
+        size_t sepLen = 0;
+        if (nargs >= 2) {
+            if (lua_type_(L, 2) == LUA_TSTRING) {
+                sep = lua_tolstring_(L, 2, &sepLen);
+                if (!sep) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+            } else if (lua_type_(L, 2) != LUA_TNIL) {
+                g_tblConcatFallbacks++; return orig_tbl_concat(L);
+            }
+        }
+
+        // Start/End indices
+        int start = 1;
+        int end = (int)luaH_getn_(tablePtr);
+        if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER) {
+            double n = lua_tonumber_(L, 3);
+            start = (int)n;
+            if (n != start || start < 1) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+        }
+        if (nargs >= 4 && lua_type_(L, 4) == LUA_TNUMBER) {
+            double n = lua_tonumber_(L, 4);
+            end = (int)n;
+            if (n != end || end < start) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+        }
+
+        if (start > end) {
+            lua_pushstring_(L, "");
+            g_tblConcatHits++;
+            return 1;
+        }
+
+        int count = end - start + 1;
+        int seps = (count > 0 && sepLen > 0) ? (count - 1) : 0;
+
+        // Guard against massive arrays
+        if (count > 8192) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        // Pass 1: validate all elements are strings & compute total length
+        size_t totalLen = 0;
+        for (int i = 0; i < count; i++) {
+            RawTValue* val = (RawTValue*)luaH_getnum_(tablePtr, start + i);
+            if (!val || val->tt != LUA_TSTRING) {
+                g_tblConcatFallbacks++;
+                return orig_tbl_concat(L);
+            }
+            totalLen += *(uint32_t*)((uintptr_t)val->value.gc + 0x10);
+        }
+
+        if (seps > 0) {
+            if (totalLen + (size_t)seps * sepLen < totalLen) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+            totalLen += (size_t)seps * sepLen;
+        }
+
+        // Hard allocation limit for safety
+        if (totalLen > 32768) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        // Allocate & fill
+        char* buf = (char*)mi_malloc(totalLen + 1);
+        if (!buf) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        char* p = buf;
+        for (int i = 0; i < count; i++) {
+            RawTValue* val = (RawTValue*)luaH_getnum_(tablePtr, start + i);
+            size_t slen = *(uint32_t*)((uintptr_t)val->value.gc + 0x10);
+            const char* sdata = (const char*)((uintptr_t)val->value.gc + 0x14);
+            memcpy(p, sdata, slen);
+            p += slen;
+
+            if (i < count - 1 && sepLen > 0) {
+                memcpy(p, sep, sepLen);
+                p += sepLen;
+            }
+        }
+        *p = '\0';
+
+        // Intern string
+        void* ts = luaS_newlstr_(L, buf, totalLen);
+        mi_free(buf);
+        if (!ts) { g_tblConcatFallbacks++; return orig_tbl_concat(L); }
+
+        // Push result
+        RawTValue* top = GetStackTopFast(L);
+        top->value.gc = ts;
+        top->tt = LUA_TSTRING;
+        top->taint = *(uint32_t*)ADDR_taint_global;
+        SetStackTopFast(L, top + 1);
+
+        g_tblConcatHits++;
+        return 1;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_tblConcatFallbacks++;
+        return orig_tbl_concat(L);
+    }
+}
+
 // Phase 2: discovery and hook installation.
 
 struct FuncHookEntry {
@@ -1385,7 +1504,8 @@ static FuncHookEntry g_funcHooks[] = {
     {nullptr,  "rawset",    (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
     {"table",  "insert",    (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
     {"table",  "remove",    (void*)Hooked_TableRemove,      &orig_tbl_remove,       0, false},
-    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
+    {"table",  "concat",    (void*)Hooked_TableConcat,      &orig_tbl_concat,         0, false},
+    {"string", "sub",       (void*)Hooked_StrSub,           &orig_str_sub,          0, false},    
     {"string", "lower",     (void*)Hooked_StrLower,         &orig_str_lower,        0, false},
     {"string", "upper",     (void*)Hooked_StrUpper,         &orig_str_upper,        0, false},
 };
@@ -1565,6 +1685,8 @@ void Shutdown() {
         Log("[FastPath] TableInsert: %ld fast, %ld fallback", g_tblInsertHits, g_tblInsertFallbacks);
     if (g_tblRemoveHits > 0 || g_tblRemoveFallbacks > 0)
         Log("[FastPath] TableRemove: %ld fast, %ld fallback", g_tblRemoveHits, g_tblRemoveFallbacks);
+    if (g_tblConcatHits > 0 || g_tblConcatFallbacks > 0)
+        Log("[FastPath] TableConcat: %ld fast, %ld fallback", g_tblConcatHits, g_tblConcatFallbacks);
     if (g_strsubHits > 0) Log("[FastPath] StrSub: %ld fast", g_strsubHits);
     if (g_strlowerHits > 0) Log("[FastPath] StrLower: %ld fast", g_strlowerHits);
     if (g_strupperHits > 0) Log("[FastPath] StrUpper: %ld fast", g_strupperHits);
@@ -1606,6 +1728,11 @@ Stats GetStats() {
     s.phase2Hooks         = g_phase2Hooks;
     s.active              = g_active;
     s.phase2Active        = g_phase2Active;
+    s.tableRemoveHits     = g_tblRemoveHits;
+    s.tableRemoveFallbacks= g_tblRemoveFallbacks;
+    s.tableConcatHits     = g_tblConcatHits;
+    s.tableConcatFallbacks= g_tblConcatFallbacks;
+    s.strsubHits          = g_strsubHits;
     return s;
 }
 

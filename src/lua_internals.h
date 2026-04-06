@@ -12,8 +12,6 @@ void OnGCStep();
 void InvalidateCache();
 
 struct Stats {
-    long strCacheHits;
-    long strCacheMisses;
     long concatFastHits;
     long concatFallbacks;
     bool active;

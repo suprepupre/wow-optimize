@@ -1009,6 +1009,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);
+        LuaInternals::InvalidateCache();         
         SetupLuaInterface(Api.L);
         LuaFastPath::ResetPhase2Discovery();
         __try {

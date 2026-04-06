@@ -22,8 +22,8 @@ cmake -G "Visual Studio 18 2026" -A Win32 .. 2>&1
 if errorlevel 1 (
     rd /s /q CMakeFiles
     del /q CMakeCache.txt
-    echo Trying Visual Studio 2019...
-    cmake -G "Visual Studio 16 2019" -A Win32 .. 2>&1
+    echo Trying Visual Studio 2026...
+    cmake -G "Visual Studio 18 2026" -A Win32 .. 2>&1
     if errorlevel 1 (
         echo ERROR: CMake configure failed.
         cd ..

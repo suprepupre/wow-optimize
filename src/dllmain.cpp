@@ -2111,27 +2111,18 @@ static void DumpPeriodicStats() {
                 (double)fps.formatFastHits / fmtTotal * 100.0);
     }
     if (fps.phase2Active) {
-        Log("[Stats] Phase2: %d hooks | find=%ld match=%ld type=%ld math=%ld strlen=%ld byte=%ld",
-            fps.phase2Hooks, fps.findPlainHits, fps.matchHits, fps.typeHits,
-            fps.mathHits, fps.strlenHits, fps.strbyteHits);
-        Log("[Stats] Phase2: tostr=%ld tonum=%ld next=%ld/%ld rawget=%ld/%ld rawset=%ld/%ld",
-            fps.tostringHits, fps.tonumberHits,
-            fps.nextHits, fps.nextFallbacks,
-            fps.rawgetHits, fps.rawgetFallbacks,
-            fps.rawsetHits, fps.rawsetFallbacks);
-        Log("[Stats] Phase2: tins=%ld/%ld trem=%ld/%ld sub=%ld lower=%ld upper=%ld",
+        Log("[Stats] Phase2: find=%ld/%ld match=%ld/%ld type=%ld math=%ld strlen=%ld byte=%ld tostr=%ld/%ld tonum=%ld next=%ld/%ld rawget=%ld/%ld rawset=%ld/%ld tins=%ld/%ld trem=%ld/%ld concat=%ld/%ld sub=%ld lower=%ld upper=%ld",
+            fps.findPlainHits, fps.findFallbacks, fps.matchHits, fps.matchFallbacks, fps.typeHits, fps.mathHits, fps.strlenHits, fps.strbyteHits,
+            fps.tostringHits, fps.tostringFallbacks, fps.tonumberHits,
+            fps.nextHits, fps.nextFallbacks, fps.rawgetHits, fps.rawgetFallbacks,
+            fps.rawsetHits, fps.rawsetFallbacks,
             fps.tableInsertHits, fps.tableInsertFallbacks,
             fps.tableRemoveHits, fps.tableRemoveFallbacks,
-            fps.strsubHits, fps.strlowerHits, fps.strupperHits);
+            fps.tableConcatHits, fps.tableConcatFallbacks,
+            fps.strsubHits, fps.strlowerHits, fps.strupperHits);         
     }
     LuaInternals::Stats lis = LuaInternals::GetStats();
     if (lis.active) {
-        long strTotal = lis.strCacheHits + lis.strCacheMisses;
-        if (strTotal > 0)
-            Log("[Stats] StrCache: %ld hits, %ld misses (%.1f%%)",
-                lis.strCacheHits, lis.strCacheMisses,
-                (double)lis.strCacheHits / strTotal * 100.0);
-
         long catTotal = lis.concatFastHits + lis.concatFallbacks;
         if (catTotal > 0)
             Log("[Stats] Concat: %ld fast, %ld fallback (%.1f%%)",
