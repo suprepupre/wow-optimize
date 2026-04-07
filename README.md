@@ -112,19 +112,35 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
 - fast `IsBadReadPtr` / `IsBadWritePtr`
 - periodic stats dump
 
+### VA Arena (Virtual Address Arena)
+- 512MB high-address reserved arena with `MEM_TOP_DOWN`
+- Wow.exe caller filtering — only services allocations from WoW executable code
+- span tracking for correct multi-page allocation/deallocation
+- proper `MEM_DECOMMIT` / `MEM_RELEASE` behavior
+- reduces 32-bit address space fragmentation from large WoW allocations
+
 ---
 
 ## Intentionally Disabled in Public-Safe Builds
 
-These features remain disabled in public-safe builds because they previously caused regressions or crashes:
+These features are disabled in public-safe builds because they previously caused regressions or crashes:
 
-- MPQ memory mapping
-- UI widget cache
-- GetSpellInfo cache
-- dynamic unit API caching
-- GlobalAlloc fast path
+- MPQ memory mapping (disabled for stability)
+- UI widget cache (disabled due to addon regressions)
+- GetSpellInfo cache (disabled)
+- dynamic unit API caching (disabled)
+- GlobalAlloc fast path (disabled)
 - `luaS_newlstr` string cache (removed due to 0xC0000005 crashes on reload)
 - `luaV_concat` hook (removed due to 0% hit-rate overhead)
+
+### Removed Features
+
+These experimental features were tested and found to provide no measurable benefit, so they have been removed from the codebase:
+
+- WaitSpin (WaitForSingleObject short-wait spin) — huge fallback count, essentially 0 value
+- DispatchPool (dispatcher pool for 20-byte allocations) — hooks active but no real hit in sessions
+- bgpreloadsleep cache — 0 calls in real sessions
+- Subtask Event Pool — 0 reuse / 0 new / 0 returned in real stats
 
 ---
 
@@ -231,7 +247,7 @@ Output:
 ## Core Architecture
 
 ### Main modules
-- `dllmain.cpp` - Win32 hooks, allocator, timers, file I/O, networking, threading
+- `dllmain.cpp` - Win32 hooks, allocator, timers, file I/O, networking, threading, VA Arena
 - `lua_optimize.cpp` - Lua VM allocator, adaptive GC, Lua globals bridge
 - `lua_fastpath.cpp` - `string.format` and runtime-discovered Phase 2 hooks
 - `lua_internals.cpp` - stable VM baseline (disabled unsafe hooks)
