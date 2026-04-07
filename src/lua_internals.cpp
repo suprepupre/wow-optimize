@@ -10,7 +10,7 @@ namespace LuaInternals {
 
 bool Init() {
     Log("[LuaVM] Init Lua VM internals (build 12340)");
-    Log("[LuaVM]   luaV_concat     DISABLED (0% gain, pure overhead — removed)");
+    Log("[LuaVM]   luaV_concat     DISABLED (0%% gain, pure overhead - removed)");
     Log("[LuaVM] ====================================");
     Log("[LuaVM]  Hooks: 0 active");
     Log("[LuaVM]  [ OK ] CLEAN BASELINE");

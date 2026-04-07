@@ -36,6 +36,30 @@
 #define CRASH_TEST_DISABLE_LUA_INTERNALS   0
 #define CRASH_TEST_DISABLE_THREAD_AFFINITY  0
 #define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN  0
+#define CRASH_TEST_DISABLE_VA_ARENA  0
+
+// Types and Global variables VA Arena
+typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL   (WINAPI* VirtualFree_fn)(LPVOID, SIZE_T, DWORD);
+
+static VirtualAlloc_fn orig_VirtualAlloc = nullptr;
+static VirtualFree_fn  orig_VirtualFree  = nullptr;
+
+static bool vaOk = false; // Global variable for DllMain
+static volatile bool  g_vaArenaActive    = false;
+static LPVOID         g_vaArenaBase      = nullptr;
+static SIZE_T         g_vaArenaSize      = 0;
+static SRWLOCK        g_vaArenaLock      = SRWLOCK_INIT;
+static long           g_vaArenaHits      = 0;
+static long           g_vaArenaFallbacks = 0;
+
+#define VA_ARENA_PAGE_SIZE  65536
+#define VA_ARENA_MAX_PAGES  4096  // 256 MB
+static uint64_t g_vaArenaBitmap[VA_ARENA_MAX_PAGES / 64] = {0};
+static DWORD    g_vaArenaUsedPages = 0;
+
+// Forward declarations
+static bool InstallVAArena();
 
 // Forward declarations & global state
 static bool IsExecutableMemory(uintptr_t addr);
@@ -67,7 +91,6 @@ static void   DumpPeriodicStats();
 // Forward declarations for MPQ prefetch
 static void PrefetchMappedMPQs();
 static void ResetPrefetchFlag();
-
 // ================================================================
 // Logging — ring buffer + background thread
 // ================================================================
@@ -2120,6 +2143,19 @@ static void DumpPeriodicStats() {
         Log("[Stats] CriticalSection: %ld spin-acquired", g_csSpinHits);
     if (g_sfpRedirected > 0)
         Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
+            if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0) {
+        long total = g_spinHits + g_spinFallbacks;
+        Log("[Stats] WaitSpin: %ld fast, %ld fallback (%.1f%% fast)",
+            g_spinHits, g_spinFallbacks,
+            (double)g_spinHits / total * 100.0);
+    }
+
+    if (vaOk && (g_vaArenaHits + g_vaArenaFallbacks) > 0) {
+        long total = g_vaArenaHits + g_vaArenaFallbacks;
+        Log("[Stats] VA Arena: %ld hits, %ld fallback (%.1f%% arena)",
+            g_vaArenaHits, g_vaArenaFallbacks,
+            (double)g_vaArenaHits / total * 100.0);
+    }
     if (g_debugStringSkipped > 0)
         Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
 
@@ -2240,6 +2276,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Wait Spin ---");
     g_waitSpinOk = InstallWaitSpin();
+
+    Log("--- VA Arena ---");
+    vaOk = InstallVAArena();
+
 
     Log("");
     Log("--- Lua VM Optimizer ---");
@@ -2391,7 +2431,18 @@ static bool InstallThreadAffinity() {
 // ================================================================
 
 static DWORD WINAPI Hooked_WaitSingle(HANDLE h, DWORD ms) {
-    if (!h || ms == INFINITE || ms > 2) {
+    // Safety first:
+    // - never touch infinite waits
+    // - never touch zero-timeout polls
+    // - only optimize very short waits
+    // - only optimize on the main thread
+    if (!h ||
+        ms == 0 ||
+        ms == INFINITE ||
+        ms > 2 ||
+        g_mainThreadId == 0 ||
+        GetCurrentThreadId() != g_mainThreadId)
+    {
         g_spinFallbacks++;
         return orig_WaitSingle(h, ms);
     }
@@ -2401,22 +2452,44 @@ static DWORD WINAPI Hooked_WaitSingle(HANDLE h, DWORD ms) {
         LARGE_INTEGER start, now, freq;
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&start);
-        LONGLONG limit = (freq.QuadPart * ms) / 1000;
+
+        const LONGLONG limit = (freq.QuadPart * ms) / 1000;
 
         for (int i = 0; i < 5000; i++) {
-            QueryPerformanceCounter(&now);
-            if ((now.QuadPart - start.QuadPart) >= limit) break;
-            if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) return WAIT_OBJECT_0;
-            if (i < 50) _mm_pause();
-            else if (i < 500) SwitchToThread();
-            else YieldProcessor();
-        }
-        return WAIT_TIMEOUT;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-#endif
+            // IMPORTANT: call original API, not the hooked one
+            DWORD r = orig_WaitSingle(h, 0);
+            if (r == WAIT_OBJECT_0) {
+                g_spinHits++;
+                return WAIT_OBJECT_0;
+            }
+            if (r == WAIT_FAILED) {
+                g_spinFallbacks++;
+                return WAIT_FAILED;
+            }
 
+            QueryPerformanceCounter(&now);
+            if ((now.QuadPart - start.QuadPart) >= limit)
+                break;
+
+            if (i < 64)
+                _mm_pause();
+            else if (i < 512)
+                SwitchToThread();
+            else
+                YieldProcessor();
+        }
+
+        g_spinHits++;
+        return WAIT_TIMEOUT;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_spinFallbacks++;
+        return orig_WaitSingle(h, ms);
+    }
+#else
     g_spinFallbacks++;
     return orig_WaitSingle(h, ms);
+#endif
 }
 
 static bool InstallWaitSpin() {
@@ -2429,6 +2502,148 @@ static bool InstallWaitSpin() {
     if (MH_CreateHook(p, (void*)Hooked_WaitSingle, (void**)&orig_WaitSingle) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
     Log("Wait spin: ACTIVE (<=2ms QPC spin, hard fallback on timeout)");
+    return true;
+#endif
+}
+
+static LPVOID WINAPI Hooked_VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flType, DWORD flProtect) {
+    // Strict filter: only intercept large, committed, non-fixed allocations
+    if (g_vaArenaActive &&
+        lpAddress == NULL &&
+        dwSize >= VA_ARENA_PAGE_SIZE &&
+        (flType & MEM_COMMIT) &&
+        !(flType & MEM_RESERVE) &&
+        !(flType & MEM_RESET) &&
+        (flProtect == PAGE_READWRITE || flProtect == PAGE_EXECUTE_READWRITE || flProtect == PAGE_READONLY))
+    {
+#if !CRASH_TEST_DISABLE_VA_ARENA
+        __try {
+            SIZE_T pagesNeeded = (dwSize + VA_ARENA_PAGE_SIZE - 1) / VA_ARENA_PAGE_SIZE;
+            if (pagesNeeded > VA_ARENA_MAX_PAGES - g_vaArenaUsedPages)
+                goto va_fallback;
+
+            AcquireSRWLockExclusive(&g_vaArenaLock);
+            DWORD startPage = 0;
+            DWORD consecutive = 0;
+            bool found = false;
+
+            for (DWORD i = 0; i < VA_ARENA_MAX_PAGES; i++) {
+                if (!(g_vaArenaBitmap[i / 64] & (1ULL << (i % 64)))) {
+                    if (consecutive == 0) startPage = i;
+                    consecutive++;
+                    if (consecutive >= pagesNeeded) { found = true; break; }
+                } else {
+                    consecutive = 0;
+                }
+            }
+
+            if (!found) {
+                ReleaseSRWLockExclusive(&g_vaArenaLock);
+                goto va_fallback;
+            }
+
+            // Mark as used
+            for (DWORD i = 0; i < pagesNeeded; i++)
+                g_vaArenaBitmap[(startPage + i) / 64] |= (1ULL << ((startPage + i) % 64));
+            g_vaArenaUsedPages += pagesNeeded;
+            ReleaseSRWLockExclusive(&g_vaArenaLock);
+
+            LPVOID result = (LPVOID)((uintptr_t)g_vaArenaBase + (startPage * VA_ARENA_PAGE_SIZE));
+            if (flType & MEM_COMMIT) {
+                // Actually commit from OS (arena was pre-reserved)
+                LPVOID committed = orig_VirtualAlloc(result, dwSize, MEM_COMMIT, flProtect);
+                if (!committed) {
+                    // Rollback bitmap
+                    AcquireSRWLockExclusive(&g_vaArenaLock);
+                    for (DWORD i = 0; i < pagesNeeded; i++)
+                        g_vaArenaBitmap[(startPage + i) / 64] &= ~(1ULL << ((startPage + i) % 64));
+                    g_vaArenaUsedPages -= pagesNeeded;
+                    ReleaseSRWLockExclusive(&g_vaArenaLock);
+                    goto va_fallback;
+                }
+            }
+
+            InterlockedIncrement(&g_vaArenaHits);
+            return result;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            goto va_fallback;
+        }
+#endif
+    }
+
+va_fallback:
+    InterlockedIncrement(&g_vaArenaFallbacks);
+    return orig_VirtualAlloc(lpAddress, dwSize, flType, flProtect);
+}
+
+static BOOL WINAPI Hooked_VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType) {
+    if (g_vaArenaActive &&
+        lpAddress >= g_vaArenaBase &&
+        (uintptr_t)lpAddress < ((uintptr_t)g_vaArenaBase + g_vaArenaSize) &&
+        (dwFreeType == MEM_RELEASE || dwFreeType == MEM_DECOMMIT))
+    {
+#if !CRASH_TEST_DISABLE_VA_ARENA
+        __try {
+            DWORD page = (DWORD)((uintptr_t)lpAddress - (uintptr_t)g_vaArenaBase) / VA_ARENA_PAGE_SIZE;
+            if (page >= VA_ARENA_MAX_PAGES) goto vf_fallback;
+
+            // Assume 1-page frees for simplicity; multi-page tracked via size if needed
+            SIZE_T pages = dwSize > 0 ? (dwSize + VA_ARENA_PAGE_SIZE - 1) / VA_ARENA_PAGE_SIZE : 1;
+            
+            AcquireSRWLockExclusive(&g_vaArenaLock);
+            for (DWORD i = 0; i < pages && (page + i) < VA_ARENA_MAX_PAGES; i++)
+                g_vaArenaBitmap[(page + i) / 64] &= ~(1ULL << ((page + i) % 64));
+            DWORD newUsed = (g_vaArenaUsedPages >= pages) ? (g_vaArenaUsedPages - pages) : 0;
+            g_vaArenaUsedPages = newUsed;
+            ReleaseSRWLockExclusive(&g_vaArenaLock);
+
+            InterlockedIncrement(&g_vaArenaHits);
+            return TRUE;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            goto vf_fallback;
+        }
+#endif
+    }
+
+vf_fallback:
+    return orig_VirtualFree(lpAddress, dwSize, dwFreeType);
+}
+
+static bool InstallVAArena() {
+#if CRASH_TEST_DISABLE_VA_ARENA
+    Log("VA Arena: DISABLED (crash isolation)");
+    return false;
+#else
+    // Pre-reserve 256MB in high address space
+    g_vaArenaSize = VA_ARENA_MAX_PAGES * VA_ARENA_PAGE_SIZE;
+    g_vaArenaBase = VirtualAlloc(NULL, g_vaArenaSize, MEM_RESERVE, PAGE_NOACCESS);
+    if (!g_vaArenaBase) {
+        Log("VA Arena: SKIP (cannot reserve 256MB high block)");
+        return false;
+    }
+
+    void* pAlloc = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "VirtualAlloc");
+    void* pFree  = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "VirtualFree");
+    if (!pAlloc || !pFree) return false;
+
+    if (MH_CreateHook(pAlloc, (void*)Hooked_VirtualAlloc, (void**)&orig_VirtualAlloc) != MH_OK) {
+        VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        return false;
+    }
+    if (MH_CreateHook(pFree, (void*)Hooked_VirtualFree, (void**)&orig_VirtualFree) != MH_OK) {
+        MH_DisableHook(pAlloc);
+        VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+        MH_DisableHook(pAlloc); MH_DisableHook(pFree);
+        VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    g_vaArenaActive = true;
+    Log("VA Arena: ACTIVE (256MB high block, >=64KB filter, SEH-guarded)");
     return true;
 #endif
 }
@@ -2483,6 +2698,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             if (g_threadAffOk) Log("Thread affinity: %d background workers pinned to cores 2+", g_bgThreadIdx);
             if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0)
                 Log("Wait spin: %ld fast, %ld fallback", g_spinHits, g_spinFallbacks);
+            if (vaOk && g_vaArenaBase) {
+                Log("VA Arena: %ld hits, %ld fallbacks (%.1f%% arena)", 
+                    g_vaArenaHits, g_vaArenaFallbacks,
+                    (g_vaArenaHits + g_vaArenaFallbacks) > 0 ? (double)g_vaArenaHits / (g_vaArenaHits + g_vaArenaFallbacks) * 100.0 : 0.0);
+                VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+                g_vaArenaBase = nullptr;
+            }                    
             if (g_globalAllocFast > 0)
                 Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast); 
             #if !CRASH_TEST_DISABLE_MPQ_MMAP
