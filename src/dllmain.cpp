@@ -41,106 +41,48 @@
 #define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1
 #define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1
 
-// Types and Global variables VA Arena
+// ================================================================
+// VA Arena v2 — High-address reserved arena with caller filtering
+// ================================================================
 typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL   (WINAPI* VirtualFree_fn)(LPVOID, SIZE_T, DWORD);
 
 static VirtualAlloc_fn orig_VirtualAlloc = nullptr;
 static VirtualFree_fn  orig_VirtualFree  = nullptr;
 
-static bool vaOk = false; // Global variable for DllMain
+static bool vaOk = false;
 static volatile bool  g_vaArenaActive    = false;
 static LPVOID         g_vaArenaBase      = nullptr;
 static SIZE_T         g_vaArenaSize      = 0;
 static SRWLOCK        g_vaArenaLock      = SRWLOCK_INIT;
 static long           g_vaArenaHits      = 0;
 static long           g_vaArenaFallbacks = 0;
+static long           g_vaArenaFailures  = 0;
 
 #define VA_ARENA_PAGE_SIZE  65536
-#define VA_ARENA_MAX_PAGES  4096  // 256 MB
+#define VA_ARENA_MAX_PAGES  8192  // 512 MB
 static uint64_t g_vaArenaBitmap[VA_ARENA_MAX_PAGES / 64] = {0};
+static DWORD    g_vaArenaSpan[VA_ARENA_MAX_PAGES] = {0};  // span length in pages
 static DWORD    g_vaArenaUsedPages = 0;
+
+static uintptr_t g_vaArenaWowBase = 0;
+static uintptr_t g_vaArenaWowEnd  = 0;
 
 // Forward declarations
 static bool InstallVAArena();
+static void ShutdownVAArena();
 
-// Forward declarations & global state
+// Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
-static bool InstallWaitSpin();
-static bool InstallDispatchPoolHooks();
-static bool InstallBgPreloadCacheHook();
-static bool InstallSubtaskEventPoolHook();
 
-static bool  g_threadAffOk    = false;
-static bool  g_waitSpinOk     = false;
-static bool  g_dispatchPoolOk = false;
-static bool  g_bgPreloadOk    = false;
-static bool  g_subtaskEventPoolOk = false;
-static long  g_spinHits       = 0;
-static long  g_spinFallbacks  = 0;
+static bool  g_threadAffOk = false;
 static LONG  g_bgThreadIdx    = 0;
 static DWORD g_affinityCores[16] = {0};
 static int   g_affinityCount  = 0;
 
 typedef int (__cdecl *fn_ThreadWorker)(void* outHandle, LPTHREAD_START_ROUTINE start, LPVOID param, int priority, int a5, int a6, HMODULE hMod);
 static fn_ThreadWorker orig_ThreadWorker = nullptr;
-
-typedef DWORD (WINAPI* WaitSingle_fn)(HANDLE, DWORD);
-static WaitSingle_fn orig_WaitSingle = nullptr;
-typedef HANDLE (WINAPI* CreateEventA_fn)(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
-static CreateEventA_fn orig_CreateEventA = nullptr;
-
-static constexpr uintptr_t ADDR_sub_444620 = 0x00444620;
-static constexpr uintptr_t ADDR_sub_444B20 = 0x00444B20;
-
-static SRWLOCK g_subtaskEventPoolLock = SRWLOCK_INIT;
-static HANDLE  g_subtaskEventPool[128] = {};
-static int     g_subtaskEventPoolCount = 0;
-
-static HANDLE  g_subtaskTrackedHandles[256] = {};
-static int     g_subtaskTrackedCount = 0;
-
-static long g_subtaskEventPoolHits    = 0;
-static long g_subtaskEventPoolMisses  = 0;
-static long g_subtaskEventPoolReturns = 0;
-
-typedef void* (__cdecl *fn_sub_401010_alloc)(int size);
-typedef void* (__cdecl *fn_sub_47CC90_free)(void* block);
-typedef int   (__cdecl *fn_sub_4533E0_timeout)();
-
-static constexpr uintptr_t ADDR_sub_401010 = 0x00401010;
-static constexpr uintptr_t ADDR_sub_47CC90 = 0x0047CC90;
-static constexpr uintptr_t ADDR_sub_4533E0 = 0x004533E0;
-static constexpr uintptr_t ADDR_sub_438260 = 0x00438260;
-
-static fn_sub_401010_alloc   orig_sub_401010 = nullptr;
-static fn_sub_47CC90_free    orig_sub_47CC90 = nullptr;
-static fn_sub_4533E0_timeout orig_sub_4533E0 = nullptr;
-
-static SRWLOCK g_dispatchPoolLock = SRWLOCK_INIT;
-static uint8_t* g_dispatchPoolBase = nullptr;
-static int g_dispatchPoolFreeHead = -1;
-
-static constexpr int DISPATCH_POOL_NODE_SIZE  = 24;   // 20-byte object rounded to 8-byte alignment
-static constexpr int DISPATCH_POOL_NODE_COUNT = 512;
-
-static long g_dispatchPoolCalls     = 0;
-static long g_dispatchPoolHits      = 0;
-static long g_dispatchPoolFallbacks = 0;
-static long g_dispatchPoolReturns   = 0;
-static long g_dispatchPoolSize20Calls      = 0;
-static long g_dispatchPoolCallerMatchCalls = 0;
-
-static volatile LONG g_dispatchProbeLock = 0;
-static uintptr_t g_dispatchProbeRetAddr[8] = {};
-static long      g_dispatchProbeRetCount[8] = {};
-
-static DWORD g_bgPreloadCacheValue  = 100;
-static DWORD g_bgPreloadCacheTick   = 0;
-static long  g_bgPreloadCalls       = 0;
-static long  g_bgPreloadCacheHits   = 0;
-static long  g_bgPreloadCacheMisses = 0;
 
 
 #pragma comment(lib, "psapi.lib")
@@ -154,12 +96,6 @@ static void   DumpPeriodicStats();
 // Forward declarations for MPQ prefetch
 static void PrefetchMappedMPQs();
 static void ResetPrefetchFlag();
-// Forward declarations for subtask event pool
-static bool IsTrackedSubtaskHandle(HANDLE h);
-static bool IsHandleAlreadyInSubtaskPool(HANDLE h);
-static void TrackSubtaskHandle(HANDLE h);
-static HANDLE PopSubtaskEventHandle();
-static void PushSubtaskEventHandle(HANDLE h);
 // ================================================================
 // Logging — ring buffer + background thread
 // ================================================================
@@ -1732,12 +1668,6 @@ static BOOL WINAPI hooked_CloseHandle(HANDLE hObject) {
     if (!hObject || hObject == INVALID_HANDLE_VALUE ||
         hObject == GetCurrentProcess() || hObject == GetCurrentThread())
         return orig_CloseHandle(hObject);
-    #if !CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
-    if (g_subtaskEventPoolOk && IsTrackedSubtaskHandle(hObject)) {
-        PushSubtaskEventHandle(hObject);
-        return TRUE;
-    }
-#endif
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
     AcquireSRWLockExclusive(&g_mpqMapLock);
     DestroyMpqMapping(hObject);
@@ -2220,54 +2150,14 @@ static void DumpPeriodicStats() {
         Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
     
 
-        if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0) {
-        long total = g_spinHits + g_spinFallbacks;
-        Log("[Stats] WaitSpin: %ld fast, %ld fallback (%.1f%% fast)",
-            g_spinHits, g_spinFallbacks,
-            (double)g_spinHits / total * 100.0);
-    }
-    if (g_dispatchPoolOk) {
-        long total = g_dispatchPoolHits + g_dispatchPoolFallbacks;
-        Log("[Stats] DispatchPool: %ld calls, size20=%ld, callerMatch=%ld, %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
-            g_dispatchPoolCalls,
-            g_dispatchPoolSize20Calls,
-            g_dispatchPoolCallerMatchCalls,
-            g_dispatchPoolHits,
-            g_dispatchPoolReturns,
-            g_dispatchPoolFallbacks,
-            total > 0 ? (double)g_dispatchPoolHits / total * 100.0 : 0.0);
-
-        for (int i = 0; i < 8; i++) {
-            if (g_dispatchProbeRetAddr[i] != 0 && g_dispatchProbeRetCount[i] > 0) {
-                Log("[Stats] DispatchPool caller[%d]: 0x%08X x %ld",
-                    i,
-                    (unsigned)g_dispatchProbeRetAddr[i],
-                    g_dispatchProbeRetCount[i]);
-            }
-        }
-    }
-
-    if (g_bgPreloadOk) {
-        long total = g_bgPreloadCacheHits + g_bgPreloadCacheMisses;
-        Log("[Stats] bgpreloadsleep: %ld calls, %ld cached, %ld real (%.1f%% cache hit)",
-            g_bgPreloadCalls, g_bgPreloadCacheHits, g_bgPreloadCacheMisses,
-            total > 0 ? (double)g_bgPreloadCacheHits / total * 100.0 : 0.0);
-    }
-
-    if (vaOk && (g_vaArenaHits + g_vaArenaFallbacks) > 0) {
+    if (vaOk && g_vaArenaActive) {
         long total = g_vaArenaHits + g_vaArenaFallbacks;
-        Log("[Stats] VA Arena: %ld hits, %ld fallback (%.1f%% arena)",
-            g_vaArenaHits, g_vaArenaFallbacks,
-            (double)g_vaArenaHits / total * 100.0);
+        double arenaPct = total > 0 ? (double)g_vaArenaHits / total * 100.0 : 0.0;
+        double usedMB = (double)g_vaArenaUsedPages * VA_ARENA_PAGE_SIZE / (1024.0 * 1024.0);
+        Log("[Stats] VA Arena: %ld hits, %ld fallback, %ld fail (%.1f%% arena, %.1f MB used)",
+            g_vaArenaHits, g_vaArenaFallbacks, g_vaArenaFailures,
+            arenaPct, usedMB);
     }
-    if (g_subtaskEventPoolOk) {
-        long total = g_subtaskEventPoolHits + g_subtaskEventPoolMisses;
-        Log("[Stats] SubtaskEventPool: %ld reuse, %ld new, %ld returned (%.1f%% reuse)",
-            g_subtaskEventPoolHits,
-            g_subtaskEventPoolMisses,
-            g_subtaskEventPoolReturns,
-            total > 0 ? (double)g_subtaskEventPoolHits / total * 100.0 : 0.0);
-    }    
     if (g_debugStringSkipped > 0)
         Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
 
@@ -2386,20 +2276,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
 
-    Log("--- Wait Spin ---");
-    g_waitSpinOk = InstallWaitSpin();
-
     Log("--- VA Arena ---");
     vaOk = InstallVAArena();
-
-    Log("--- Dispatch Pool ---");
-    g_dispatchPoolOk = InstallDispatchPoolHooks();
-
-    Log("--- bgpreloadsleep Cache ---");
-    g_bgPreloadOk = InstallBgPreloadCacheHook();
-
-    Log("--- Subtask Event Pool ---");
-    g_subtaskEventPoolOk = InstallSubtaskEventPoolHook();
 
     bool luaOk = false;
     Log("");
@@ -2566,85 +2444,12 @@ static bool InstallThreadAffinity() {
 }
 
 // ================================================================
-//  WaitForSingleObject — Short-Wait Spin Fast Path
-//  Replaces kernel transitions for <=2ms waits with QPC spin.
-//  Strictly limited to events/timers. Falls back instantly on mismatch.
+// VA Arena v2 — High-address reserved arena with caller filtering
 // ================================================================
 
-static DWORD WINAPI Hooked_WaitSingle(HANDLE h, DWORD ms) {
-    // Safety first:
-    // - never touch infinite waits
-    // - never touch zero-timeout polls
-    // - only optimize very short waits
-    // - only optimize on the main thread
-    if (!h ||
-        ms == 0 ||
-        ms == INFINITE ||
-        ms > 2 ||
-        g_mainThreadId == 0 ||
-        GetCurrentThreadId() != g_mainThreadId)
-    {
-        g_spinFallbacks++;
-        return orig_WaitSingle(h, ms);
-    }
-
-#if !CRASH_TEST_DISABLE_SHORT_WAIT_SPIN
-    __try {
-        LARGE_INTEGER start, now, freq;
-        QueryPerformanceFrequency(&freq);
-        QueryPerformanceCounter(&start);
-
-        const LONGLONG limit = (freq.QuadPart * ms) / 1000;
-
-        for (int i = 0; i < 5000; i++) {
-            // IMPORTANT: call original API, not the hooked one
-            DWORD r = orig_WaitSingle(h, 0);
-            if (r == WAIT_OBJECT_0) {
-                g_spinHits++;
-                return WAIT_OBJECT_0;
-            }
-            if (r == WAIT_FAILED) {
-                g_spinFallbacks++;
-                return WAIT_FAILED;
-            }
-
-            QueryPerformanceCounter(&now);
-            if ((now.QuadPart - start.QuadPart) >= limit)
-                break;
-
-            if (i < 64)
-                _mm_pause();
-            else if (i < 512)
-                SwitchToThread();
-            else
-                YieldProcessor();
-        }
-
-        g_spinHits++;
-        return WAIT_TIMEOUT;
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        g_spinFallbacks++;
-        return orig_WaitSingle(h, ms);
-    }
-#else
-    g_spinFallbacks++;
-    return orig_WaitSingle(h, ms);
-#endif
-}
-
-static bool InstallWaitSpin() {
-#if CRASH_TEST_DISABLE_SHORT_WAIT_SPIN
-    Log("Wait spin: DISABLED (crash isolation)");
-    return false;
-#else
-    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "WaitForSingleObject");
-    if (!p) return false;
-    if (MH_CreateHook(p, (void*)Hooked_WaitSingle, (void**)&orig_WaitSingle) != MH_OK) return false;
-    if (MH_EnableHook(p) != MH_OK) return false;
-    Log("Wait spin: ACTIVE (<=2ms QPC spin, hard fallback on timeout)");
-    return true;
-#endif
+static bool IsWowExeCaller(uintptr_t retAddr) {
+    if (g_vaArenaWowBase == 0 || g_vaArenaWowEnd == 0) return false;
+    return (retAddr >= g_vaArenaWowBase && retAddr < g_vaArenaWowEnd);
 }
 
 static LPVOID WINAPI Hooked_VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flType, DWORD flProtect) {
@@ -2655,9 +2460,18 @@ static LPVOID WINAPI Hooked_VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD 
         (flType & MEM_COMMIT) &&
         !(flType & MEM_RESERVE) &&
         !(flType & MEM_RESET) &&
-        (flProtect == PAGE_READWRITE || flProtect == PAGE_EXECUTE_READWRITE || flProtect == PAGE_READONLY))
+        !(flType & MEM_PHYSICAL) &&
+        !(flType & MEM_LARGE_PAGES) &&
+        (flProtect == PAGE_READONLY || flProtect == PAGE_READWRITE ||
+         flProtect == PAGE_EXECUTE_READ || flProtect == PAGE_EXECUTE_READWRITE))
     {
 #if !CRASH_TEST_DISABLE_VA_ARENA
+        // Caller filter: only service allocations from Wow.exe code
+        uintptr_t retAddr = (uintptr_t)_ReturnAddress();
+        if (!IsWowExeCaller(retAddr)) {
+            goto va_fallback;
+        }
+
         __try {
             SIZE_T pagesNeeded = (dwSize + VA_ARENA_PAGE_SIZE - 1) / VA_ARENA_PAGE_SIZE;
             if (pagesNeeded > VA_ARENA_MAX_PAGES - g_vaArenaUsedPages)
@@ -2683,25 +2497,30 @@ static LPVOID WINAPI Hooked_VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD 
                 goto va_fallback;
             }
 
-            // Mark as used
-            for (DWORD i = 0; i < pagesNeeded; i++)
+            // Mark bitmap + store span
+            for (DWORD i = 0; i < pagesNeeded; i++) {
                 g_vaArenaBitmap[(startPage + i) / 64] |= (1ULL << ((startPage + i) % 64));
-            g_vaArenaUsedPages += pagesNeeded;
+                g_vaArenaSpan[startPage + i] = 0;  // non-head pages
+            }
+            g_vaArenaSpan[startPage] = (DWORD)pagesNeeded;
+            g_vaArenaUsedPages += (DWORD)pagesNeeded;
             ReleaseSRWLockExclusive(&g_vaArenaLock);
 
             LPVOID result = (LPVOID)((uintptr_t)g_vaArenaBase + (startPage * VA_ARENA_PAGE_SIZE));
-            if (flType & MEM_COMMIT) {
-                // Actually commit from OS (arena was pre-reserved)
-                LPVOID committed = orig_VirtualAlloc(result, dwSize, MEM_COMMIT, flProtect);
-                if (!committed) {
-                    // Rollback bitmap
-                    AcquireSRWLockExclusive(&g_vaArenaLock);
-                    for (DWORD i = 0; i < pagesNeeded; i++)
-                        g_vaArenaBitmap[(startPage + i) / 64] &= ~(1ULL << ((startPage + i) % 64));
-                    g_vaArenaUsedPages -= pagesNeeded;
-                    ReleaseSRWLockExclusive(&g_vaArenaLock);
-                    goto va_fallback;
+
+            // Commit the full span from OS
+            SIZE_T spanSize = (SIZE_T)pagesNeeded * VA_ARENA_PAGE_SIZE;
+            LPVOID committed = orig_VirtualAlloc(result, spanSize, MEM_COMMIT, flProtect);
+            if (!committed) {
+                // Rollback bitmap + span
+                AcquireSRWLockExclusive(&g_vaArenaLock);
+                for (DWORD i = 0; i < pagesNeeded; i++) {
+                    g_vaArenaBitmap[(startPage + i) / 64] &= ~(1ULL << ((startPage + i) % 64));
+                    g_vaArenaSpan[startPage + i] = 0;
                 }
+                g_vaArenaUsedPages -= (DWORD)pagesNeeded;
+                ReleaseSRWLockExclusive(&g_vaArenaLock);
+                goto va_fallback;
             }
 
             InterlockedIncrement(&g_vaArenaHits);
@@ -2720,26 +2539,57 @@ va_fallback:
 static BOOL WINAPI Hooked_VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType) {
     if (g_vaArenaActive &&
         lpAddress >= g_vaArenaBase &&
-        (uintptr_t)lpAddress < ((uintptr_t)g_vaArenaBase + g_vaArenaSize) &&
-        (dwFreeType == MEM_RELEASE || dwFreeType == MEM_DECOMMIT))
+        (uintptr_t)lpAddress < ((uintptr_t)g_vaArenaBase + g_vaArenaSize))
     {
 #if !CRASH_TEST_DISABLE_VA_ARENA
         __try {
             DWORD page = (DWORD)((uintptr_t)lpAddress - (uintptr_t)g_vaArenaBase) / VA_ARENA_PAGE_SIZE;
             if (page >= VA_ARENA_MAX_PAGES) goto vf_fallback;
 
-            // Assume 1-page frees for simplicity; multi-page tracked via size if needed
-            SIZE_T pages = dwSize > 0 ? (dwSize + VA_ARENA_PAGE_SIZE - 1) / VA_ARENA_PAGE_SIZE : 1;
-            
             AcquireSRWLockExclusive(&g_vaArenaLock);
-            for (DWORD i = 0; i < pages && (page + i) < VA_ARENA_MAX_PAGES; i++)
-                g_vaArenaBitmap[(page + i) / 64] &= ~(1ULL << ((page + i) % 64));
-            DWORD newUsed = (g_vaArenaUsedPages >= pages) ? (g_vaArenaUsedPages - pages) : 0;
-            g_vaArenaUsedPages = newUsed;
-            ReleaseSRWLockExclusive(&g_vaArenaLock);
+            DWORD spanLen = g_vaArenaSpan[page];
+            if (spanLen == 0) {
+                // Not an arena head page — fallback
+                ReleaseSRWLockExclusive(&g_vaArenaLock);
+                goto vf_fallback;
+            }
 
-            InterlockedIncrement(&g_vaArenaHits);
-            return TRUE;
+            // Calculate actual span size for decommit
+            SIZE_T spanPages = spanLen;
+            SIZE_T spanSize = spanPages * VA_ARENA_PAGE_SIZE;
+
+            if (dwFreeType == MEM_DECOMMIT) {
+                // Decommit arena pages via original VirtualFree
+                ReleaseSRWLockExclusive(&g_vaArenaLock);
+                BOOL result = orig_VirtualFree(lpAddress, spanSize, MEM_DECOMMIT);
+                if (result) {
+                    // Clear bitmap + span after successful decommit
+                    AcquireSRWLockExclusive(&g_vaArenaLock);
+                    for (DWORD i = 0; i < spanPages && (page + i) < VA_ARENA_MAX_PAGES; i++) {
+                        g_vaArenaBitmap[(page + i) / 64] &= ~(1ULL << ((page + i) % 64));
+                        g_vaArenaSpan[page + i] = 0;
+                    }
+                    g_vaArenaUsedPages -= (DWORD)spanPages;
+                    ReleaseSRWLockExclusive(&g_vaArenaLock);
+                    InterlockedIncrement(&g_vaArenaHits);
+                }
+                return result;
+            }
+
+            if (dwFreeType == MEM_RELEASE) {
+                // Decommit + clear bitmap + span
+                orig_VirtualFree(lpAddress, spanSize, MEM_DECOMMIT);
+                for (DWORD i = 0; i < spanPages && (page + i) < VA_ARENA_MAX_PAGES; i++) {
+                    g_vaArenaBitmap[(page + i) / 64] &= ~(1ULL << ((page + i) % 64));
+                    g_vaArenaSpan[page + i] = 0;
+                }
+                g_vaArenaUsedPages -= (DWORD)spanPages;
+                ReleaseSRWLockExclusive(&g_vaArenaLock);
+                InterlockedIncrement(&g_vaArenaHits);
+                return TRUE;
+            }
+
+            ReleaseSRWLockExclusive(&g_vaArenaLock);
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             goto vf_fallback;
         }
@@ -2755,366 +2605,75 @@ static bool InstallVAArena() {
     Log("VA Arena: DISABLED (crash isolation)");
     return false;
 #else
-    // Pre-reserve 256MB in high address space
-    g_vaArenaSize = VA_ARENA_MAX_PAGES * VA_ARENA_PAGE_SIZE;
-    g_vaArenaBase = VirtualAlloc(NULL, g_vaArenaSize, MEM_RESERVE, PAGE_NOACCESS);
-    if (!g_vaArenaBase) {
-        Log("VA Arena: SKIP (cannot reserve 256MB high block)");
+    // Determine Wow.exe image range for caller filtering
+    HMODULE hWow = GetModuleHandleA(NULL);
+    if (!hWow) {
+        Log("VA Arena: SKIP (cannot get Wow.exe handle)");
         return false;
+    }
+    MODULEINFO modInfo;
+    if (!GetModuleInformation(GetCurrentProcess(), hWow, &modInfo, sizeof(modInfo))) {
+        Log("VA Arena: SKIP (cannot get Wow.exe module info)");
+        return false;
+    }
+    g_vaArenaWowBase = (uintptr_t)hWow;
+    g_vaArenaWowEnd  = g_vaArenaWowBase + modInfo.SizeOfImage;
+
+    // Pre-reserve 512MB in high address space
+    g_vaArenaSize = VA_ARENA_MAX_PAGES * VA_ARENA_PAGE_SIZE;
+    g_vaArenaBase = VirtualAlloc(NULL, g_vaArenaSize, MEM_RESERVE | MEM_TOP_DOWN, PAGE_NOACCESS);
+    if (!g_vaArenaBase) {
+        // Fallback: normal reserve without MEM_TOP_DOWN
+        g_vaArenaBase = VirtualAlloc(NULL, g_vaArenaSize, MEM_RESERVE, PAGE_NOACCESS);
+        if (!g_vaArenaBase) {
+            Log("VA Arena: SKIP (cannot reserve 512MB block)");
+            return false;
+        }
+        Log("VA Arena: ACTIVE (512MB block @ 0x%08X, Wow.exe caller-filtered, >=64KB, SEH-guarded)",
+            (unsigned)(uintptr_t)g_vaArenaBase);
+    } else {
+        Log("VA Arena: ACTIVE (512MB high block @ 0x%08X, Wow.exe caller-filtered, >=64KB, SEH-guarded)",
+            (unsigned)(uintptr_t)g_vaArenaBase);
     }
 
     void* pAlloc = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "VirtualAlloc");
     void* pFree  = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "VirtualFree");
-    if (!pAlloc || !pFree) return false;
+    if (!pAlloc || !pFree) {
+        VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        g_vaArenaBase = nullptr;
+        return false;
+    }
 
     if (MH_CreateHook(pAlloc, (void*)Hooked_VirtualAlloc, (void**)&orig_VirtualAlloc) != MH_OK) {
         VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        g_vaArenaBase = nullptr;
         return false;
     }
     if (MH_CreateHook(pFree, (void*)Hooked_VirtualFree, (void**)&orig_VirtualFree) != MH_OK) {
         MH_DisableHook(pAlloc);
         VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        g_vaArenaBase = nullptr;
         return false;
     }
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
         MH_DisableHook(pAlloc); MH_DisableHook(pFree);
         VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        g_vaArenaBase = nullptr;
         return false;
     }
 
     g_vaArenaActive = true;
-    Log("VA Arena: ACTIVE (256MB high block, >=64KB filter, SEH-guarded)");
     return true;
 #endif
 }
 
-// ================================================================
-// 20. Dispatcher Pool — eliminate hot 20-byte alloc/free churn
-//  Targets only sub_438260 via return-address filter.
-// ================================================================
-
-static inline bool IsDispatchPoolPtr(void* p) {
-    if (!g_dispatchPoolBase || !p) return false;
-    uintptr_t base = (uintptr_t)g_dispatchPoolBase;
-    uintptr_t addr = (uintptr_t)p;
-    uintptr_t end  = base + (DISPATCH_POOL_NODE_SIZE * DISPATCH_POOL_NODE_COUNT);
-    if (addr < base || addr >= end) return false;
-    return ((addr - base) % DISPATCH_POOL_NODE_SIZE) == 0;
-}
-
-static inline bool IsSub438260Caller(uintptr_t retAddr) {
-    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x400));
-}
-
-static void InitDispatchPool() {
-    g_dispatchPoolFreeHead = 0;
-    for (int i = 0; i < DISPATCH_POOL_NODE_COUNT; i++) {
-        uint8_t* node = g_dispatchPoolBase + (i * DISPATCH_POOL_NODE_SIZE);
-        *(int*)node = (i + 1 < DISPATCH_POOL_NODE_COUNT) ? (i + 1) : -1;
+static void ShutdownVAArena() {
+    if (g_vaArenaBase) {
+        VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
+        g_vaArenaBase = nullptr;
     }
-}
-
-static void* DispatchPoolPop() {
-    AcquireSRWLockExclusive(&g_dispatchPoolLock);
-
-    if (g_dispatchPoolFreeHead < 0) {
-        ReleaseSRWLockExclusive(&g_dispatchPoolLock);
-        return nullptr;
-    }
-
-    int idx = g_dispatchPoolFreeHead;
-    uint8_t* node = g_dispatchPoolBase + (idx * DISPATCH_POOL_NODE_SIZE);
-    g_dispatchPoolFreeHead = *(int*)node;
-
-    ReleaseSRWLockExclusive(&g_dispatchPoolLock);
-    memset(node, 0, DISPATCH_POOL_NODE_SIZE);
-    return node;
-}
-
-static void DispatchPoolPush(void* p) {
-    if (!IsDispatchPoolPtr(p)) return;
-
-    int idx = (int)(((uint8_t*)p - g_dispatchPoolBase) / DISPATCH_POOL_NODE_SIZE);
-
-    AcquireSRWLockExclusive(&g_dispatchPoolLock);
-    *(int*)p = g_dispatchPoolFreeHead;
-    g_dispatchPoolFreeHead = idx;
-    ReleaseSRWLockExclusive(&g_dispatchPoolLock);
-}
-
-static void RecordDispatchProbeRetAddr(uintptr_t retAddr) {
-    while (InterlockedCompareExchange(&g_dispatchProbeLock, 1, 0) != 0)
-        YieldProcessor();
-
-    for (int i = 0; i < 8; i++) {
-        if (g_dispatchProbeRetAddr[i] == retAddr) {
-            g_dispatchProbeRetCount[i]++;
-            InterlockedExchange(&g_dispatchProbeLock, 0);
-            return;
-        }
-    }
-
-    for (int i = 0; i < 8; i++) {
-        if (g_dispatchProbeRetAddr[i] == 0) {
-            g_dispatchProbeRetAddr[i] = retAddr;
-            g_dispatchProbeRetCount[i] = 1;
-            InterlockedExchange(&g_dispatchProbeLock, 0);
-            return;
-        }
-    }
-
-    // If table is full, accumulate into slot 0 as overflow bucket
-    g_dispatchProbeRetCount[0]++;
-    InterlockedExchange(&g_dispatchProbeLock, 0);
-}
-
-static void* __cdecl Hooked_sub_401010(int size) {
-#if CRASH_TEST_DISABLE_DISPATCH_POOL
-    return orig_sub_401010(size);
-#else
-    InterlockedIncrement(&g_dispatchPoolCalls);
-    uintptr_t retAddr = (uintptr_t)_ReturnAddress();
-
-    if (size == 20) {
-        InterlockedIncrement(&g_dispatchPoolSize20Calls);
-        RecordDispatchProbeRetAddr(retAddr);
-    }
-
-    if (size == 20 && IsSub438260Caller(retAddr) && g_dispatchPoolBase) {
-        InterlockedIncrement(&g_dispatchPoolCallerMatchCalls);
-
-        void* node = DispatchPoolPop();
-        if (node) {
-            InterlockedIncrement(&g_dispatchPoolHits);
-            return node;
-        }
-
-        InterlockedIncrement(&g_dispatchPoolFallbacks);
-    }
-
-    return orig_sub_401010(size);
-#endif
-}
-
-static void* __cdecl Hooked_sub_47CC90(void* block) {
-#if CRASH_TEST_DISABLE_DISPATCH_POOL
-    return orig_sub_47CC90(block);
-#else
-    if (!block)
-        return nullptr;
-
-    if (IsDispatchPoolPtr(block)) {
-        DispatchPoolPush(block);
-        InterlockedIncrement(&g_dispatchPoolReturns);
-        return block;
-    }
-
-    return orig_sub_47CC90(block);
-#endif
-}
-
-static bool InstallDispatchPoolHooks() {
-#if CRASH_TEST_DISABLE_DISPATCH_POOL
-    Log("Dispatch pool: DISABLED (crash isolation)");
-    return false;
-#else
-    if (!IsExecutableMemory(ADDR_sub_401010) || !IsExecutableMemory(ADDR_sub_47CC90))
-        return false;
-
-    g_dispatchPoolBase = (uint8_t*)mi_malloc(DISPATCH_POOL_NODE_SIZE * DISPATCH_POOL_NODE_COUNT);
-    if (!g_dispatchPoolBase) {
-        Log("Dispatch pool: SKIP (pool allocation failed)");
-        return false;
-    }
-
-    InitDispatchPool();
-
-    if (MH_CreateHook((void*)ADDR_sub_401010, (void*)Hooked_sub_401010, (void**)&orig_sub_401010) != MH_OK) {
-        mi_free(g_dispatchPoolBase);
-        g_dispatchPoolBase = nullptr;
-        return false;
-    }
-
-    if (MH_EnableHook((void*)ADDR_sub_401010) != MH_OK) {
-        MH_DisableHook((void*)ADDR_sub_401010);
-        mi_free(g_dispatchPoolBase);
-        g_dispatchPoolBase = nullptr;
-        return false;
-    }
-
-    if (MH_CreateHook((void*)ADDR_sub_47CC90, (void*)Hooked_sub_47CC90, (void**)&orig_sub_47CC90) != MH_OK) {
-        MH_DisableHook((void*)ADDR_sub_401010);
-        mi_free(g_dispatchPoolBase);
-        g_dispatchPoolBase = nullptr;
-        return false;
-    }
-
-    if (MH_EnableHook((void*)ADDR_sub_47CC90) != MH_OK) {
-        MH_DisableHook((void*)ADDR_sub_401010);
-        MH_DisableHook((void*)ADDR_sub_47CC90);
-        mi_free(g_dispatchPoolBase);
-        g_dispatchPoolBase = nullptr;
-        return false;
-    }
-
-    Log("Dispatch pool: ACTIVE (%d x %dB task nodes, sub_438260-targeted)",
-        DISPATCH_POOL_NODE_COUNT, DISPATCH_POOL_NODE_SIZE);
-    return true;
-#endif
-}
-
-// ================================================================
-// 21. bgpreloadsleep cache
-//  Avoid repeated CVar parse in hot worker loop.
-// ================================================================
-
-static int __cdecl Hooked_sub_4533E0() {
-#if CRASH_TEST_DISABLE_BGPRELOAD_CACHE
-    return orig_sub_4533E0();
-#else
-    InterlockedIncrement(&g_bgPreloadCalls);
-    DWORD now = GetTickCount();
-
-    if (g_bgPreloadCacheTick != 0 && (DWORD)(now - g_bgPreloadCacheTick) < 500) {
-        InterlockedIncrement(&g_bgPreloadCacheHits);
-        return (int)g_bgPreloadCacheValue;
-    }
-
-    int value = orig_sub_4533E0();
-    if (value < 0) value = 0;
-    if (value > 5000) value = 5000;
-
-    g_bgPreloadCacheValue = (DWORD)value;
-    g_bgPreloadCacheTick  = now;
-    InterlockedIncrement(&g_bgPreloadCacheMisses);
-    return value;
-#endif
-}
-
-static bool InstallBgPreloadCacheHook() {
-#if CRASH_TEST_DISABLE_BGPRELOAD_CACHE
-    Log("bgpreloadsleep cache: DISABLED (crash isolation)");
-    return false;
-#else
-    if (!IsExecutableMemory(ADDR_sub_4533E0))
-        return false;
-
-    if (MH_CreateHook((void*)ADDR_sub_4533E0, (void*)Hooked_sub_4533E0, (void**)&orig_sub_4533E0) != MH_OK)
-        return false;
-    if (MH_EnableHook((void*)ADDR_sub_4533E0) != MH_OK)
-        return false;
-
-    Log("bgpreloadsleep cache: ACTIVE (500ms cache window)");
-    return true;
-#endif
-}
-static inline bool IsSubtaskCreateEventCaller(uintptr_t retAddr) {
-    return (retAddr >= ADDR_sub_444620 && retAddr < ADDR_sub_444B20);
-}
-
-static bool IsTrackedSubtaskHandle(HANDLE h) {
-    for (int i = 0; i < g_subtaskTrackedCount; i++) {
-        if (g_subtaskTrackedHandles[i] == h)
-            return true;
-    }
-    return false;
-}
-
-static bool IsHandleAlreadyInSubtaskPool(HANDLE h) {
-    for (int i = 0; i < g_subtaskEventPoolCount; i++) {
-        if (g_subtaskEventPool[i] == h)
-            return true;
-    }
-    return false;
-}
-
-static void TrackSubtaskHandle(HANDLE h) {
-    if (!h || h == INVALID_HANDLE_VALUE) return;
-    if (IsTrackedSubtaskHandle(h)) return;
-    if (g_subtaskTrackedCount < (int)(sizeof(g_subtaskTrackedHandles) / sizeof(g_subtaskTrackedHandles[0]))) {
-        g_subtaskTrackedHandles[g_subtaskTrackedCount++] = h;
-    }
-}
-
-static HANDLE PopSubtaskEventHandle() {
-    AcquireSRWLockExclusive(&g_subtaskEventPoolLock);
-    HANDLE h = NULL;
-    if (g_subtaskEventPoolCount > 0) {
-        h = g_subtaskEventPool[--g_subtaskEventPoolCount];
-        g_subtaskEventPool[g_subtaskEventPoolCount] = NULL;
-    }
-    ReleaseSRWLockExclusive(&g_subtaskEventPoolLock);
-    return h;
-}
-
-static void PushSubtaskEventHandle(HANDLE h) {
-    if (!h || h == INVALID_HANDLE_VALUE) return;
-
-    AcquireSRWLockExclusive(&g_subtaskEventPoolLock);
-
-    if (!IsHandleAlreadyInSubtaskPool(h) &&
-        g_subtaskEventPoolCount < (int)(sizeof(g_subtaskEventPool) / sizeof(g_subtaskEventPool[0])))
-    {
-        ResetEvent(h);
-        g_subtaskEventPool[g_subtaskEventPoolCount++] = h;
-        InterlockedIncrement(&g_subtaskEventPoolReturns);
-    }
-
-    ReleaseSRWLockExclusive(&g_subtaskEventPoolLock);
-}
-
-static HANDLE WINAPI Hooked_CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes,
-                                         BOOL bManualReset,
-                                         BOOL bInitialState,
-                                         LPCSTR lpName)
-{
-#if CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
-    return orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
-#else
-    uintptr_t retAddr = (uintptr_t)_ReturnAddress();
-
-    if (lpEventAttributes == NULL &&
-        bManualReset == FALSE &&
-        bInitialState == FALSE &&
-        lpName == NULL &&
-        IsSubtaskCreateEventCaller(retAddr))
-    {
-        HANDLE pooled = PopSubtaskEventHandle();
-        if (pooled) {
-            ResetEvent(pooled);
-            InterlockedIncrement(&g_subtaskEventPoolHits);
-            return pooled;
-        }
-
-        HANDLE h = orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
-        if (h && h != INVALID_HANDLE_VALUE) {
-            TrackSubtaskHandle(h);
-            InterlockedIncrement(&g_subtaskEventPoolMisses);
-        }
-        return h;
-    }
-
-    return orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
-#endif
-}
-
-static bool InstallSubtaskEventPoolHook() {
-#if CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
-    Log("Subtask event pool: DISABLED (crash isolation)");
-    return false;
-#else
-    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "CreateEventA");
-    if (!p) return false;
-
-    if (MH_CreateHook(p, (void*)Hooked_CreateEventA, (void**)&orig_CreateEventA) != MH_OK)
-        return false;
-    if (MH_EnableHook(p) != MH_OK)
-        return false;
-
-    Log("Subtask event pool: ACTIVE (CreateEventA pooled for sub_444620 auto-reset events)");
-    return true;
-#endif
+    g_vaArenaActive = false;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
@@ -3165,50 +2724,32 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             if (g_sfpRedirected > 0)
                 Log("SetFilePointer: %ld calls redirected to SetFilePointerEx", g_sfpRedirected);
             if (g_threadAffOk) Log("Thread affinity: %d background workers pinned to cores 2+", g_bgThreadIdx);
-            if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0)
-                Log("Wait spin: %ld fast, %ld fallback", g_spinHits, g_spinFallbacks);
             if (vaOk && g_vaArenaBase) {
-                Log("VA Arena: %ld hits, %ld fallbacks (%.1f%% arena)", 
-                    g_vaArenaHits, g_vaArenaFallbacks,
+                Log("VA Arena: %ld hits, %ld fallbacks, %ld failures (%.1f%% arena)",
+                    g_vaArenaHits, g_vaArenaFallbacks, g_vaArenaFailures,
                     (g_vaArenaHits + g_vaArenaFallbacks) > 0 ? (double)g_vaArenaHits / (g_vaArenaHits + g_vaArenaFallbacks) * 100.0 : 0.0);
-                VirtualFree(g_vaArenaBase, 0, MEM_RELEASE);
-                g_vaArenaBase = nullptr;
-            }                    
+                ShutdownVAArena();
+            }
             if (g_globalAllocFast > 0)
-                Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast); 
+                Log("GlobalAlloc: %ld GMEM_FIXED via mimalloc", g_globalAllocFast);
             #if !CRASH_TEST_DISABLE_MPQ_MMAP
             if (g_mpqMapHits + g_mpqMapMisses > 0)
                 Log("MPQ mmap: %ld reads served, %ld faults, %d files mapped, %.1f MB total",
                     g_mpqMapHits, g_mpqMapMisses, g_mpqMapCount,
                     g_mpqMapTotalBytes / (1024.0 * 1024.0));
-            #endif 
+            #endif
             if (g_instanceMutex) {
                 CloseHandle(g_instanceMutex);
                 g_instanceMutex = NULL;
-            }              
-            if (g_dispatchPoolBase) {
-                mi_free(g_dispatchPoolBase);
-                g_dispatchPoolBase = nullptr;
-            }                                  
+            }
             #if !CRASH_TEST_DISABLE_MPQ_MMAP
                         for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
                             if (g_mpqMappings[i].active) {
                                 UnmapViewOfFile(g_mpqMappings[i].baseAddress);
-                                // mapping handles closed by OS on process exit
                                 g_mpqMappings[i].active = false;
                             }
                         }
-            #endif     
-            if (g_subtaskEventPoolOk) {
-                g_subtaskEventPoolOk = false;
-                for (int i = 0; i < g_subtaskEventPoolCount; i++) {
-                    if (g_subtaskEventPool[i]) {
-                        orig_CloseHandle(g_subtaskEventPool[i]);
-                        g_subtaskEventPool[i] = NULL;
-                    }
-                }
-                g_subtaskEventPoolCount = 0;
-            }                                                   
+            #endif
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
