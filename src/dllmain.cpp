@@ -38,7 +38,7 @@
 #define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1
 #define CRASH_TEST_DISABLE_VA_ARENA          0
 #define CRASH_TEST_DISABLE_DISPATCH_POOL     0
-#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   0
+#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1
 
 // Types and Global variables VA Arena
 typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
@@ -109,6 +109,12 @@ static long g_dispatchPoolCalls     = 0;
 static long g_dispatchPoolHits      = 0;
 static long g_dispatchPoolFallbacks = 0;
 static long g_dispatchPoolReturns   = 0;
+static long g_dispatchPoolSize20Calls      = 0;
+static long g_dispatchPoolCallerMatchCalls = 0;
+
+static volatile LONG g_dispatchProbeLock = 0;
+static uintptr_t g_dispatchProbeRetAddr[8] = {};
+static long      g_dispatchProbeRetCount[8] = {};
 
 static DWORD g_bgPreloadCacheValue  = 100;
 static DWORD g_bgPreloadCacheTick   = 0;
@@ -2190,9 +2196,23 @@ static void DumpPeriodicStats() {
     }
     if (g_dispatchPoolOk) {
         long total = g_dispatchPoolHits + g_dispatchPoolFallbacks;
-        Log("[Stats] DispatchPool: %ld calls, %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
-            g_dispatchPoolCalls, g_dispatchPoolHits, g_dispatchPoolReturns, g_dispatchPoolFallbacks,
+        Log("[Stats] DispatchPool: %ld calls, size20=%ld, callerMatch=%ld, %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
+            g_dispatchPoolCalls,
+            g_dispatchPoolSize20Calls,
+            g_dispatchPoolCallerMatchCalls,
+            g_dispatchPoolHits,
+            g_dispatchPoolReturns,
+            g_dispatchPoolFallbacks,
             total > 0 ? (double)g_dispatchPoolHits / total * 100.0 : 0.0);
+
+        for (int i = 0; i < 8; i++) {
+            if (g_dispatchProbeRetAddr[i] != 0 && g_dispatchProbeRetCount[i] > 0) {
+                Log("[Stats] DispatchPool caller[%d]: 0x%08X x %ld",
+                    i,
+                    (unsigned)g_dispatchProbeRetAddr[i],
+                    g_dispatchProbeRetCount[i]);
+            }
+        }
     }
 
     if (g_bgPreloadOk) {
@@ -2740,7 +2760,7 @@ static inline bool IsDispatchPoolPtr(void* p) {
 }
 
 static inline bool IsSub438260Caller(uintptr_t retAddr) {
-    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x200));
+    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x400));
 }
 
 static void InitDispatchPool() {
@@ -2779,6 +2799,32 @@ static void DispatchPoolPush(void* p) {
     ReleaseSRWLockExclusive(&g_dispatchPoolLock);
 }
 
+static void RecordDispatchProbeRetAddr(uintptr_t retAddr) {
+    while (InterlockedCompareExchange(&g_dispatchProbeLock, 1, 0) != 0)
+        YieldProcessor();
+
+    for (int i = 0; i < 8; i++) {
+        if (g_dispatchProbeRetAddr[i] == retAddr) {
+            g_dispatchProbeRetCount[i]++;
+            InterlockedExchange(&g_dispatchProbeLock, 0);
+            return;
+        }
+    }
+
+    for (int i = 0; i < 8; i++) {
+        if (g_dispatchProbeRetAddr[i] == 0) {
+            g_dispatchProbeRetAddr[i] = retAddr;
+            g_dispatchProbeRetCount[i] = 1;
+            InterlockedExchange(&g_dispatchProbeLock, 0);
+            return;
+        }
+    }
+
+    // If table is full, accumulate into slot 0 as overflow bucket
+    g_dispatchProbeRetCount[0]++;
+    InterlockedExchange(&g_dispatchProbeLock, 0);
+}
+
 static void* __cdecl Hooked_sub_401010(int size) {
 #if CRASH_TEST_DISABLE_DISPATCH_POOL
     return orig_sub_401010(size);
@@ -2786,12 +2832,20 @@ static void* __cdecl Hooked_sub_401010(int size) {
     InterlockedIncrement(&g_dispatchPoolCalls);
     uintptr_t retAddr = (uintptr_t)_ReturnAddress();
 
+    if (size == 20) {
+        InterlockedIncrement(&g_dispatchPoolSize20Calls);
+        RecordDispatchProbeRetAddr(retAddr);
+    }
+
     if (size == 20 && IsSub438260Caller(retAddr) && g_dispatchPoolBase) {
+        InterlockedIncrement(&g_dispatchPoolCallerMatchCalls);
+
         void* node = DispatchPoolPop();
         if (node) {
             InterlockedIncrement(&g_dispatchPoolHits);
             return node;
         }
+
         InterlockedIncrement(&g_dispatchPoolFallbacks);
     }
 
