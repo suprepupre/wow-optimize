@@ -35,7 +35,7 @@
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
 #define CRASH_TEST_DISABLE_LUA_INTERNALS   0
 #define CRASH_TEST_DISABLE_THREAD_AFFINITY   0
-#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   0
+#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1
 #define CRASH_TEST_DISABLE_VA_ARENA          0
 #define CRASH_TEST_DISABLE_DISPATCH_POOL     0
 #define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   0
@@ -105,12 +105,14 @@ static int g_dispatchPoolFreeHead = -1;
 static constexpr int DISPATCH_POOL_NODE_SIZE  = 24;   // 20-byte object rounded to 8-byte alignment
 static constexpr int DISPATCH_POOL_NODE_COUNT = 512;
 
+static long g_dispatchPoolCalls     = 0;
 static long g_dispatchPoolHits      = 0;
 static long g_dispatchPoolFallbacks = 0;
 static long g_dispatchPoolReturns   = 0;
 
 static DWORD g_bgPreloadCacheValue  = 100;
 static DWORD g_bgPreloadCacheTick   = 0;
+static long  g_bgPreloadCalls       = 0;
 static long  g_bgPreloadCacheHits   = 0;
 static long  g_bgPreloadCacheMisses = 0;
 
@@ -2178,6 +2180,7 @@ static void DumpPeriodicStats() {
         Log("[Stats] CriticalSection: %ld spin-acquired", g_csSpinHits);
     if (g_sfpRedirected > 0)
         Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
+    
 
         if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0) {
         long total = g_spinHits + g_spinFallbacks;
@@ -2185,17 +2188,17 @@ static void DumpPeriodicStats() {
             g_spinHits, g_spinFallbacks,
             (double)g_spinHits / total * 100.0);
     }
-        if (g_dispatchPoolOk && (g_dispatchPoolHits + g_dispatchPoolFallbacks + g_dispatchPoolReturns) > 0) {
+    if (g_dispatchPoolOk) {
         long total = g_dispatchPoolHits + g_dispatchPoolFallbacks;
-        Log("[Stats] DispatchPool: %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
-            g_dispatchPoolHits, g_dispatchPoolReturns, g_dispatchPoolFallbacks,
+        Log("[Stats] DispatchPool: %ld calls, %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
+            g_dispatchPoolCalls, g_dispatchPoolHits, g_dispatchPoolReturns, g_dispatchPoolFallbacks,
             total > 0 ? (double)g_dispatchPoolHits / total * 100.0 : 0.0);
     }
 
-    if (g_bgPreloadOk && (g_bgPreloadCacheHits + g_bgPreloadCacheMisses) > 0) {
+    if (g_bgPreloadOk) {
         long total = g_bgPreloadCacheHits + g_bgPreloadCacheMisses;
-        Log("[Stats] bgpreloadsleep: %ld cached, %ld real (%.1f%% cache hit)",
-            g_bgPreloadCacheHits, g_bgPreloadCacheMisses,
+        Log("[Stats] bgpreloadsleep: %ld calls, %ld cached, %ld real (%.1f%% cache hit)",
+            g_bgPreloadCalls, g_bgPreloadCacheHits, g_bgPreloadCacheMisses,
             total > 0 ? (double)g_bgPreloadCacheHits / total * 100.0 : 0.0);
     }
 
@@ -2737,7 +2740,7 @@ static inline bool IsDispatchPoolPtr(void* p) {
 }
 
 static inline bool IsSub438260Caller(uintptr_t retAddr) {
-    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x100));
+    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x200));
 }
 
 static void InitDispatchPool() {
@@ -2780,6 +2783,7 @@ static void* __cdecl Hooked_sub_401010(int size) {
 #if CRASH_TEST_DISABLE_DISPATCH_POOL
     return orig_sub_401010(size);
 #else
+    InterlockedIncrement(&g_dispatchPoolCalls);
     uintptr_t retAddr = (uintptr_t)_ReturnAddress();
 
     if (size == 20 && IsSub438260Caller(retAddr) && g_dispatchPoolBase) {
@@ -2871,6 +2875,7 @@ static int __cdecl Hooked_sub_4533E0() {
 #if CRASH_TEST_DISABLE_BGPRELOAD_CACHE
     return orig_sub_4533E0();
 #else
+    InterlockedIncrement(&g_bgPreloadCalls);
     DWORD now = GetTickCount();
 
     if (g_bgPreloadCacheTick != 0 && (DWORD)(now - g_bgPreloadCacheTick) < 500) {
