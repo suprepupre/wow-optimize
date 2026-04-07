@@ -34,9 +34,11 @@
 #define CRASH_TEST_DISABLE_MPQ_MMAP        1
 #define CRASH_TEST_DISABLE_QPC_CACHE       0
 #define CRASH_TEST_DISABLE_LUA_INTERNALS   0
-#define CRASH_TEST_DISABLE_THREAD_AFFINITY  0
-#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN  0
-#define CRASH_TEST_DISABLE_VA_ARENA  0
+#define CRASH_TEST_DISABLE_THREAD_AFFINITY   0
+#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   0
+#define CRASH_TEST_DISABLE_VA_ARENA          0
+#define CRASH_TEST_DISABLE_DISPATCH_POOL     0
+#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   0
 
 // Types and Global variables VA Arena
 typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
@@ -65,9 +67,13 @@ static bool InstallVAArena();
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
 static bool InstallWaitSpin();
+static bool InstallDispatchPoolHooks();
+static bool InstallBgPreloadCacheHook();
 
 static bool  g_threadAffOk    = false;
 static bool  g_waitSpinOk     = false;
+static bool  g_dispatchPoolOk = false;
+static bool  g_bgPreloadOk    = false;
 static long  g_spinHits       = 0;
 static long  g_spinFallbacks  = 0;
 static LONG  g_bgThreadIdx    = 0;
@@ -79,6 +85,35 @@ static fn_ThreadWorker orig_ThreadWorker = nullptr;
 
 typedef DWORD (WINAPI* WaitSingle_fn)(HANDLE, DWORD);
 static WaitSingle_fn orig_WaitSingle = nullptr;
+typedef void* (__cdecl *fn_sub_401010_alloc)(int size);
+typedef void* (__cdecl *fn_sub_47CC90_free)(void* block);
+typedef int   (__cdecl *fn_sub_4533E0_timeout)();
+
+static constexpr uintptr_t ADDR_sub_401010 = 0x00401010;
+static constexpr uintptr_t ADDR_sub_47CC90 = 0x0047CC90;
+static constexpr uintptr_t ADDR_sub_4533E0 = 0x004533E0;
+static constexpr uintptr_t ADDR_sub_438260 = 0x00438260;
+
+static fn_sub_401010_alloc   orig_sub_401010 = nullptr;
+static fn_sub_47CC90_free    orig_sub_47CC90 = nullptr;
+static fn_sub_4533E0_timeout orig_sub_4533E0 = nullptr;
+
+static SRWLOCK g_dispatchPoolLock = SRWLOCK_INIT;
+static uint8_t* g_dispatchPoolBase = nullptr;
+static int g_dispatchPoolFreeHead = -1;
+
+static constexpr int DISPATCH_POOL_NODE_SIZE  = 24;   // 20-byte object rounded to 8-byte alignment
+static constexpr int DISPATCH_POOL_NODE_COUNT = 512;
+
+static long g_dispatchPoolHits      = 0;
+static long g_dispatchPoolFallbacks = 0;
+static long g_dispatchPoolReturns   = 0;
+
+static DWORD g_bgPreloadCacheValue  = 100;
+static DWORD g_bgPreloadCacheTick   = 0;
+static long  g_bgPreloadCacheHits   = 0;
+static long  g_bgPreloadCacheMisses = 0;
+
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -2143,11 +2178,25 @@ static void DumpPeriodicStats() {
         Log("[Stats] CriticalSection: %ld spin-acquired", g_csSpinHits);
     if (g_sfpRedirected > 0)
         Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
-            if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0) {
+
+        if (g_waitSpinOk && (g_spinHits + g_spinFallbacks) > 0) {
         long total = g_spinHits + g_spinFallbacks;
         Log("[Stats] WaitSpin: %ld fast, %ld fallback (%.1f%% fast)",
             g_spinHits, g_spinFallbacks,
             (double)g_spinHits / total * 100.0);
+    }
+        if (g_dispatchPoolOk && (g_dispatchPoolHits + g_dispatchPoolFallbacks + g_dispatchPoolReturns) > 0) {
+        long total = g_dispatchPoolHits + g_dispatchPoolFallbacks;
+        Log("[Stats] DispatchPool: %ld hits, %ld returns, %ld fallback (%.1f%% hit)",
+            g_dispatchPoolHits, g_dispatchPoolReturns, g_dispatchPoolFallbacks,
+            total > 0 ? (double)g_dispatchPoolHits / total * 100.0 : 0.0);
+    }
+
+    if (g_bgPreloadOk && (g_bgPreloadCacheHits + g_bgPreloadCacheMisses) > 0) {
+        long total = g_bgPreloadCacheHits + g_bgPreloadCacheMisses;
+        Log("[Stats] bgpreloadsleep: %ld cached, %ld real (%.1f%% cache hit)",
+            g_bgPreloadCacheHits, g_bgPreloadCacheMisses,
+            total > 0 ? (double)g_bgPreloadCacheHits / total * 100.0 : 0.0);
     }
 
     if (vaOk && (g_vaArenaHits + g_vaArenaFallbacks) > 0) {
@@ -2280,6 +2329,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- VA Arena ---");
     vaOk = InstallVAArena();
 
+    Log("--- Dispatch Pool ---");
+    g_dispatchPoolOk = InstallDispatchPoolHooks();
+
+    Log("--- bgpreloadsleep Cache ---");
+    g_bgPreloadOk = InstallBgPreloadCacheHook();
 
     Log("");
     Log("--- Lua VM Optimizer ---");
@@ -2406,20 +2460,40 @@ static bool InstallThreadAffinity() {
     Log("Thread affinity: DISABLED (crash isolation)");
     return false;
 #else
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    int total = (int)si.dwNumberOfProcessors;
-    if (total <= 2) { Log("Thread affinity: SKIP (<=2 cores)"); return false; }
+    DWORD_PTR processMask = 0, systemMask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask)) {
+        Log("Thread affinity: SKIP (GetProcessAffinityMask failed)");
+        return false;
+    }
+
+    int activeCores = 0;
+    for (unsigned i = 0; i < sizeof(DWORD_PTR) * 8; i++) {
+        if (processMask & ((DWORD_PTR)1 << i))
+            activeCores++;
+    }
+
+    if (activeCores <= 2) {
+        Log("Thread affinity: SKIP (<=2 active process cores)");
+        return false;
+    }
 
     g_affinityCount = 0;
-    for (int i = 2; i < total && g_affinityCount < 16; i++)
-        g_affinityCores[g_affinityCount++] = i;
+    for (unsigned i = 2; i < sizeof(DWORD_PTR) * 8 && g_affinityCount < 16; i++) {
+        if (processMask & ((DWORD_PTR)1 << i))
+            g_affinityCores[g_affinityCount++] = i;
+    }
+
+    if (g_affinityCount == 0) {
+        Log("Thread affinity: SKIP (process affinity mask leaves no worker cores >=2)");
+        return false;
+    }
 
     void* p = (void*)0x008D2110;
     if (!IsExecutableMemory((uintptr_t)p)) return false;
     if (MH_CreateHook(p, (void*)Hooked_ThreadWorker, (void**)&orig_ThreadWorker) != MH_OK) return false;
     if (MH_EnableHook(p) != MH_OK) return false;
 
-    Log("Thread affinity: ACTIVE (cores 2-%d, %d workers mapped)", total - 1, g_affinityCount);
+    Log("Thread affinity: ACTIVE (process-mask aware, %d worker cores)", g_affinityCount);
     return true;
 #endif
 }
@@ -2648,6 +2722,191 @@ static bool InstallVAArena() {
 #endif
 }
 
+// ================================================================
+// 20. Dispatcher Pool — eliminate hot 20-byte alloc/free churn
+//  Targets only sub_438260 via return-address filter.
+// ================================================================
+
+static inline bool IsDispatchPoolPtr(void* p) {
+    if (!g_dispatchPoolBase || !p) return false;
+    uintptr_t base = (uintptr_t)g_dispatchPoolBase;
+    uintptr_t addr = (uintptr_t)p;
+    uintptr_t end  = base + (DISPATCH_POOL_NODE_SIZE * DISPATCH_POOL_NODE_COUNT);
+    if (addr < base || addr >= end) return false;
+    return ((addr - base) % DISPATCH_POOL_NODE_SIZE) == 0;
+}
+
+static inline bool IsSub438260Caller(uintptr_t retAddr) {
+    return (retAddr >= ADDR_sub_438260 && retAddr < (ADDR_sub_438260 + 0x100));
+}
+
+static void InitDispatchPool() {
+    g_dispatchPoolFreeHead = 0;
+    for (int i = 0; i < DISPATCH_POOL_NODE_COUNT; i++) {
+        uint8_t* node = g_dispatchPoolBase + (i * DISPATCH_POOL_NODE_SIZE);
+        *(int*)node = (i + 1 < DISPATCH_POOL_NODE_COUNT) ? (i + 1) : -1;
+    }
+}
+
+static void* DispatchPoolPop() {
+    AcquireSRWLockExclusive(&g_dispatchPoolLock);
+
+    if (g_dispatchPoolFreeHead < 0) {
+        ReleaseSRWLockExclusive(&g_dispatchPoolLock);
+        return nullptr;
+    }
+
+    int idx = g_dispatchPoolFreeHead;
+    uint8_t* node = g_dispatchPoolBase + (idx * DISPATCH_POOL_NODE_SIZE);
+    g_dispatchPoolFreeHead = *(int*)node;
+
+    ReleaseSRWLockExclusive(&g_dispatchPoolLock);
+    memset(node, 0, DISPATCH_POOL_NODE_SIZE);
+    return node;
+}
+
+static void DispatchPoolPush(void* p) {
+    if (!IsDispatchPoolPtr(p)) return;
+
+    int idx = (int)(((uint8_t*)p - g_dispatchPoolBase) / DISPATCH_POOL_NODE_SIZE);
+
+    AcquireSRWLockExclusive(&g_dispatchPoolLock);
+    *(int*)p = g_dispatchPoolFreeHead;
+    g_dispatchPoolFreeHead = idx;
+    ReleaseSRWLockExclusive(&g_dispatchPoolLock);
+}
+
+static void* __cdecl Hooked_sub_401010(int size) {
+#if CRASH_TEST_DISABLE_DISPATCH_POOL
+    return orig_sub_401010(size);
+#else
+    uintptr_t retAddr = (uintptr_t)_ReturnAddress();
+
+    if (size == 20 && IsSub438260Caller(retAddr) && g_dispatchPoolBase) {
+        void* node = DispatchPoolPop();
+        if (node) {
+            InterlockedIncrement(&g_dispatchPoolHits);
+            return node;
+        }
+        InterlockedIncrement(&g_dispatchPoolFallbacks);
+    }
+
+    return orig_sub_401010(size);
+#endif
+}
+
+static void* __cdecl Hooked_sub_47CC90(void* block) {
+#if CRASH_TEST_DISABLE_DISPATCH_POOL
+    return orig_sub_47CC90(block);
+#else
+    if (!block)
+        return nullptr;
+
+    if (IsDispatchPoolPtr(block)) {
+        DispatchPoolPush(block);
+        InterlockedIncrement(&g_dispatchPoolReturns);
+        return block;
+    }
+
+    return orig_sub_47CC90(block);
+#endif
+}
+
+static bool InstallDispatchPoolHooks() {
+#if CRASH_TEST_DISABLE_DISPATCH_POOL
+    Log("Dispatch pool: DISABLED (crash isolation)");
+    return false;
+#else
+    if (!IsExecutableMemory(ADDR_sub_401010) || !IsExecutableMemory(ADDR_sub_47CC90))
+        return false;
+
+    g_dispatchPoolBase = (uint8_t*)mi_malloc(DISPATCH_POOL_NODE_SIZE * DISPATCH_POOL_NODE_COUNT);
+    if (!g_dispatchPoolBase) {
+        Log("Dispatch pool: SKIP (pool allocation failed)");
+        return false;
+    }
+
+    InitDispatchPool();
+
+    if (MH_CreateHook((void*)ADDR_sub_401010, (void*)Hooked_sub_401010, (void**)&orig_sub_401010) != MH_OK) {
+        mi_free(g_dispatchPoolBase);
+        g_dispatchPoolBase = nullptr;
+        return false;
+    }
+
+    if (MH_EnableHook((void*)ADDR_sub_401010) != MH_OK) {
+        MH_DisableHook((void*)ADDR_sub_401010);
+        mi_free(g_dispatchPoolBase);
+        g_dispatchPoolBase = nullptr;
+        return false;
+    }
+
+    if (MH_CreateHook((void*)ADDR_sub_47CC90, (void*)Hooked_sub_47CC90, (void**)&orig_sub_47CC90) != MH_OK) {
+        MH_DisableHook((void*)ADDR_sub_401010);
+        mi_free(g_dispatchPoolBase);
+        g_dispatchPoolBase = nullptr;
+        return false;
+    }
+
+    if (MH_EnableHook((void*)ADDR_sub_47CC90) != MH_OK) {
+        MH_DisableHook((void*)ADDR_sub_401010);
+        MH_DisableHook((void*)ADDR_sub_47CC90);
+        mi_free(g_dispatchPoolBase);
+        g_dispatchPoolBase = nullptr;
+        return false;
+    }
+
+    Log("Dispatch pool: ACTIVE (%d x %dB task nodes, sub_438260-targeted)",
+        DISPATCH_POOL_NODE_COUNT, DISPATCH_POOL_NODE_SIZE);
+    return true;
+#endif
+}
+
+// ================================================================
+// 21. bgpreloadsleep cache
+//  Avoid repeated CVar parse in hot worker loop.
+// ================================================================
+
+static int __cdecl Hooked_sub_4533E0() {
+#if CRASH_TEST_DISABLE_BGPRELOAD_CACHE
+    return orig_sub_4533E0();
+#else
+    DWORD now = GetTickCount();
+
+    if (g_bgPreloadCacheTick != 0 && (DWORD)(now - g_bgPreloadCacheTick) < 500) {
+        InterlockedIncrement(&g_bgPreloadCacheHits);
+        return (int)g_bgPreloadCacheValue;
+    }
+
+    int value = orig_sub_4533E0();
+    if (value < 0) value = 0;
+    if (value > 5000) value = 5000;
+
+    g_bgPreloadCacheValue = (DWORD)value;
+    g_bgPreloadCacheTick  = now;
+    InterlockedIncrement(&g_bgPreloadCacheMisses);
+    return value;
+#endif
+}
+
+static bool InstallBgPreloadCacheHook() {
+#if CRASH_TEST_DISABLE_BGPRELOAD_CACHE
+    Log("bgpreloadsleep cache: DISABLED (crash isolation)");
+    return false;
+#else
+    if (!IsExecutableMemory(ADDR_sub_4533E0))
+        return false;
+
+    if (MH_CreateHook((void*)ADDR_sub_4533E0, (void*)Hooked_sub_4533E0, (void**)&orig_sub_4533E0) != MH_OK)
+        return false;
+    if (MH_EnableHook((void*)ADDR_sub_4533E0) != MH_OK)
+        return false;
+
+    Log("bgpreloadsleep cache: ACTIVE (500ms cache window)");
+    return true;
+#endif
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
@@ -2716,7 +2975,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             if (g_instanceMutex) {
                 CloseHandle(g_instanceMutex);
                 g_instanceMutex = NULL;
-            }                                    
+            }              
+            if (g_dispatchPoolBase) {
+                mi_free(g_dispatchPoolBase);
+                g_dispatchPoolBase = nullptr;
+            }                                  
             #if !CRASH_TEST_DISABLE_MPQ_MMAP
                         for (int i = 0; i < MAX_MPQ_MAPPINGS; i++) {
                             if (g_mpqMappings[i].active) {
@@ -2725,7 +2988,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                                 g_mpqMappings[i].active = false;
                             }
                         }
-            #endif                                
+            #endif                                            
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
