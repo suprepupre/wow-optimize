@@ -2319,6 +2319,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #endif
 
 
+
     Log("");
     Log("========================================");
     Log("  Initialization complete");
@@ -2697,9 +2698,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             }
 
             // Dynamic FreeLibrary — safe to clean up
-            LuaFastPath::Shutdown();            
+            LuaFastPath::Shutdown();
             LuaInternals::Shutdown();
-            ApiCache::Shutdown();            
+            ApiCache::Shutdown();
             UICache::Shutdown();                       
             CombatLogOpt::Shutdown();
             LuaOpt::Shutdown();

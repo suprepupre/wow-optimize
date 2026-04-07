@@ -554,7 +554,7 @@ static int GetCurrentStepKB() {
 
 static int g_loadingGraceFrames = 0;
 
-static void StepGC(lua_State* L) {
+static void StepGC(lua_State* L, double frameMs) {
     if (!State.gcOptimized || !Api.lua_gc) return;
 
     // Skip GC for first 30 frames after entering loading mode
@@ -573,6 +573,18 @@ static void StepGC(lua_State* L) {
     }
 
     int stepKB = GetCurrentStepKB();
+
+    // Frame-time based pre-adjustment: reduce GC pressure when frames are slow
+    if (frameMs > 0.0) {
+        if (frameMs > 16.0) {
+            // Frame took > 16ms (below 60 FPS) — minimize GC to avoid further slowdown
+            if (stepKB > 4) stepKB = stepKB / 2;
+        } else if (frameMs < 8.0) {
+            // Frame took < 8ms (above 120 FPS) — increase GC to catch up on garbage
+            stepKB = stepKB * 3 / 2;
+        }
+        // 8-16ms: normal step, no adjustment needed
+    }
 
     LARGE_INTEGER before, after;
     QueryPerformanceCounter(&before);
@@ -594,6 +606,7 @@ static void StepGC(lua_State* L) {
     double gcMs = (double)(after.QuadPart - before.QuadPart) * 1000.0 / (double)g_gcPerfFreq.QuadPart;
     g_smoothedGcMs = g_smoothedGcMs * 0.95 + gcMs * 0.05;
 
+    // Post-GC adaptive: adjust base step sizes based on GC time
     if (g_smoothedGcMs > 2.0) {
         if (Config.isLoading) {
             if (Config.loadingStepKB > 32) Config.loadingStepKB -= 16;
@@ -623,14 +636,29 @@ static void StepGC(lua_State* L) {
         State.luaMemoryKB = kb + (b / 1024.0);
     }
 
-    if (State.luaMemoryKB > 200 * 1024 && !Config.isLoading) {
-        Api.lua_gc(L, LUA_GCCOLLECT, 0);
-        State.fullCollects++;
-        Log("[LuaOpt] EMERGENCY GC: memory was %.1f MB", State.luaMemoryKB / 1024.0);
-        int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
-        int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
-        State.luaMemoryKB = kb + (b / 1024.0);
-        Log("[LuaOpt] After emergency GC: %.1f MB", State.luaMemoryKB / 1024.0);        
+    // Emergency GC: only trigger if memory is growing AND above threshold
+    // Cooldown prevents spam when live data exceeds threshold (heavy addons)
+    static double g_lastEmergencyMem = 0.0;
+    static DWORD  g_lastEmergencyTick = 0;
+
+    if (State.luaMemoryKB > 300 * 1024 && !Config.isLoading) {
+        DWORD nowTick = GetTickCount();
+        double memMB = State.luaMemoryKB / 1024.0;
+
+        // Only trigger if memory grew since last emergency GC AND cooldown expired (2 sec)
+        if (memMB > g_lastEmergencyMem + 5.0 && (nowTick - g_lastEmergencyTick) > 2000) {
+            Api.lua_gc(L, LUA_GCCOLLECT, 0);
+            State.fullCollects++;
+
+            int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
+            int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
+            double afterMB = (kb + (b / 1024.0)) / 1024.0;
+
+            g_lastEmergencyMem = afterMB;
+            g_lastEmergencyTick = nowTick;
+
+            Log("[LuaOpt] EMERGENCY GC: %.1f MB -> %.1f MB", memMB, afterMB);
+        }
     }
 }
 
@@ -1041,7 +1069,7 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
     }
 
     if (!verySlowFrame) {
-        StepGC(Api.L);
+        StepGC(Api.L, frameMs);
     }
 
     if (!slowFrame && (State.statsUpdateCounter & 63) == 0) {
