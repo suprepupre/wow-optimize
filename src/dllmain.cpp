@@ -37,8 +37,9 @@
 #define CRASH_TEST_DISABLE_THREAD_AFFINITY   0
 #define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1
 #define CRASH_TEST_DISABLE_VA_ARENA          0
-#define CRASH_TEST_DISABLE_DISPATCH_POOL     0
+#define CRASH_TEST_DISABLE_DISPATCH_POOL     1
 #define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1
+#define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 0
 
 // Types and Global variables VA Arena
 typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
@@ -69,11 +70,13 @@ static bool InstallThreadAffinity();
 static bool InstallWaitSpin();
 static bool InstallDispatchPoolHooks();
 static bool InstallBgPreloadCacheHook();
+static bool InstallSubtaskEventPoolHook();
 
 static bool  g_threadAffOk    = false;
 static bool  g_waitSpinOk     = false;
 static bool  g_dispatchPoolOk = false;
 static bool  g_bgPreloadOk    = false;
+static bool  g_subtaskEventPoolOk = false;
 static long  g_spinHits       = 0;
 static long  g_spinFallbacks  = 0;
 static LONG  g_bgThreadIdx    = 0;
@@ -85,6 +88,23 @@ static fn_ThreadWorker orig_ThreadWorker = nullptr;
 
 typedef DWORD (WINAPI* WaitSingle_fn)(HANDLE, DWORD);
 static WaitSingle_fn orig_WaitSingle = nullptr;
+typedef HANDLE (WINAPI* CreateEventA_fn)(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+static CreateEventA_fn orig_CreateEventA = nullptr;
+
+static constexpr uintptr_t ADDR_sub_444620 = 0x00444620;
+static constexpr uintptr_t ADDR_sub_444B20 = 0x00444B20;
+
+static SRWLOCK g_subtaskEventPoolLock = SRWLOCK_INIT;
+static HANDLE  g_subtaskEventPool[128] = {};
+static int     g_subtaskEventPoolCount = 0;
+
+static HANDLE  g_subtaskTrackedHandles[256] = {};
+static int     g_subtaskTrackedCount = 0;
+
+static long g_subtaskEventPoolHits    = 0;
+static long g_subtaskEventPoolMisses  = 0;
+static long g_subtaskEventPoolReturns = 0;
+
 typedef void* (__cdecl *fn_sub_401010_alloc)(int size);
 typedef void* (__cdecl *fn_sub_47CC90_free)(void* block);
 typedef int   (__cdecl *fn_sub_4533E0_timeout)();
@@ -134,6 +154,12 @@ static void   DumpPeriodicStats();
 // Forward declarations for MPQ prefetch
 static void PrefetchMappedMPQs();
 static void ResetPrefetchFlag();
+// Forward declarations for subtask event pool
+static bool IsTrackedSubtaskHandle(HANDLE h);
+static bool IsHandleAlreadyInSubtaskPool(HANDLE h);
+static void TrackSubtaskHandle(HANDLE h);
+static HANDLE PopSubtaskEventHandle();
+static void PushSubtaskEventHandle(HANDLE h);
 // ================================================================
 // Logging — ring buffer + background thread
 // ================================================================
@@ -1706,6 +1732,12 @@ static BOOL WINAPI hooked_CloseHandle(HANDLE hObject) {
     if (!hObject || hObject == INVALID_HANDLE_VALUE ||
         hObject == GetCurrentProcess() || hObject == GetCurrentThread())
         return orig_CloseHandle(hObject);
+    #if !CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
+    if (g_subtaskEventPoolOk && IsTrackedSubtaskHandle(hObject)) {
+        PushSubtaskEventHandle(hObject);
+        return TRUE;
+    }
+#endif
 #if !CRASH_TEST_DISABLE_MPQ_MMAP
     AcquireSRWLockExclusive(&g_mpqMapLock);
     DestroyMpqMapping(hObject);
@@ -2228,6 +2260,14 @@ static void DumpPeriodicStats() {
             g_vaArenaHits, g_vaArenaFallbacks,
             (double)g_vaArenaHits / total * 100.0);
     }
+    if (g_subtaskEventPoolOk) {
+        long total = g_subtaskEventPoolHits + g_subtaskEventPoolMisses;
+        Log("[Stats] SubtaskEventPool: %ld reuse, %ld new, %ld returned (%.1f%% reuse)",
+            g_subtaskEventPoolHits,
+            g_subtaskEventPoolMisses,
+            g_subtaskEventPoolReturns,
+            total > 0 ? (double)g_subtaskEventPoolHits / total * 100.0 : 0.0);
+    }    
     if (g_debugStringSkipped > 0)
         Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
 
@@ -2358,9 +2398,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- bgpreloadsleep Cache ---");
     g_bgPreloadOk = InstallBgPreloadCacheHook();
 
+    Log("--- Subtask Event Pool ---");
+    g_subtaskEventPoolOk = InstallSubtaskEventPoolHook();
+
+    bool luaOk = false;
     Log("");
     Log("--- Lua VM Optimizer ---");
-    bool luaOk = LuaOpt::PrepareFromWorkerThread();
+    luaOk = LuaOpt::PrepareFromWorkerThread();
 
     Log("");
     Log("--- Combat Log ---");
@@ -2965,6 +3009,113 @@ static bool InstallBgPreloadCacheHook() {
     return true;
 #endif
 }
+static inline bool IsSubtaskCreateEventCaller(uintptr_t retAddr) {
+    return (retAddr >= ADDR_sub_444620 && retAddr < ADDR_sub_444B20);
+}
+
+static bool IsTrackedSubtaskHandle(HANDLE h) {
+    for (int i = 0; i < g_subtaskTrackedCount; i++) {
+        if (g_subtaskTrackedHandles[i] == h)
+            return true;
+    }
+    return false;
+}
+
+static bool IsHandleAlreadyInSubtaskPool(HANDLE h) {
+    for (int i = 0; i < g_subtaskEventPoolCount; i++) {
+        if (g_subtaskEventPool[i] == h)
+            return true;
+    }
+    return false;
+}
+
+static void TrackSubtaskHandle(HANDLE h) {
+    if (!h || h == INVALID_HANDLE_VALUE) return;
+    if (IsTrackedSubtaskHandle(h)) return;
+    if (g_subtaskTrackedCount < (int)(sizeof(g_subtaskTrackedHandles) / sizeof(g_subtaskTrackedHandles[0]))) {
+        g_subtaskTrackedHandles[g_subtaskTrackedCount++] = h;
+    }
+}
+
+static HANDLE PopSubtaskEventHandle() {
+    AcquireSRWLockExclusive(&g_subtaskEventPoolLock);
+    HANDLE h = NULL;
+    if (g_subtaskEventPoolCount > 0) {
+        h = g_subtaskEventPool[--g_subtaskEventPoolCount];
+        g_subtaskEventPool[g_subtaskEventPoolCount] = NULL;
+    }
+    ReleaseSRWLockExclusive(&g_subtaskEventPoolLock);
+    return h;
+}
+
+static void PushSubtaskEventHandle(HANDLE h) {
+    if (!h || h == INVALID_HANDLE_VALUE) return;
+
+    AcquireSRWLockExclusive(&g_subtaskEventPoolLock);
+
+    if (!IsHandleAlreadyInSubtaskPool(h) &&
+        g_subtaskEventPoolCount < (int)(sizeof(g_subtaskEventPool) / sizeof(g_subtaskEventPool[0])))
+    {
+        ResetEvent(h);
+        g_subtaskEventPool[g_subtaskEventPoolCount++] = h;
+        InterlockedIncrement(&g_subtaskEventPoolReturns);
+    }
+
+    ReleaseSRWLockExclusive(&g_subtaskEventPoolLock);
+}
+
+static HANDLE WINAPI Hooked_CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes,
+                                         BOOL bManualReset,
+                                         BOOL bInitialState,
+                                         LPCSTR lpName)
+{
+#if CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
+    return orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
+#else
+    uintptr_t retAddr = (uintptr_t)_ReturnAddress();
+
+    if (lpEventAttributes == NULL &&
+        bManualReset == FALSE &&
+        bInitialState == FALSE &&
+        lpName == NULL &&
+        IsSubtaskCreateEventCaller(retAddr))
+    {
+        HANDLE pooled = PopSubtaskEventHandle();
+        if (pooled) {
+            ResetEvent(pooled);
+            InterlockedIncrement(&g_subtaskEventPoolHits);
+            return pooled;
+        }
+
+        HANDLE h = orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
+        if (h && h != INVALID_HANDLE_VALUE) {
+            TrackSubtaskHandle(h);
+            InterlockedIncrement(&g_subtaskEventPoolMisses);
+        }
+        return h;
+    }
+
+    return orig_CreateEventA(lpEventAttributes, bManualReset, bInitialState, lpName);
+#endif
+}
+
+static bool InstallSubtaskEventPoolHook() {
+#if CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL
+    Log("Subtask event pool: DISABLED (crash isolation)");
+    return false;
+#else
+    void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "CreateEventA");
+    if (!p) return false;
+
+    if (MH_CreateHook(p, (void*)Hooked_CreateEventA, (void**)&orig_CreateEventA) != MH_OK)
+        return false;
+    if (MH_EnableHook(p) != MH_OK)
+        return false;
+
+    Log("Subtask event pool: ACTIVE (CreateEventA pooled for sub_444620 auto-reset events)");
+    return true;
+#endif
+}
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
@@ -3047,7 +3198,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                                 g_mpqMappings[i].active = false;
                             }
                         }
-            #endif                                            
+            #endif     
+            if (g_subtaskEventPoolOk) {
+                g_subtaskEventPoolOk = false;
+                for (int i = 0; i < g_subtaskEventPoolCount; i++) {
+                    if (g_subtaskEventPool[i]) {
+                        orig_CloseHandle(g_subtaskEventPool[i]);
+                        g_subtaskEventPool[i] = NULL;
+                    }
+                }
+                g_subtaskEventPoolCount = 0;
+            }                                                   
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {
