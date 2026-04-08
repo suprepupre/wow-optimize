@@ -84,8 +84,9 @@
 #define CRASH_TEST_DISABLE_MODHANDLE_CACHE      0   // GetModuleHandleA cache — ENABLED for testing
 #define CRASH_TEST_DISABLE_LSTRCMP              0   // lstrcmp/lstrcmpiA fast path — ENABLED for testing
 #define CRASH_TEST_DISABLE_PROFILE_CACHE        0   // GetPrivateProfileStringA cache — ENABLED for testing
-#define CRASH_TEST_DISABLE_MSGPUMP_RC1          1   // sub_869E00 frame-continue (DISABLED — causes deadlocks on stale command state)
+#define CRASH_TEST_DISABLE_MSGPUMP_RC1          1   // sub_869E00 frame-continue (ABANDONED — freezes on char select, incompatible with command pump arch)
 #define CRASH_TEST_DISABLE_SWAP_RC1             0   // sub_69E220 swap optimization — glFinish skip (Vulkan/D3D9 only)
+#define CRASH_TEST_DISABLE_TABLERESHAPE_RC1     0   // luaH_resize table rehash prevention (rc1)
 
 // Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
@@ -147,6 +148,7 @@ static long g_wfsSpinHits = 0, g_wfsFallbacks = 0;
 static long g_modHits = 0, g_modMisses = 0;
 static long g_lstrcmpHits = 0, g_lstrcmpFallbacks = 0;
 static long g_profHits = 0, g_profMisses = 0;
+static uint64_t g_tableReshapeHits = 0;
 
 // ================================================================
 // Thread Affinity — background worker core pinning
@@ -2507,6 +2509,9 @@ static void DumpPeriodicStats() {
         Log("[Stats] GetPrivateProfile: %ld hits, %ld misses (%.1f%%)",
             g_profHits, g_profMisses,
             (double)g_profHits / (g_profHits + g_profMisses) * 100.0);
+
+    if (g_tableReshapeHits > 0)
+        Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
     
 
     if (vaOk && g_vaArenaActive) {
@@ -2597,12 +2602,24 @@ static int __cdecl hooked_MsgPump(void* a1, int* a2, DWORD* a3, void* a4, void* 
 
     if (result == 0) {
         // Original would exit the render loop (no messages pending).
-        // Instead: yield CPU and keep the loop alive.
+        // Previous rc1 just returned 1 → stale *a1 → infinite loop.
+        // Fix: inject WM_NULL into WoW's message queue so the next
+        // PeekMessageA finds a message, goes through the normal flow
+        // (GetMessage → DispatchMessage → sub_868DB0), which updates
+        // *a1 from the command queue.
         g_msgPumpHits++;
+
+        // Post synthetic message to WoW's main window
+        HWND hWoW = FindWindowA("GxWindowClass", nullptr);
+        if (hWoW)
+            PostMessageA(hWoW, WM_NULL, 0, 0);
+
+        // Yield CPU to avoid busy-wait
         if (orig_Sleep)
             orig_Sleep(1);
         else
             Sleep(1);
+
         return 1;
     }
 
@@ -2757,6 +2774,128 @@ static bool InstallSwapPresentHook() {
 #endif
 }
 
+// ================================================================
+// 21. sub_85C6F0 — Lua Table Rehash Prevention (testbuild-tablereshape-rc1)
+//
+// WHAT: Hooks luaH_resize (0x0085C6F0). When Lua allocates a new
+//       table size that's only slightly larger than the current size,
+//       rounds up to the next power of 2.
+//
+// WHY:  Lua 5.1 hash tables rehash (realloc + O(n) copy) every time
+//       the array or hash part grows. Addon-heavy raids create tables
+//       that grow incrementally (10 → 20 → 30 → 50 → 80 → 120 ...).
+//       Each resize is a main-thread spike. By rounding up, one big
+//       rehash now prevents 3-5 small ones later.
+//
+// CHAIN: rawset → lua_settable → luaH_set → luaH_newkey →
+//        luaH_resizearray (0x0085C9B0) → luaH_resize (0x0085C6F0)
+//
+// HOW:  1. Hook sub_85C6F0 at entry (naked function, __usercall conv)
+//       2. Check: a1 > *(a2+0x20) AND a1 < nextPow2(a1) AND
+//          nextPow2(a1) <= currentSize * 4 (cap to avoid over-allocation)
+//       3. If all true: set a1 = nextPow2(a1)
+//       4. Call original via MinHook trampoline
+//
+// SAFETY: Basic pointer validation. No SEH (too expensive on this path).
+//         Falls through to original if any check fails.
+//
+// STATUS: Test build only — testbuild-tablereshape-rc1
+// ================================================================
+
+static inline int luaTable_nextPow2(int n) {
+    if (n <= 1) return 1;
+    --n;
+    n |= n >> 1; n |= n >> 2; n |= n >> 4;
+    n |= n >> 8; n |= n >> 16;
+    return n + 1;
+}
+
+// Decision function — called from naked hook, must be __cdecl
+static int __cdecl luaTable_reshape_decision(int newSize, void* table) {
+    if (!table) return newSize;
+    // Validate pointer — must be in valid user-space range
+    uintptr_t p = (uintptr_t)table;
+    if (p < 0x10000 || p > 0xBFFF0000) return newSize;
+
+    __try {
+        int currentSize = *(int*)((char*)table + 0x20);
+        if (currentSize <= 0) return newSize;
+        if (newSize <= currentSize) return newSize;
+        if (newSize <= 0) return newSize;
+
+        int nextPow = luaTable_nextPow2(newSize);
+        // Only round up if we're not already at a power of 2,
+        // and the rounded size isn't more than 4x current (cap memory)
+        if (newSize < nextPow && nextPow <= currentSize * 4) {
+            g_tableReshapeHits++;
+            return nextPow;
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    return newSize;
+}
+
+// Naked hook — preserves exact __usercall register state
+// On entry: eax = a1 (newSize), ecx = a2 (table*), [esp] = ret addr, [esp+4] = a3
+static void* g_luaHResizeTrampoline = nullptr;
+
+__declspec(naked) static void hooked_luaH_resize() {
+    __asm {
+        // Save all registers and flags
+        pushad
+        pushfd
+
+        // Call C++ decision: resize_decision(newSize_in_eax, table_in_ecx)
+        push ecx                    // table*
+        push eax                    // newSize
+        call luaTable_reshape_decision
+        add esp, 8                  // clean up args
+
+        // Store result back into saved eax slot in pushad layout
+        // pushad order on stack (after pushfd):
+        //   [esp+0]=flags, [esp+4]=edi, [esp+8]=esi, [esp+12]=ebp,
+        //   [esp+16]=origEsp, [esp+20]=ebx, [esp+24]=edx, [esp+28]=ecx, [esp+32]=eax
+        mov [esp + 32], eax         // overwrite saved eax with rounded newSize
+
+        // Restore all registers and flags
+        popfd
+        popad
+
+        // eax = (potentially rounded) newSize, ecx = table* (unchanged)
+        // Jump to MinHook trampoline which runs the original prologue
+        jmp g_luaHResizeTrampoline
+    }
+}
+
+static bool InstallLuaHResizeHook() {
+#if CRASH_TEST_DISABLE_TABLERESHAPE_RC1
+    Log("LuaH_resize hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x0085C6F0;
+
+    // Verify prologue: push ebp; mov ebp, esp
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x55 || p[1] != 0x8B) {
+        Log("LuaH_resize hook: BAD PROLOGUE at 0x%08X (expected 55 8B)", (uintptr_t)target);
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_luaH_resize, &g_luaHResizeTrampoline) != MH_OK) {
+        Log("LuaH_resize hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("LuaH_resize hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("LuaH_resize hook: ACTIVE (sub_85C6F0 @ 0x0085C6F0 — table rehash prevention, round-up to pow2)");
+    return true;
+#endif
+}
+
 // Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
     Sleep(5000);
@@ -2849,6 +2988,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Swap/Present (testbuild) ---");
     bool swapOk = InstallSwapPresentHook();
+
+    Log("--- Lua Table Rehash (testbuild) ---");
+    bool tableReshapeOk = InstallLuaHResizeHook();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -2949,6 +3091,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
     Log("  [%s] MsgPump (frame-continue rc1)", msgPumpOk   ? " OK " : "SKIP");
     Log("  [%s] Swap/Present (glFinish skip)", swapOk      ? " OK " : "SKIP");
+    Log("  [%s] Lua Table Rehash (pow2 rc1)", tableReshapeOk ? " OK " : "SKIP");
 
     return 0;
 }
