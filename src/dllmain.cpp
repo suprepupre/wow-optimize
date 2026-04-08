@@ -84,6 +84,7 @@
 #define CRASH_TEST_DISABLE_MODHANDLE_CACHE      0   // GetModuleHandleA cache — ENABLED for testing
 #define CRASH_TEST_DISABLE_LSTRCMP              0   // lstrcmp/lstrcmpiA fast path — ENABLED for testing
 #define CRASH_TEST_DISABLE_PROFILE_CACHE        0   // GetPrivateProfileStringA cache — ENABLED for testing
+#define CRASH_TEST_DISABLE_MSGPUMP_RC1          0   // sub_869E00 frame-continue (testbuild-msgpump-rc1)
 
 // Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
@@ -2558,6 +2559,83 @@ static void DumpPeriodicStats() {
 
 }
 
+// ================================================================
+// 19. sub_869E00 — Zero-Message Frame Continue (testbuild-msgpump-rc1)
+//
+// WHAT: Hooks WoW's message pump function (0x00869E00). When
+//       PeekMessageA returns 0 (no pending Windows messages),
+//       the original function returns 0, which kills the outer
+//       do...while loop in sub_480410 — the game STOPS rendering.
+//
+// WHY:  In addon-heavy raids, the message queue can be empty between
+//       addon timer firings. When the queue is empty, WoW goes
+//       completely idle — no rendering, no Lua, no GC. Then it
+//       spikes back when the next timer fires. This causes raid
+//       stutter and frametime variance.
+//
+// HOW:  1. Call original sub_869E00
+//       2. If it returns 0 (no messages → loop exit):
+//          a. Call hooked_Sleep(1) — yields CPU, prevents 100% usage
+//          b. Return 1 — keeps the outer loop alive
+//       3. The outer loop calls sub_480130 (frame render) again
+//       4. Frame pacing is still controlled by our Sleep hook
+//
+// SAFETY: Minimal — just one extra Sleep(1) per idle cycle.
+//         Frame render function handles the dword_D41400 guards.
+//         If hooked_Sleep is null, falls back to Sleep(1) directly.
+//
+// STATUS: Test build only — testbuild-msgpump-rc1
+// ================================================================
+
+typedef int (__cdecl* MsgPump_fn)(void*, int*, DWORD*, void*, void*);
+static MsgPump_fn orig_MsgPump = nullptr;
+static uint64_t g_msgPumpHits = 0;
+
+static int __cdecl hooked_MsgPump(void* a1, int* a2, DWORD* a3, void* a4, void* a5) {
+    int result = orig_MsgPump(a1, a2, a3, a4, a5);
+
+    if (result == 0) {
+        // Original would exit the render loop (no messages pending).
+        // Instead: yield CPU and keep the loop alive.
+        g_msgPumpHits++;
+        if (orig_Sleep)
+            orig_Sleep(1);
+        else
+            Sleep(1);
+        return 1;
+    }
+
+    return result;
+}
+
+static bool InstallMsgPumpHook() {
+#if CRASH_TEST_DISABLE_MSGPUMP_RC1
+    Log("MsgPump hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x00869E00;
+
+    // Verify we're hooking a real function (prologue: push ebp; mov ebp,esp)
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x55 || p[1] != 0x8B) {
+        Log("MsgPump hook: BAD PROLOGUE at 0x%08X (expected 55 8B)", (uintptr_t)target);
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_MsgPump, (void**)&orig_MsgPump) != MH_OK) {
+        Log("MsgPump hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("MsgPump hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("MsgPump hook: ACTIVE (sub_869E00 @ 0x00869E00 — zero-message frame continue)");
+    return true;
+#endif
+}
+
 // Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
     Sleep(5000);
@@ -2644,6 +2722,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool lstrOk = InstallLstrcmpHook();
     Log("--- Profile String Cache ---");
     bool profOk = InstallGetPrivateProfileCache();
+
+    Log("--- Message Pump (testbuild) ---");
+    bool msgPumpOk = InstallMsgPumpHook();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -2742,6 +2823,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] API cache (ItemInfo only)",    apiCacheOk  ? " OK " : "SKIP");
     Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
     Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
+    Log("  [%s] MsgPump (frame-continue rc1)", msgPumpOk   ? " OK " : "SKIP");
 
     return 0;
 }
