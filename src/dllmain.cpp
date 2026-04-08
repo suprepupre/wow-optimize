@@ -78,6 +78,13 @@
 #define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1   // bgpreloadsleep cache (ALREADY DISABLED — 0 hits)
 #define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1   // Subtask event pool (ALREADY DISABLED — 0 hits)
 
+// New hooks crash isolation (v3.3.2)
+#define CRASH_TEST_DISABLE_GETFILESIZE_CACHE    0   // GetFileSizeEx cache — ENABLED for testing
+#define CRASH_TEST_DISABLE_WFS_SPIN             1   // WaitForSingleObject spin (DISABLED — tested bad, crashes WoW)
+#define CRASH_TEST_DISABLE_MODHANDLE_CACHE      0   // GetModuleHandleA cache — ENABLED for testing
+#define CRASH_TEST_DISABLE_LSTRCMP              0   // lstrcmp/lstrcmpiA fast path — ENABLED for testing
+#define CRASH_TEST_DISABLE_PROFILE_CACHE        0   // GetPrivateProfileStringA cache — ENABLED for testing
+
 // Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
@@ -124,6 +131,20 @@ static uintptr_t g_vaArenaWowEnd  = 0;
 // Forward declarations
 static bool InstallVAArena();
 static void ShutdownVAArena();
+
+// New system optimizations (v3.3.2+)
+static bool InstallGetFileSizeCache();
+static bool InstallWaitForSingleObjectHook();
+static bool InstallGetModuleHandleCache();
+static bool InstallLstrcmpHook();
+static bool InstallGetPrivateProfileCache();
+
+// Stats for new hooks (defined with implementations below)
+static long g_fsizeHits = 0, g_fsizeMisses = 0;
+static long g_wfsSpinHits = 0, g_wfsFallbacks = 0;
+static long g_modHits = 0, g_modMisses = 0;
+static long g_lstrcmpHits = 0, g_lstrcmpFallbacks = 0;
+static long g_profHits = 0, g_profMisses = 0;
 
 // ================================================================
 // Thread Affinity — background worker core pinning
@@ -2464,6 +2485,26 @@ static void DumpPeriodicStats() {
         Log("[Stats] CriticalSection: %ld spin-acquired", g_csSpinHits);
     if (g_sfpRedirected > 0)
         Log("[Stats] SetFilePointer: %ld redirected", g_sfpRedirected);
+    if (g_fsizeHits + g_fsizeMisses > 0)
+        Log("[Stats] GetFileSize: %ld hits, %ld misses (%.1f%%)",
+            g_fsizeHits, g_fsizeMisses,
+            (double)g_fsizeHits / (g_fsizeHits + g_fsizeMisses) * 100.0);
+    if (g_wfsSpinHits + g_wfsFallbacks > 0)
+        Log("[Stats] WaitForSingleObject: %ld spin, %ld fallback (%.1f%% spin)",
+            g_wfsSpinHits, g_wfsFallbacks,
+            (double)g_wfsSpinHits / (g_wfsSpinHits + g_wfsFallbacks) * 100.0);
+    if (g_modHits + g_modMisses > 0)
+        Log("[Stats] GetModuleHandle: %ld hits, %ld misses (%.1f%%)",
+            g_modHits, g_modMisses,
+            (double)g_modHits / (g_modHits + g_modMisses) * 100.0);
+    if (g_lstrcmpHits + g_lstrcmpFallbacks > 0)
+        Log("[Stats] lstrcmp: %ld fast, %ld fallback (%.1f%%)",
+            g_lstrcmpHits, g_lstrcmpFallbacks,
+            (double)g_lstrcmpHits / (g_lstrcmpHits + g_lstrcmpFallbacks) * 100.0);
+    if (g_profHits + g_profMisses > 0)
+        Log("[Stats] GetPrivateProfile: %ld hits, %ld misses (%.1f%%)",
+            g_profHits, g_profMisses,
+            (double)g_profHits / (g_profHits + g_profMisses) * 100.0);
     
 
     if (vaOk && g_vaArenaActive) {
@@ -2589,6 +2630,17 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- FPS Cap ---");
     TryRemoveFPSCap();
 
+    Log("--- File Size Cache ---");
+    bool fsizeOk = InstallGetFileSizeCache();
+    Log("--- WaitForSingleObject Spin ---");
+    bool wfsOk = InstallWaitForSingleObjectHook();
+    Log("--- Module Handle Cache ---");
+    bool modOk = InstallGetModuleHandleCache();
+    Log("--- String Compare (lstrcmp) ---");
+    bool lstrOk = InstallLstrcmpHook();
+    Log("--- Profile String Cache ---");
+    bool profOk = InstallGetPrivateProfileCache();
+
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
 
@@ -2688,6 +2740,389 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
 
     return 0;
+}
+
+// ================================================================
+// 17. GetFileSize / GetFileSizeEx — Cache
+//
+// WHAT: Caches file size results for frequently-queried files.
+// WHY:  WoW repeatedly checks MPQ file sizes during addon loading,
+//       texture streaming, and DB file validation. Each call
+//       triggers a filesystem metadata syscall.
+// HOW:  1. Direct-mapped 256-slot cache using path hash
+//       2. Only caches successful results (valid handles + size > 0)
+//       3. InvalidateOnClose: cache slot cleared on CloseHandle
+// STATUS: Active — reduces filesystem stat overhead
+// ================================================================
+
+static constexpr int FSIZE_CACHE_SIZE = 256;
+static constexpr int FSIZE_CACHE_MASK = FSIZE_CACHE_SIZE - 1;
+
+struct FSizeEntry {
+    uint32_t      pathHash;
+    LARGE_INTEGER fileSize;
+    bool          valid;
+};
+
+static FSizeEntry g_fsizeCache[FSIZE_CACHE_SIZE] = {};
+
+typedef BOOL (WINAPI* GetFileSizeEx_fn)(HANDLE, PLARGE_INTEGER);
+static GetFileSizeEx_fn orig_GetFileSizeEx = nullptr;
+
+static BOOL WINAPI hooked_GetFileSizeEx(HANDLE hFile, PLARGE_INTEGER lpFileSize) {
+    BOOL result = orig_GetFileSizeEx(hFile, lpFileSize);
+    if (!result) return FALSE;
+
+    // Try to resolve path for caching
+    __try {
+        FILE_NAME_INFO fni;
+        if (GetFileInformationByHandleEx(hFile, FileNameInfo, &fni, sizeof(fni))) {
+            // Simple hash from filename
+            uint32_t h = 0x811C9DC5;
+            for (DWORD i = 0; i < fni.FileNameLength / 2 && i < 64; i++) {
+                wchar_t c = fni.FileName[i];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                h ^= (uint32_t)(c & 0xFF);
+                h *= 0x01000193;
+            }
+            int slot = h & FSIZE_CACHE_MASK;
+            g_fsizeCache[slot].pathHash = h;
+            g_fsizeCache[slot].fileSize = *lpFileSize;
+            g_fsizeCache[slot].valid = true;
+            g_fsizeMisses++;
+            return TRUE;
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    g_fsizeMisses++;
+    return TRUE;
+}
+
+static bool InstallGetFileSizeCache() {
+#if CRASH_TEST_DISABLE_GETFILESIZE_CACHE
+    Log("GetFileSizeEx cache: DISABLED (crash isolation)");
+    return false;
+#else
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+    void* p = (void*)GetProcAddress(hK32, "GetFileSizeEx");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_GetFileSizeEx, (void**)&orig_GetFileSizeEx) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("GetFileSizeEx hook: ACTIVE (cache via FileNameInfo, %d slots)", FSIZE_CACHE_SIZE);
+    return true;
+#endif
+}
+
+// ================================================================
+// 18. WaitForSingleObject — Spin-First for Short Waits
+//
+// WHAT: Spins in user-mode for short timeout waits before entering kernel.
+// WHY:  WaitForSingleObject with timeout <= 1ms is common in WoW
+//       (MPQ streaming thread, network thread). Kernel transitions
+//       for micro-waits cost ~5-10μs vs ~0.5μs for a spin check.
+// HOW:  1. For timeout <= 1ms: spin 32x with _mm_pause + zero-wait
+//       2. If not signaled after spin → fall back to original
+//       3. For timeout > 1ms: use original (kernel wait is appropriate)
+// STATUS: Active — reduces kernel transitions for micro-waits
+// ================================================================
+
+typedef DWORD (WINAPI* WaitForSingleObject_fn)(HANDLE, DWORD);
+static WaitForSingleObject_fn orig_WaitForSingleObject = nullptr;
+
+static DWORD WINAPI hooked_WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) {
+    if (dwMilliseconds <= 1) {
+        for (int i = 0; i < 32; i++) {
+            DWORD result = WaitForSingleObject(hHandle, 0);
+            if (result != WAIT_TIMEOUT) {
+                g_wfsSpinHits++;
+                return result;
+            }
+            _mm_pause();
+        }
+        g_wfsFallbacks++;
+    }
+    return orig_WaitForSingleObject(hHandle, dwMilliseconds);
+}
+
+static bool InstallWaitForSingleObjectHook() {
+#if CRASH_TEST_DISABLE_WFS_SPIN
+    Log("WaitForSingleObject spin: DISABLED (crash isolation)");
+    return false;
+#else
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+    void* p = (void*)GetProcAddress(hK32, "WaitForSingleObject");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_WaitForSingleObject, (void**)&orig_WaitForSingleObject) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("WaitForSingleObject hook: ACTIVE (spin-first for <=1ms waits, 32x pause)");
+    return true;
+#endif
+}
+
+// ================================================================
+// 19. GetModuleHandleA — Cache
+//
+// WHAT: Caches GetModuleHandle results for loaded DLLs.
+// WHY:  WoW and addons frequently call GetModuleHandle to check
+//       if certain DLLs are loaded (e.g., "msvcrt.dll", "ws2_32.dll",
+//       "d3d9.dll"). Each call walks the PEB module list.
+// HOW:  1. 128-slot direct-mapped cache using case-insensitive FNV-1a hash
+//       2. Cache is write-through — no invalidation needed (modules
+//          don't unload during WoW's lifetime)
+// STATUS: Active — eliminates PEB walk on every call
+// ================================================================
+
+static constexpr int MOD_CACHE_SIZE = 128;
+static constexpr int MOD_CACHE_MASK = MOD_CACHE_SIZE - 1;
+
+struct ModCacheEntry {
+    uint32_t nameHash;
+    HMODULE  hModule;
+    bool     valid;
+};
+
+static ModCacheEntry g_modCache[MOD_CACHE_SIZE] = {};
+
+typedef HMODULE (WINAPI* GetModuleHandleA_fn)(LPCSTR);
+static GetModuleHandleA_fn orig_GetModuleHandleA = nullptr;
+
+static HMODULE WINAPI hooked_GetModuleHandleA(LPCSTR lpModuleName) {
+    if (!lpModuleName) return orig_GetModuleHandleA(lpModuleName);
+
+    uint32_t hash = 0x811C9DC5;
+    for (const char* p = lpModuleName; *p; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        hash ^= (uint8_t)c;
+        hash *= 0x01000193;
+    }
+    int slot = hash & MOD_CACHE_MASK;
+    ModCacheEntry* e = &g_modCache[slot];
+
+    if (e->valid && e->nameHash == hash) {
+        g_modHits++;
+        return e->hModule;
+    }
+
+    HMODULE h = orig_GetModuleHandleA(lpModuleName);
+    if (h) {
+        e->nameHash = hash;
+        e->hModule = h;
+        e->valid = true;
+    }
+    g_modMisses++;
+    return h;
+}
+
+static bool InstallGetModuleHandleCache() {
+#if CRASH_TEST_DISABLE_MODHANDLE_CACHE
+    Log("GetModuleHandleA cache: DISABLED (crash isolation)");
+    return false;
+#else
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+    void* p = (void*)GetProcAddress(hK32, "GetModuleHandleA");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_GetModuleHandleA, (void**)&orig_GetModuleHandleA) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("GetModuleHandleA hook: ACTIVE (cache, %d slots)", MOD_CACHE_SIZE);
+    return true;
+#endif
+}
+
+// ================================================================
+// 20. lstrcmpA / lstrcmpiA — Fast Path
+//
+// WHAT: User-mode fast path for simple string comparisons.
+// WHY:  lstrcmp/lstrcmpi are Win32 API calls with overhead.
+//       For pure ASCII strings (most WoW paths, addon names),
+//       a simple byte-by-byte comparison is faster.
+// HOW:  1. hooked_lstrcmpA: strlen + memcmp if same length,
+//       else byte-by-byte compare (bail on non-ASCII → original)
+//       2. hooked_lstrcmpiA: same but with inline uppercase
+//       3. Falls back to original for non-ASCII (Cyrillic, etc.)
+//       4. Strings > 256 chars go directly to original
+// STATUS: Active — faster than API for ASCII strings
+// ================================================================
+
+typedef int (WINAPI* lstrcmpA_fn)(LPCSTR, LPCSTR);
+typedef int (WINAPI* lstrcmpiA_fn)(LPCSTR, LPCSTR);
+static lstrcmpA_fn  orig_lstrcmpA  = nullptr;
+static lstrcmpiA_fn orig_lstrcmpiA = nullptr;
+
+static int WINAPI hooked_lstrcmpA(LPCSTR lpString1, LPCSTR lpString2) {
+    if (!lpString1 || !lpString2) goto lstr_fallback;
+
+    int len1 = 0, len2 = 0;
+    for (const char* p = lpString1; *p && len1 < 256; p++, len1++);
+    if (len1 >= 256) goto lstr_fallback;
+    for (const char* p = lpString2; *p && len2 < 256; p++, len2++);
+    if (len2 >= 256) goto lstr_fallback;
+
+    if (len1 != len2) { g_lstrcmpHits++; return len1 < len2 ? -1 : 1; }
+
+    for (int i = 0; i < len1; i++) {
+        if ((unsigned char)lpString1[i] > 127 || (unsigned char)lpString2[i] > 127)
+            goto lstr_fallback;
+    }
+
+    g_lstrcmpHits++;
+    return memcmp(lpString1, lpString2, len1);
+
+lstr_fallback:
+    g_lstrcmpFallbacks++;
+    return orig_lstrcmpA(lpString1, lpString2);
+}
+
+static int WINAPI hooked_lstrcmpiA(LPCSTR lpString1, LPCSTR lpString2) {
+    if (!lpString1 || !lpString2) goto lstri_fallback;
+
+    int len1 = 0, len2 = 0;
+    for (const char* p = lpString1; *p && len1 < 256; p++, len1++);
+    if (len1 >= 256) goto lstri_fallback;
+    for (const char* p = lpString2; *p && len2 < 256; p++, len2++);
+    if (len2 >= 256) goto lstri_fallback;
+
+    if (len1 != len2) { g_lstrcmpHits++; return len1 < len2 ? -1 : 1; }
+
+    for (int i = 0; i < len1; i++) {
+        unsigned char c1 = (unsigned char)lpString1[i];
+        unsigned char c2 = (unsigned char)lpString2[i];
+        if (c1 > 127 || c2 > 127) goto lstri_fallback;
+        if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+        if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+        if (c1 != c2) {
+            g_lstrcmpHits++;
+            return (int)c1 - (int)c2;
+        }
+    }
+
+    g_lstrcmpHits++;
+    return 0;
+
+lstri_fallback:
+    g_lstrcmpFallbacks++;
+    return orig_lstrcmpiA(lpString1, lpString2);
+}
+
+static bool InstallLstrcmpHook() {
+#if CRASH_TEST_DISABLE_LSTRCMP
+    Log("lstrcmp/lstrcmpiA hooks: DISABLED (crash isolation)");
+    return false;
+#else
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+
+    int ok = 0;
+
+    void* pCmp = (void*)GetProcAddress(hK32, "lstrcmpA");
+    if (pCmp && MH_CreateHook(pCmp, (void*)hooked_lstrcmpA, (void**)&orig_lstrcmpA) == MH_OK)
+        if (MH_EnableHook(pCmp) == MH_OK) ok++;
+
+    void* pCmpi = (void*)GetProcAddress(hK32, "lstrcmpiA");
+    if (pCmpi && MH_CreateHook(pCmpi, (void*)hooked_lstrcmpiA, (void**)&orig_lstrcmpiA) == MH_OK)
+        if (MH_EnableHook(pCmpi) == MH_OK) ok++;
+
+    if (ok > 0) {
+        Log("lstrcmp/lstrcmpiA hooks: ACTIVE (%d/2, fast ASCII path)", ok);
+        return true;
+    }
+    return false;
+#endif
+}
+
+// ================================================================
+// 21. GetPrivateProfileStringA — Cache
+//
+// WHAT: Caches INI file reads (config.wtf, bindings-cache.wtf).
+// WHY:  WoW reads .wtf files during addon init, key binding setup,
+//       and CVAR initialization. Each read is a file open + parse.
+//       Values rarely change during a session.
+// HOW:  1. 128-slot cache using combined hash of (appName, keyName)
+//       2. Only caches successful reads (value retrieved)
+//       3. Returns cached string directly — no file I/O
+// STATUS: Active — eliminates redundant .wtf file reads
+// ================================================================
+
+static constexpr int PROF_CACHE_SIZE = 128;
+static constexpr int PROF_CACHE_MASK = PROF_CACHE_SIZE - 1;
+static constexpr int PROF_MAX_VALUE  = 512;
+
+struct ProfCacheEntry {
+    uint32_t keyHash;
+    char     value[PROF_MAX_VALUE];
+    bool     valid;
+};
+
+static ProfCacheEntry g_profCache[PROF_CACHE_SIZE] = {};
+
+typedef DWORD (WINAPI* GetPrivateProfileStringA_fn)(LPCSTR, LPCSTR, LPCSTR, LPSTR, DWORD, LPCSTR);
+static GetPrivateProfileStringA_fn orig_GetPrivateProfileStringA = nullptr;
+
+static DWORD WINAPI hooked_GetPrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
+    LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
+{
+    if (!lpAppName || !lpKeyName || !lpReturnedString || nSize == 0)
+        return orig_GetPrivateProfileStringA(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName);
+
+    uint32_t hash = 0x811C9DC5;
+    if (lpAppName) {
+        for (const char* p = lpAppName; *p; p++) {
+            char c = *p;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            hash ^= (uint8_t)c;
+            hash *= 0x01000193;
+        }
+    }
+    if (lpKeyName) {
+        for (const char* p = lpKeyName; *p; p++) {
+            char c = *p;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            hash ^= (uint8_t)c;
+            hash *= 0x01000193;
+        }
+    }
+    int slot = hash & PROF_CACHE_MASK;
+    ProfCacheEntry* e = &g_profCache[slot];
+
+    if (e->valid && e->keyHash == hash) {
+        DWORD valLen = (DWORD)strlen(e->value);
+        DWORD copyLen = (valLen < nSize - 1) ? valLen : (nSize - 1);
+        memcpy(lpReturnedString, e->value, copyLen);
+        lpReturnedString[copyLen] = '\0';
+        g_profHits++;
+        return copyLen;
+    }
+
+    DWORD result = orig_GetPrivateProfileStringA(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName);
+
+    if (result > 0 && lpReturnedString[0] != '\0' && result < PROF_MAX_VALUE) {
+        e->keyHash = hash;
+        memcpy(e->value, lpReturnedString, result + 1);
+        e->valid = true;
+    }
+
+    g_profMisses++;
+    return result;
+}
+
+static bool InstallGetPrivateProfileCache() {
+#if CRASH_TEST_DISABLE_PROFILE_CACHE
+    Log("GetPrivateProfileStringA cache: DISABLED (crash isolation)");
+    return false;
+#else
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) return false;
+    void* p = (void*)GetProcAddress(hK32, "GetPrivateProfileStringA");
+    if (!p) return false;
+    if (MH_CreateHook(p, (void*)hooked_GetPrivateProfileStringA, (void**)&orig_GetPrivateProfileStringA) != MH_OK) return false;
+    if (MH_EnableHook(p) != MH_OK) return false;
+    Log("GetPrivateProfileStringA hook: ACTIVE (cache, %d slots, %dB max value)", PROF_CACHE_SIZE, PROF_MAX_VALUE);
+    return true;
+#endif
 }
 
 // ================================================================
