@@ -84,7 +84,8 @@
 #define CRASH_TEST_DISABLE_MODHANDLE_CACHE      0   // GetModuleHandleA cache — ENABLED for testing
 #define CRASH_TEST_DISABLE_LSTRCMP              0   // lstrcmp/lstrcmpiA fast path — ENABLED for testing
 #define CRASH_TEST_DISABLE_PROFILE_CACHE        0   // GetPrivateProfileStringA cache — ENABLED for testing
-#define CRASH_TEST_DISABLE_MSGPUMP_RC1          0   // sub_869E00 frame-continue (testbuild-msgpump-rc1)
+#define CRASH_TEST_DISABLE_MSGPUMP_RC1          1   // sub_869E00 frame-continue (DISABLED — causes deadlocks on stale command state)
+#define CRASH_TEST_DISABLE_SWAP_RC1             0   // sub_69E220 swap optimization — glFinish skip (Vulkan/D3D9 only)
 
 // Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
@@ -2636,6 +2637,126 @@ static bool InstallMsgPumpHook() {
 #endif
 }
 
+// ================================================================
+// 20. sub_69E220 — Swap/Present Optimization (testbuild-swap-rc1)
+//
+// WHAT: Hooks WoW's frame-end swap function (0x0069E220).
+//       Replicates the function body but SKIPS glFinish() entirely.
+//
+// WHY:  glFinish() is a full GPU pipeline flush. In pure OpenGL it
+//       ensures the GPU has finished rendering before presenting.
+//       But with Vulkan/D3D9 wrapper (d3d9.dll → Vulkan), the
+//       Vulkan presentation engine (vkQueuePresentKHR) already
+//       synchronizes — it won't present until all command buffers
+//       are complete. The glFinish() is 100% dead overhead.
+//
+//       In raids with heavy particle effects, glFinish() blocks
+//       the CPU for milliseconds waiting for the GPU to drain
+//       its entire command queue. This causes frametime spikes.
+//
+// HOW:  1. Replicate sub_69E220 body in C
+//       2. Call all sub-functions identically
+//       3. Skip glFinish() — let Vulkan handle sync via present
+//       4. wglSwapLayerBuffers goes through unchanged (wrapper
+//          maps it to vkQueuePresentKHR)
+//
+//       If using pure OpenGL, set CRASH_TEST_DISABLE_SWAP_RC1=1.
+//
+// SAFETY: All sub-function calls are at original addresses.
+//         Only glFinish is skipped. Falls back to original
+//         if any address validation fails.
+//
+// STATUS: Test build only — testbuild-swap-rc1
+// ================================================================
+
+typedef void (__cdecl* SubFn)();
+typedef void (__fastcall* SubFnThis)(void*, void*);
+
+static SubFn orig_sub_682E50 = (SubFn)0x00682E50;
+static SubFnThis orig_sub_6841D0 = (SubFnThis)0x006841D0;
+static SubFnThis orig_sub_6836D0 = (SubFnThis)0x006836D0;
+static SubFnThis orig_sub_6833A0 = (SubFnThis)0x006833A0;
+
+typedef void (WINAPI* wglSwapLayerBuffers_fn)(HDC, UINT);
+static wglSwapLayerBuffers_fn orig_wglSwapLayerBuffers = nullptr;
+
+typedef void (__fastcall* SwapPresent_fn)(void*, void*);
+static SwapPresent_fn orig_SwapPresent = nullptr;
+static uint64_t g_glFinishSkips = 0;
+
+static void __fastcall hooked_SwapPresent(void* This, void* unused) {
+    char* T = (char*)This;
+
+    // sub_682E50()
+    orig_sub_682E50();
+
+    // if ([esi+2934h]) sub_6841D0(this)
+    void* edi = *(void**)(T + 0x2934);
+    if (edi)
+        orig_sub_6841D0(This, nullptr);
+
+    // Virtual call: eax = [esi]; edx = [eax+10h]; edx(This)
+    void* vtable = *(void**)T;
+    void* renderFn = *(void**)((char*)vtable + 0x10);
+    if (renderFn)
+        ((void(__fastcall*)(void*, void*))renderFn)(This, nullptr);
+
+    // Check [esi+275Ch] & 0x40 → wglSwapLayerBuffers, else glFinish
+    if (T[0x275C] & 0x40) {
+        HDC hdc = *(HDC*)(T + 0x3AF8);
+        if (orig_wglSwapLayerBuffers && hdc)
+            orig_wglSwapLayerBuffers(hdc, 1);
+    } else {
+        // SKIP glFinish — Vulkan/D3D9 handles presentation sync
+        g_glFinishSkips++;
+    }
+
+    // Post-swap cleanup
+    orig_sub_6836D0(This, nullptr);
+    orig_sub_6833A0(This, nullptr);
+    // nullsub_3 (0x005EEB70) is a 1-byte no-op — skipped
+}
+
+static bool InstallSwapPresentHook() {
+#if CRASH_TEST_DISABLE_SWAP_RC1
+    Log("Swap present hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x0069E220;
+
+    // Verify prologue: push esi; mov esi, ecx
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x56 || p[1] != 0x8B || p[2] != 0xF1) {
+        Log("Swap hook: BAD PROLOGUE at 0x%08X (expected 56 8B F1)", (uintptr_t)target);
+        return false;
+    }
+
+    // Resolve wglSwapLayerBuffers from opengl32.dll
+    HMODULE hGL = GetModuleHandleA("opengl32.dll");
+    if (!hGL) {
+        Log("Swap hook: opengl32.dll not loaded");
+        return false;
+    }
+    orig_wglSwapLayerBuffers = (wglSwapLayerBuffers_fn)GetProcAddress(hGL, "wglSwapLayerBuffers");
+    if (!orig_wglSwapLayerBuffers) {
+        Log("Swap hook: wglSwapLayerBuffers not found");
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_SwapPresent, (void**)&orig_SwapPresent) != MH_OK) {
+        Log("Swap hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("Swap hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("Swap present hook: ACTIVE (sub_69E220 @ 0x0069E220 — glFinish skip, Vulkan/D3D9)");
+    return true;
+#endif
+}
+
 // Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
     Sleep(5000);
@@ -2725,6 +2846,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Message Pump (testbuild) ---");
     bool msgPumpOk = InstallMsgPumpHook();
+
+    Log("--- Swap/Present (testbuild) ---");
+    bool swapOk = InstallSwapPresentHook();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -2824,6 +2948,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
     Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
     Log("  [%s] MsgPump (frame-continue rc1)", msgPumpOk   ? " OK " : "SKIP");
+    Log("  [%s] Swap/Present (glFinish skip)", swapOk      ? " OK " : "SKIP");
 
     return 0;
 }
