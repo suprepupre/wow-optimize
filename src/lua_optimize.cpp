@@ -879,8 +879,6 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_HITS",      (double)fpStats.formatFastHits);
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_FALLBACKS", (double)fpStats.formatFallbacks);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_FASTPATH_ACTIVE",    fpStats.active);
-        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UNITNAME_HITS",      (double)fpStats.unitNameHits);
-        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UNITNAME_FALLBACKS", (double)fpStats.unitNameFallbacks);
  
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
