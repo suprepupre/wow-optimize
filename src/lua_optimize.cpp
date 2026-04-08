@@ -22,7 +22,7 @@
 //        loading(256KB)
 //      - Frame-time based pre-adjustment: slow frames → less GC
 //      - Adaptive post-GC: smoothed GC time → adjusts base step sizes
-//      - Emergency GC: triggers full collect if memory > 300 MB
+//      - Emergency GC (incremental): triggers 1MB GC steps if memory > 500 MB (never full collect — avoids main thread stalls)
 //
 //   4. Addon Interface — bidirectional communication with Lua addons
 //      via global variables (LUABOOST_DLL_*, LUABOOST_ADDON_*)
@@ -559,8 +559,8 @@ static bool PreSizeStringTable(lua_State* L) {
 //       5. Frame-time pre-adjustment: slow frames → halve GC step
 //       6. Adaptive post-GC: smoothed GC time → adjusts base tiers
 //          (>2ms → decrease, <0.6ms → increase)
-//       7. Emergency GC: if memory >300MB and growing → full collect
-//          (2 sec cooldown, 5MB growth threshold)
+//       7. Emergency GC (incremental): if memory >500MB and growing → 1MB GC step (no full collect)
+//          (30 sec cooldown, 10MB growth threshold)
 // STATUS: Active — main GC optimization, called ~60/sec from Sleep hook
 // ================================================================
 static bool OptimizeGC(lua_State* L) {
@@ -717,18 +717,23 @@ static void StepGC(lua_State* L, double frameMs) {
         State.luaMemoryKB = kb + (b / 1024.0);
     }
 
-    // Emergency GC: only trigger if memory is growing AND above threshold
-    // Cooldown prevents spam when live data exceeds threshold (heavy addons)
+    // Emergency GC: INCREMENTAL only — never block main thread with full collect.
+    // Full collect (LUA_GCCOLLECT) causes 500ms-2s stalls → network timeout → ping spike.
+    // Instead: aggressive incremental steps spread over multiple frames.
+    // Threshold raised to 500 MB — 300 MB is normal for HD client + 20+ addons.
+    // Cooldown: 30 seconds to prevent continuous GC during raids.
     static double g_lastEmergencyMem = 0.0;
     static DWORD  g_lastEmergencyTick = 0;
 
-    if (State.luaMemoryKB > 300 * 1024 && !Config.isLoading) {
+    if (State.luaMemoryKB > 500 * 1024 && !Config.isLoading) {
         DWORD nowTick = GetTickCount();
         double memMB = State.luaMemoryKB / 1024.0;
 
-        // Only trigger if memory grew since last emergency GC AND cooldown expired (2 sec)
-        if (memMB > g_lastEmergencyMem + 5.0 && (nowTick - g_lastEmergencyTick) > 2000) {
-            Api.lua_gc(L, LUA_GCCOLLECT, 0);
+        // Only trigger if memory grew since last emergency GC AND cooldown expired (30 sec)
+        if (memMB > g_lastEmergencyMem + 10.0 && (nowTick - g_lastEmergencyTick) > 30000) {
+            // Incremental step: 1 MB per frame, spread across multiple frames.
+            // This avoids the stop-the-world stall of LUA_GCCOLLECT.
+            Api.lua_gc(L, LUA_GCSTEP, 1024);  // 1 MB step
             State.fullCollects++;
 
             int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
@@ -738,7 +743,7 @@ static void StepGC(lua_State* L, double frameMs) {
             g_lastEmergencyMem = afterMB;
             g_lastEmergencyTick = nowTick;
 
-            Log("[LuaOpt] EMERGENCY GC: %.1f MB -> %.1f MB", memMB, afterMB);
+            Log("[LuaOpt] EMERGENCY GC (incremental): %.1f MB -> %.1f MB", memMB, afterMB);
         }
     }
 }
