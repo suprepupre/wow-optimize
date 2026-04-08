@@ -1,3 +1,39 @@
+// ================================================================
+// Lua VM Optimizer — GC, allocator, string table, addon interface
+// WoW 3.3.5a build 12340 (IDA Pro verified addresses)
+//
+// WHAT: Comprehensive optimization of WoW's Lua 5.1 virtual machine.
+//
+// COMPONENTS:
+//   1. Lua Allocator Replacement — mimalloc for Lua VM memory
+//      Replaces WoW's default allocator (0x008558E0, SMemAlloc-based)
+//      with mimalloc. All Lua objects (TString, Table, Closure, etc.)
+//      are allocated through mimalloc instead of WoW's pool allocator.
+//
+//   2. String Table Pre-sizing — expands Lua's string hash table from
+//      default 32-64 buckets to 32768 buckets at startup. Heavy addon
+//      sessions create 30k-50k strings — pre-sizing avoids rehash freezes.
+//
+//   3. GC Optimization — tunes Lua's incremental GC:
+//      - pause: 200 -> 110 (start GC sooner)
+//      - stepmul: 200 -> 300 (do more work per step)
+//      - stops auto-GC, uses manual stepping every frame
+//      - 4-tier step size: normal(64KB), combat(16KB), idle(128KB),
+//        loading(256KB)
+//      - Frame-time based pre-adjustment: slow frames → less GC
+//      - Adaptive post-GC: smoothed GC time → adjusts base step sizes
+//      - Emergency GC: triggers full collect if memory > 300 MB
+//
+//   4. Addon Interface — bidirectional communication with Lua addons
+//      via global variables (LUABOOST_DLL_*, LUABOOST_ADDON_*)
+//      - Reads combat/idle/loading state from addon
+//      - Writes GC stats, memory usage, version to addon
+//      - Processes GC requests from addon (step/full collect)
+//
+//   5. UI Reload Detection — detects lua_State changes (UI reload)
+//      and reinitializes all optimizations for the new VM.
+// ================================================================
+
 #include "lua_optimize.h"
 #include "combatlog_optimize.h"
 #include "ui_cache.h"
@@ -16,7 +52,9 @@
 extern bool g_isMultiClient;
 extern "C" void Log(const char* fmt, ...);
 
-// Lua 5.1 types.
+// ================================================================
+// Lua 5.1 types and GC constants.
+// ================================================================
 
 typedef struct lua_State lua_State;
 typedef double lua_Number;
@@ -233,6 +271,20 @@ static lua_State* ReadLuaState() {
 
 // ================================================================
 //  Lua Allocator Replacement — mimalloc for Lua VM
+//
+// WHAT: Replaces WoW's default Lua allocator (0x008558E0, SMemAlloc-based)
+//       with mimalloc by directly modifying global_State->frealloc.
+// WHY:  WoW's default allocator is a pool-based allocator using
+//       SMemAlloc which has significant overhead for Lua's allocation
+//       patterns (many small, short-lived objects).
+// HOW:  1. Reads global_State pointer from lua_State + 0x14
+//       2. Reads current frealloc function pointer (globalState + 0x0C)
+//       3. Verifies it matches expected address (0x008558E0)
+//       4. Writes &MimallocLuaAlloc to globalState + 0x0C
+//       5. MimallocLuaAlloc: routes to mimalloc if ptr is in mimalloc
+//          heap, otherwise migrates from old allocator
+// SAFETY: Validates old/new allocator with test allocs before switching
+// STATUS: Active — all Lua VM allocations go through mimalloc
 // ================================================================
 
 typedef void* (__cdecl *lua_Alloc_fn)(void* ud, void* ptr, size_t osize, size_t nsize);
@@ -428,9 +480,16 @@ static void ResetAllocStats() {
 }
 
 // String table pre-sizer.
-// Lua 5.1 starts with 32-64 buckets. Heavy addon sessions accumulate
-// 30k-50k strings, causing rehash freezes. We pre-size to 32768 at startup.
-// global_State: +0x00 strt.hash, +0x04 strt.nuse, +0x08 strt.size
+//
+// WHAT: Expands Lua's string hash table from default 32-64 to 32768.
+// WHY:  Lua 5.1 starts with 32-64 buckets. Heavy addon sessions
+//       accumulate 30k-50k strings, causing long hash chains and
+//       rehash freezes. Pre-sizing avoids incremental rehashing.
+// HOW:  1. Reads current string table size from global_State + 0x08
+//       2. If < 32768: calls luaS_resize(L, 32768)
+//       3. Verifies new size matches target
+//       4. 32768 buckets = 128 KB of pointer array (32768 * 4 bytes)
+// STATUS: Active — prevents string table rehash stutter
 
 static constexpr int STRING_TABLE_TARGET_SIZE = 32768;  // 128 KB of pointers
 
@@ -482,6 +541,28 @@ static bool PreSizeStringTable(lua_State* L) {
 }
 
 
+// ================================================================
+//  GC Optimization — 4-tier adaptive stepping
+//
+// WHAT: Tunes Lua's incremental garbage collector for WoW's usage.
+// WHY:  Default Lua GC (pause=200, stepmul=200) causes stutter because:
+//       1. It runs too infrequently → memory spikes → big collects
+//       2. Step size doesn't match frame budget
+// HOW:  1. Sets pause=110, stepmul=300 (more aggressive, smaller steps)
+//       2. Stops auto-GC (LUA_GCSTOP) — we control when GC runs
+//       3. Steps GC every frame from hooked_Sleep via StepGC()
+//       4. 4-tier step size:
+//          - normal:  64 KB/frame (default gameplay)
+//          - combat:  16 KB/frame (reduce GC stutter during combat)
+//          - idle:    128 KB/frame (catch up on garbage when idle)
+//          - loading: 256 KB/frame (aggressive cleanup during loads)
+//       5. Frame-time pre-adjustment: slow frames → halve GC step
+//       6. Adaptive post-GC: smoothed GC time → adjusts base tiers
+//          (>2ms → decrease, <0.6ms → increase)
+//       7. Emergency GC: if memory >300MB and growing → full collect
+//          (2 sec cooldown, 5MB growth threshold)
+// STATUS: Active — main GC optimization, called ~60/sec from Sleep hook
+// ================================================================
 static bool OptimizeGC(lua_State* L) {
     if (!Api.lua_gc) return false;
 
@@ -703,6 +784,20 @@ static double ReadLuaGlobal_Number(lua_State* L, const char* name, double fallba
 }
 
 
+// ================================================================
+//  Addon State Reader — reads globals set by !LuaBoost addon
+//
+// WHAT: Reads Lua globals (LUABOOST_ADDON_COMBAT, _IDLE, _LOADING,
+//       _STEP_*) to synchronize DLL behavior with addon state.
+// WHY:  The addon knows combat/idle/loading state better than the DLL
+//       can detect from outside WoW. Dynamic GC step tuning requires
+//       knowing the current game state.
+// HOW:  1. Called every 16 frames (~4-5/sec at 60fps) from OnMainThreadSleep
+//       2. Reads 3 boolean flags + 4 step size overrides
+//       3. Detects mode changes and logs them
+//       4. Skips reading on slow frames (>33ms) to avoid adding overhead
+// STATUS: Active — bidirectional addon/DLL communication
+// ================================================================
 static void ReadAddonStateFromLua(lua_State* L) {
     if (!Api.lua_getfield || !Api.lua_toboolean || !Api.lua_settop) return;
 

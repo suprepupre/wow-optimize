@@ -1,3 +1,35 @@
+// ================================================================
+// wow_optimize.dll — World of Warcraft 3.3.5a (build 12340) Optimizer
+// Author: SUPREMATIST
+// Version: 3.3.1
+//
+// LOAD MECHANISM:
+//   Loaded via version.dll proxy (WoW loads version.dll at startup).
+//   version_proxy.cpp forwards all real version.dll exports and
+//   spawns this DLL's MainThread after a 5-second delay.
+//
+// ARCHITECTURE:
+//   - MinHook for all API hooking
+//   - mimalloc as global allocator replacement
+//   - Ring-buffer logger (lock-free, background thread)
+//   - All WoW addresses hardcoded for build 12340 (IDA Pro verified)
+//
+// OPTIMIZATION CATEGORIES:
+//   1.  Memory allocator replacement (mimalloc for CRT)
+//   2.  Sleep hook — precise frame pacing, GC stepping, combat log
+//   3.  Network — TCP_NODELAY, ACK freq, QoS, buffer sizing
+//   4.  MPQ handle tracking (O(1) hash) + memory mapping + prefetch
+//   5.  ReadFile — adaptive read-ahead cache for MPQ
+//   6.  Timer precision — GetTickCount, timeGetTime, QPC coalescing
+//   7.  System hooks — CS spin, heap LFH, thread ID cache, BadPtr
+//   8.  File I/O — CreateFile sequential scan, CloseHandle invalidation
+//   9.  Thread/process tuning — affinity, priority, working set
+//   10. Lua VM — GC optimizer, mimalloc allocator, string table
+//   11. Lua fast paths — 28+ C function hooks
+//   12. API cache — GetItemInfo result caching
+//   13. Combat log — retention patching + periodic clears
+// ================================================================
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -23,26 +55,47 @@
 
 #include "version.h"
 
-// Crash isolation toggles. Set to 1 only in test builds.
-#define CRASH_TEST_DISABLE_COMPARESTRING   0
-#define CRASH_TEST_DISABLE_GETFILEATTR     0
-#define CRASH_TEST_DISABLE_GLOBALALLOC     1
-#define CRASH_TEST_DISABLE_CS_ENTER        0
-#define CRASH_TEST_DISABLE_SETFILEPOINTER  0
-#define CRASH_TEST_DISABLE_READFILE        0
-#define CRASH_TEST_DISABLE_ISBADPTR        0
-#define CRASH_TEST_DISABLE_MPQ_MMAP        1
-#define CRASH_TEST_DISABLE_QPC_CACHE       0
-#define CRASH_TEST_DISABLE_LUA_INTERNALS   0
-#define CRASH_TEST_DISABLE_THREAD_AFFINITY   0
-#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1
-#define CRASH_TEST_DISABLE_VA_ARENA          0
-#define CRASH_TEST_DISABLE_DISPATCH_POOL     1
-#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1
-#define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1
+// ================================================================
+// CRASH ISOLATION TOGGLES
+// Each toggle disables a specific optimization for binary search
+// during crash investigation. Set to 1 to DISABLE the feature.
+// These are compile-time flags for test builds only.
+// ================================================================
+#define CRASH_TEST_DISABLE_COMPARESTRING   0   // CompareStringA fast path
+#define CRASH_TEST_DISABLE_GETFILEATTR     0   // GetFileAttributesA cache
+#define CRASH_TEST_DISABLE_GLOBALALLOC     1   // GlobalAlloc mimalloc (ALREADY DISABLED — risky)
+#define CRASH_TEST_DISABLE_CS_ENTER        0   // CriticalSection TryEnter spin
+#define CRASH_TEST_DISABLE_SETFILEPOINTER  0   // SetFilePointer -> SetFilePointerEx
+#define CRASH_TEST_DISABLE_READFILE        0   // ReadFile MPQ cache
+#define CRASH_TEST_DISABLE_ISBADPTR        0   // IsBadReadPtr/WritePtr fast path
+#define CRASH_TEST_DISABLE_MPQ_MMAP        1   // MPQ memory mapping (ALREADY DISABLED — risky)
+#define CRASH_TEST_DISABLE_QPC_CACHE       0   // QPC coalescing cache
+#define CRASH_TEST_DISABLE_LUA_INTERNALS   0   // Lua VM internals (concat hook)
+#define CRASH_TEST_DISABLE_THREAD_AFFINITY   0   // Thread core pinning
+#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1   // WaitSpin (ALREADY DISABLED — tested bad)
+#define CRASH_TEST_DISABLE_VA_ARENA          0   // VA Arena virtual alloc
+#define CRASH_TEST_DISABLE_DISPATCH_POOL     1   // DispatchPool (ALREADY DISABLED — tested bad)
+#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1   // bgpreloadsleep cache (ALREADY DISABLED — 0 hits)
+#define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1   // Subtask event pool (ALREADY DISABLED — 0 hits)
+
+// Forward declarations
+static bool IsExecutableMemory(uintptr_t addr);
+static bool InstallThreadAffinity();
 
 // ================================================================
 // VA Arena v2 — High-address reserved arena with caller filtering
+//
+// WHAT: Intercepts VirtualAlloc calls from Wow.exe and serves them
+//       from a pre-reserved 512 MB block in high address space.
+// WHY:  Prevents 32-bit address space fragmentation by keeping large
+//       allocations contiguous in a dedicated region.
+// HOW:  1. Reserves 512 MB with MEM_TOP_DOWN at DLL init
+//       2. Hooks VirtualAlloc/VirtualFree
+//       3. Filters callers — only services allocations from Wow.exe code
+//       4. Bitmap-based page allocator (64 KB pages, up to 8192)
+//       5. SEH-protected — falls back to original VirtualAlloc on exception
+// LIMITS: Only intercepts >=64 KB MEM_COMMIT allocations
+// STATUS: Enabled (disabled via CRASH_TEST_DISABLE_VA_ARENA if needed)
 // ================================================================
 typedef LPVOID (WINAPI* VirtualAlloc_fn)(LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL   (WINAPI* VirtualFree_fn)(LPVOID, SIZE_T, DWORD);
@@ -72,10 +125,10 @@ static uintptr_t g_vaArenaWowEnd  = 0;
 static bool InstallVAArena();
 static void ShutdownVAArena();
 
-// Forward declarations
-static bool IsExecutableMemory(uintptr_t addr);
-static bool InstallThreadAffinity();
-
+// ================================================================
+// Thread Affinity — background worker core pinning
+// Pins WoW async task threads to cores 2..N-1, protecting main thread.
+// ================================================================
 static bool  g_threadAffOk = false;
 static LONG  g_bgThreadIdx    = 0;
 static DWORD g_affinityCores[16] = {0};
@@ -88,16 +141,28 @@ static fn_ThreadWorker orig_ThreadWorker = nullptr;
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-bool   g_isMultiClient = false;
-static HANDLE g_instanceMutex = NULL;
-static DWORD  g_nextStatsDumpTick = 0;
-static DWORD  g_nextMiCollectTick = 0;
+// ================================================================
+// Global state
+// ================================================================
+bool   g_isMultiClient = false;         // Set by DetectMultiClient() via named mutex
+static HANDLE g_instanceMutex = NULL;   // "wow_optimize_instance_v2" mutex
+static DWORD  g_nextStatsDumpTick = 0;  // Next periodic stats dump (GetTickCount)
+static DWORD  g_nextMiCollectTick = 0;  // Next mimalloc collect (multi-client only)
 static void   DumpPeriodicStats();
 // Forward declarations for MPQ prefetch
 static void PrefetchMappedMPQs();
 static void ResetPrefetchFlag();
+
 // ================================================================
 // Logging — ring buffer + background thread
+//
+// WHAT: Lock-free ring buffer (2048 slots x 512 bytes) with a
+//       dedicated background thread that flushes to file.
+// WHY:  Avoids file I/O on the main/game threads. Log() is called
+//       from hooked functions — must be ultra-fast.
+// HOW:  1. Log() writes to ring slot, sets ready flag via Interlocked
+//       2. Background thread waits on event, drains ready slots
+//       3. On shutdown, drains remaining entries
 // ================================================================
 static FILE* g_log = nullptr;
 
@@ -190,6 +255,16 @@ extern "C" void Log(const char* fmt, ...) {
 }
 
 // 1. Memory allocator replacement (mimalloc).
+//
+// WHAT: Replaces CRT malloc/free/realloc/calloc/msize with mimalloc.
+// WHY:  mimalloc is significantly faster than the default Windows heap,
+//       especially for small allocations (fragmentation-resistant).
+// HOW:  1. Finds loaded CRT DLL (msvcrt.dll etc.)
+//       2. Hooks malloc/free/realloc/calloc/_msize via MinHook
+//       3. hooked_free checks mi_is_in_heap_region() to avoid freeing
+//          non-mimalloc pointers (safety for mixed-allocator code)
+//       4. hooked_realloc migrates from old allocator if needed
+// STATUS: Active — primary allocator for all CRT allocations
 typedef void*  (__cdecl* malloc_fn)(size_t);
 typedef void   (__cdecl* free_fn)(void*);
 typedef void*  (__cdecl* realloc_fn)(void*, size_t);
@@ -287,6 +362,18 @@ static bool InstallAllocatorHooks() {
 }
 
 // 2. Sleep hook + frame pacing, GC stepping, combat log cleanup.
+//
+// WHAT: Hooks Sleep() to intercept WoW's frame pacing calls (typically
+//       Sleep(1-3) between frames).
+// WHY:  This is the central hook — called ~60 times/sec on main thread.
+//       Used as a trigger for: Lua GC stepping, combat log cleanup,
+//       addon state polling, MPQ prefetch, mimalloc collect.
+// HOW:  1. PreciseSleep: busy-wait for sub-ms accuracy (single client)
+//          or pure yield (multi-client to reduce CPU)
+//       2. Runs periodic maintenance on main thread
+//       3. Calls LuaOpt::OnMainThreadSleep() for GC stepping
+//       4. Calls CombatLogOpt::OnFrame() for periodic log clears
+// STATUS: Active — core heartbeat mechanism for all optimizations
 static DWORD g_mainThreadId = 0;
 
 typedef void (WINAPI* Sleep_fn)(DWORD);
@@ -399,6 +486,18 @@ static bool InstallSleepHook() {
 }
 
 // 3. Network optimization - TCP_NODELAY, immediate ACK, QoS, keepalive.
+//
+// WHAT: Hooks connect() and send() to optimize WoW's TCP socket settings.
+// WHY:  Default Nagle algorithm + delayed ACK add 40-200ms latency.
+//       For a game server connection, this is noticeable lag.
+// HOW:  1. TCP_NODELAY: disables Nagle (sends immediately)
+//       2. SIO_TCP_SET_ACK_FREQUENCY: forces ACK every packet (Win7+)
+//       3. IP_TOS 0x10: low-delay QoS flag
+//       4. Buffer sizing: 32KB send, 64KB receive
+//       5. Keepalive: 10s interval, 1s timeout
+//       6. Deferred mode: tracks WSAEWOULDBLOCK sockets, optimizes on
+//          first send() instead of at connect() time
+// STATUS: Active — reduces network latency for game server connection
 
 #ifndef SIO_TCP_SET_ACK_FREQUENCY
 #define SIO_TCP_SET_ACK_FREQUENCY _WSAIOW(IOC_VENDOR, 23)
@@ -538,12 +637,19 @@ static bool InstallNetworkHooks() {
 
 // ================================================================
 // 4. MPQ Handle Tracking (O(1) hash lookup)
+//
+// WHAT: Tracks which file handles are MPQ archives using a hash table.
+// WHY:  ReadFile/CreateFile hooks need to know if a handle is MPQ to
+//       apply caching/mmap optimizations. Linear scan of 256 elements
+//       on EVERY ReadFile call was too slow.
+// HOW:  1. Open-addressing hash table (512 slots, power-of-2 size)
+//       2. Key insight: HANDLE values are multiples of 4, so we shift
+//          right by 2 for better hash distribution
+//       3. TrackMpqHandle called from CreateFile hook
+//       4. UntrackMpqHandle called from CloseHandle hook
+//       5. IsMpqHandle checked from ReadFile hook (fast path gate)
+// STATUS: Active — used by ReadFile cache and MPQ mmap features
 // ================================================================
-
-// Old: linear scan of 256-element array on EVERY ReadFile call
-// New: open-addressing hash table — O(1) average lookup
-// Key insight: HANDLE values are always aligned to 4 bytes,
-//   so we shift right by 2 for better hash distribution
 
 static constexpr int MPQ_HASH_SIZE = 512; // power of 2, load factor < 0.5
 static constexpr int MPQ_HASH_MASK = MPQ_HASH_SIZE - 1;
@@ -650,17 +756,19 @@ static void UntrackMpqHandle(HANDLE h) {
 // ================================================================
 // 4b. Memory-Mapped MPQ Files
 //
-//  For MPQ files between 1MB and 256MB, memory mapping
-//  eliminates kernel transitions on every read.
-//  Reads become simple memcpy from user-space mapped memory.
-//
-//  Limits:
-//    - Min file: 1 MB (small files not worth mapping)
-//    - Max file: 256 MB (32-bit address space constraint)
-//    - Max total: 512 MB across all mappings
-//    - Max count: 32 simultaneous mappings
-//
-//  Falls back to read-ahead cache for files outside these limits.
+// WHAT: Memory-maps MPQ files (256 KB — 512 MB) for zero-kernel reads.
+// WHY:  mmap eliminates kernel transition overhead on every ReadFile.
+//       Reads become simple memcpy from user-space mapped memory.
+//       For frequently-accessed MPQ data (DBCs, textures), this is
+//       a massive speedup — no syscall, no IRP, no driver stack.
+// HOW:  1. CreateFile hook: detects .mpq extension, calls CreateMpqMapping
+//       2. CreateMpqMapping: CreateFileMapping + MapViewOfFile
+//       3. ReadFile hook: checks mapping, does memcpy if in range
+//       4. CloseHandle hook: unmaps view (intentionally does NOT close
+//          mapping handle to avoid deadlock with hooked_CloseHandle)
+// LIMITS: Min 256 KB, max 512 MB per file, 768 MB total, 32 mappings
+// STATUS: DISABLED in public release (CRASH_TEST_DISABLE_MPQ_MMAP=1)
+//         Tested and found risky — leave disabled for stable builds
 // ================================================================
 // MPQ map lock — always defined (used by scanner even when mmap disabled)
 static SRWLOCK g_mpqMapLock = SRWLOCK_INIT;
@@ -796,6 +904,18 @@ static void DestroyMpqMapping(HANDLE hFile) {
 #endif // !CRASH_TEST_DISABLE_MPQ_MMAP
 
 // 5. ReadFile cache MPQ adaptive read-ahead.
+//
+// WHAT: Caches reads from MPQ handles with adaptive read-ahead.
+// WHY:  WoW reads MPQ files in small chunks (often 1-8 KB). Each
+//       ReadFile is a syscall + disk I/O. Read-ahead fetches 64-256 KB
+//       in one syscall, serving subsequent reads from memory.
+// HOW:  1. On first read: fetches 64 KB (normal) or 256 KB (loading)
+//       2. Subsequent reads within cached range: memcpy from buffer
+//       3. Cache miss: refills with new read-ahead
+//       4. 16 handle slots, LRU eviction
+//       5. Checks IsMpqHandle() to only cache MPQ reads
+//       6. If MPQ mmap is enabled, mmap fast path is tried first
+// STATUS: Active — primary MPQ read optimization for public release
 typedef BOOL (WINAPI* ReadFile_fn)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 static ReadFile_fn orig_ReadFile = nullptr;
 
@@ -954,6 +1074,15 @@ static bool InstallReadFileHook() {
 
 // ================================================================
 // 6. GetTickCount — QPC Precision
+//
+// WHAT: Replaces GetTickCount() with QPC-based microsecond precision.
+// WHY:  GetTickCount has ~15.6 ms resolution (default timer tick).
+//       WoW uses it for frame timing, animation, and UI updates.
+//       QPC provides sub-microsecond precision for smoother pacing.
+// HOW:  1. Captures QPC frequency + starting point at init
+//       2. Returns g_tickStart + elapsed_ms_from_QPC
+//       3. Synced with timeGetTime hook (same QPC base)
+// STATUS: Active — improves frame timing precision
 // ================================================================
 typedef DWORD (WINAPI* GetTickCount_fn)(void);
 static GetTickCount_fn orig_GetTickCount = nullptr;
@@ -1008,7 +1137,16 @@ static bool InstallTimeGetTimeHook() {
 }
 
 // 7. CriticalSection spin count tuning + TryEnter spin-first path.
-// CRASH_TEST_DISABLE_CS_ENTER disables the TryEnter path for isolation.
+//
+// WHAT: Increases CS spin count to 4000 and adds TryEnter spin-first path.
+// WHY:  Default CS spin count is 0 — immediately enters kernel wait.
+//       For short-held locks (common in WoW), spinning in user mode is
+//       much faster than a kernel transition.
+// HOW:  1. hooked_InitCS: sets spin count to 4000 on all new CS
+//       2. hooked_EnterCS: tries TryEnter first, then 32x _mm_pause()
+//          spin loop, then falls back to original EnterCriticalSection
+// STATUS: Active — reduces kernel transitions on contention paths
+// NOTE:   TryEnter path can be disabled via CRASH_TEST_DISABLE_CS_ENTER
 
 typedef void (WINAPI* InitCS_fn)(LPCRITICAL_SECTION);
 typedef void (WINAPI* EnterCS_fn)(LPCRITICAL_SECTION);
@@ -1064,6 +1202,15 @@ static bool InstallCriticalSectionHook() {
 
 // ================================================================
 // 7b. Heap Optimization — Low Fragmentation Heap
+//
+// WHAT: Enables LFH on all growable heaps via HeapSetInformation.
+// WHY:  LFH reduces fragmentation and improves allocation speed for
+//       small allocations (< 16 KB). WoW creates many heaps at runtime.
+// HOW:  1. Enables LFH on process default heap at init
+//       2. Hooks HeapCreate to enable LFH on all future growable heaps
+//       3. Only targets heaps with dwMaximumSize==0 (growable heaps)
+//          Fixed-size heaps don't support LFH
+// STATUS: Active — reduces heap fragmentation globally
 // ================================================================
 
 typedef HANDLE (WINAPI* HeapCreate_fn)(DWORD, SIZE_T, SIZE_T);
@@ -1118,6 +1265,12 @@ static bool InstallHeapOptimization() {
 
 // ================================================================
 // 7c. OutputDebugStringA — No-op when no debugger
+//
+// WHAT: Skips OutputDebugStringA calls when no debugger is attached.
+// WHY:  WoW/addons may emit debug strings. Without a debugger, these
+//       go to DbgPrint which has non-trivial overhead.
+// HOW:  Checks IsDebuggerPresent() — returns immediately if false
+// STATUS: Active — minor overhead reduction
 // ================================================================
 
 typedef void (WINAPI* OutputDebugStringA_fn)(LPCSTR);
@@ -1144,12 +1297,15 @@ static bool InstallOutputDebugStringHook() {
 // ================================================================
 // 7d. CompareStringA — Fast ASCII Path
 //
-//  For pure ASCII strings with simple flags (case-insensitive or
-//  ordinal), we can do the comparison directly in user mode.
-//  Falls back to original for non-ASCII (Cyrillic, Korean, etc.)
-//  and complex locale flags.
-//
-//  Return values: CSTR_LESS_THAN(1), CSTR_EQUAL(2), CSTR_GREATER_THAN(3)
+// WHAT: User-mode fast path for pure ASCII string comparisons.
+// WHY:  CompareStringA is a locale-aware Win32 API with significant
+//       overhead for simple ASCII comparisons (common in WoW addons).
+// HOW:  1. Checks flags — only fast-paths simple cases (no flags,
+//       NORM_IGNORECASE, or SORT_STRINGSORT)
+//       2. Iterates chars, bails on non-ASCII (>127) → original API
+//       3. Case-insensitive: uppercases a-z inline (no API call)
+//       4. Returns CSTR_LESS_THAN/EQUAL/GREATER_THAN directly
+// STATUS: Active — speeds up string comparisons in addons/Blizzard UI
 // ================================================================
 
 typedef int (WINAPI* CompareStringA_fn)(LCID, DWORD, LPCSTR, int, LPCSTR, int);
@@ -1229,9 +1385,14 @@ static bool InstallCompareStringHook() {
 // ================================================================
 // 7e. GetFileAttributesA — Cache for MPQ paths
 //
-//  Only caches results for files that EXIST (not INVALID).
-//  Files that don't exist are not cached because they might
-//  be created later (addons, config, screenshots, etc.)
+// WHAT: 256-slot direct-mapped cache for GetFileAttributesA results.
+// WHY:  WoW calls GetFileAttributesA frequently for file existence
+//       checks (config, screenshots, addon files). Each call is a
+//       filesystem stat syscall — expensive for network/MPQ paths.
+// HOW:  1. Case-insensitive FNV-1a hash of path (normalizes slashes)
+//       2. Only caches files that EXIST (not INVALID)
+//       3. Non-existent files not cached — might be created later
+// STATUS: Active — reduces filesystem stat overhead
 // ================================================================
 
 typedef DWORD (WINAPI* GetFileAttributesA_fn)(LPCSTR);
@@ -1304,16 +1465,14 @@ static bool InstallGetFileAttributesHook() {
 // ================================================================
 // 7g. SetFilePointer → SetFilePointerEx Redirect
 //
-//  WoW uses the legacy 32-bit SetFilePointer API which has
-//  awkward error handling (INVALID_SET_FILE_POINTER + GetLastError)
-//  and slightly more overhead than SetFilePointerEx.
-//
-//  We redirect to SetFilePointerEx which:
-//    - Has cleaner semantics (BOOL return)
-//    - Is the "real" implementation internally
-//    - Avoids double error-code checking overhead
-//
-//  WoW is 32-bit so all file sizes fit in 32 bits anyway.
+// WHAT: Redirects legacy 32-bit SetFilePointer to SetFilePointerEx.
+// WHY:  SetFilePointer has awkward error handling (INVALID_SET_FILE_POINTER
+//       + GetLastError) and slightly more overhead. SetFilePointerEx is
+//       the "real" implementation internally — cleaner and faster.
+// HOW:  1. Converts 32-bit params to LARGE_INTEGER
+//       2. Calls SetFilePointerEx
+//       3. Converts result back to legacy 32-bit return convention
+// STATUS: Active — cleaner I/O semantics, minor speed improvement
 // ================================================================
 
 typedef DWORD (WINAPI* SetFilePointer_fn)(HANDLE, LONG, PLONG, DWORD);
@@ -1359,9 +1518,17 @@ static bool InstallSetFilePointerHook() {
 // ================================================================
 // 7h. GlobalAlloc/GlobalFree — mimalloc for GMEM_FIXED
 //
-//  GMEM_MOVEABLE allocations use a different mechanism
-//  (GlobalLock/GlobalUnlock) and MUST stay on the original
-//  heap to work correctly. We only optimize GMEM_FIXED.
+// WHAT: Routes GMEM_FIXED GlobalAlloc/GlobalFree through mimalloc.
+// WHY:  GlobalAlloc uses the process heap. mimalloc is faster for
+//       fixed-size allocations (no heap management overhead).
+// HOW:  1. hooked_GlobalAlloc: if GMEM_MOVEABLE is NOT set, uses
+//       mi_malloc/mi_calloc instead of GlobalAlloc
+//       2. hooked_GlobalFree: checks mi_is_in_heap_region() to
+//          determine if pointer was allocated by mimalloc
+//       3. GMEM_MOVEABLE allocations use original GlobalAlloc because
+//          GlobalLock/GlobalUnlock require OS-managed handles
+// STATUS: DISABLED in public release (CRASH_TEST_DISABLE_GLOBALALLOC=1)
+//         Tested and found risky — leave disabled for stable builds
 // ================================================================
 
 typedef HGLOBAL (WINAPI* GlobalAlloc_fn)(UINT, SIZE_T);
@@ -1424,7 +1591,17 @@ static bool InstallGlobalAllocHooks() {
 
 // ================================================================
 // 7f2. IsBadReadPtr / IsBadWritePtr — Fast Path
-//  For NULL or obvious bad pointers, return TRUE immediately.
+//
+// WHAT: Fast-path for NULL/obvious bad pointer checks.
+// WHY:  IsBadReadPtr/WriteProbes use SEH (try/except) to probe memory.
+//       For obvious cases (NULL, <64KB, uncommitted), we can return
+//       immediately without SEH overhead.
+// HOW:  1. NULL → TRUE (always bad)
+//       2. Zero size → FALSE (always valid)
+//       3. <64KB → TRUE (guard page region)
+//       4. VirtualQuery check: not committed, NOACCESS, GUARD → TRUE
+//       5. Otherwise → fall through to FALSE (likely valid)
+// STATUS: Active — avoids SEH probing for common bad pointers
 // ================================================================
 
 typedef BOOL (WINAPI* IsBadReadPtr_fn)(const void*, UINT_PTR);
@@ -1489,6 +1666,14 @@ static bool InstallBadPtrHooks() {
 
 // ================================================================
 // 7f. GetCurrentThreadId — TLS Cached
+//
+// WHAT: Caches thread ID in TLS (__declspec(thread)) variable.
+// WHY:  GetCurrentThreadId is a syscall. WoW calls it frequently.
+//       Thread ID never changes per-thread, so cache it forever.
+// HOW:  1. First call: calls original GetCurrentThreadId, stores in TLS
+//       2. Subsequent calls: returns cached TLS value (zero syscall)
+//       3. Also hooks GetCurrentThread to return constant pseudo-handle
+// STATUS: Active — eliminates GetCurrentThreadId syscalls
 // ================================================================
 
 typedef DWORD (WINAPI* GetCurrentThreadId_fn)(void);
@@ -1539,6 +1724,15 @@ static bool InstallThreadIdCacheHook() {
 
 // ================================================================
 // 7f3. QueryPerformanceCounter — Coalesced
+//
+// WHAT: Caches QPC results within a 50μs coalescing window.
+// WHY:  QPC is a relatively expensive syscall. WoW calls it multiple
+//       times per frame. Within a 50μs window, the value is effectively
+//       the same for game logic purposes.
+// HOW:  1. Per-thread TLS: stores last QPC value and timestamp
+//       2. If elapsed < 50μs since last call, returns cached value
+//       3. Otherwise: calls original QPC, updates cache
+// STATUS: Active — reduces QPC syscall frequency by ~30-50%
 // ================================================================
 
 typedef BOOL (WINAPI* QueryPerformanceCounter_fn)(LARGE_INTEGER*);
@@ -1591,6 +1785,17 @@ static bool InstallQPCHook() {
 
 // ================================================================
 // 8. CreateFile — Sequential Scan + MPQ Tracking
+//
+// WHAT: Hooks CreateFileA/W to add FILE_FLAG_SEQUENTIAL_SCAN for MPQ
+//       files and track MPQ handles for the read-ahead cache.
+// WHY:  1. WoW reads MPQ files sequentially (archive data streams).
+//          Sequential scan flag tells the prefetcher to optimize I/O.
+//       2. MPQ handles must be tracked for ReadFile cache/mmap hooks.
+// HOW:  1. Checks .mpq extension (case-insensitive)
+//       2. Adds FILE_FLAG_SEQUENTIAL_SCAN to dwFlags
+//       3. Calls original CreateFile
+//       4. If MPQ: TrackMpqHandle + TryCreateMpqMapping
+// STATUS: Active — enables all MPQ optimization pipeline
 // ================================================================
 typedef HANDLE (WINAPI* CreateFileA_fn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef HANDLE (WINAPI* CreateFileW_fn)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -1660,6 +1865,16 @@ static bool InstallFileHooks() {
 
 // ================================================================
 // 9. CloseHandle — Cache Invalidation
+//
+// WHAT: Invalidates read-ahead cache and MPQ mappings on file close.
+// WHY:  When WoW closes an MPQ file, cached data for that handle
+//       becomes stale and must be purged to avoid reading freed data.
+// HOW:  1. Skips pseudo-handles (GetCurrentProcess/Thread)
+//       2. Destroys MPQ mapping (unmaps view, does NOT close mapping
+//          handle to avoid deadlock with hooked_CloseHandle)
+//       3. Untracks handle from MPQ hash table
+//       4. Invalidates read-ahead cache entry for this handle
+// STATUS: Active — prevents stale data reads from closed files
 // ================================================================
 typedef BOOL (WINAPI* CloseHandle_fn)(HANDLE);
 static CloseHandle_fn orig_CloseHandle = nullptr;
@@ -1696,6 +1911,15 @@ static bool InstallCloseHandleHook() {
 }
 
 // 9c. Retroactive MPQ handle scanner finds MPQ handles opened before DLL loaded.
+//
+// WHAT: Scans all existing process handles for MPQ files after init.
+// WHY:  WoW opens MPQ handles before wow_optimize.dll is loaded (during
+//       early startup). These handles are invisible to CreateFile hook.
+// HOW:  1. Iterates handles 4..0x10000 (step 4 — HANDLE alignment)
+//       2. GetFileType: must be FILE_TYPE_DISK
+//       3. GetFinalPathNameByHandleA: gets file path
+//       4. Checks .mpq extension → TrackMpqHandle + CreateMpqMapping
+// STATUS: Active — catches MPQ handles opened before DLL initialization
 
 typedef DWORD (WINAPI* GetFinalPathNameByHandleA_fn)(HANDLE, LPSTR, DWORD, DWORD);
 static GetFinalPathNameByHandleA_fn pGetFinalPathNameByHandleA = nullptr;
@@ -1770,7 +1994,16 @@ static void ScanExistingMpqHandles() {
 }
 
 // 9e. MPQ prefetch during loading pages in mapped MPQ data.
-// Uses PrefetchVirtualMemory (Win8+) or sequential touch fallback.
+//
+// WHAT: Prefetches memory-mapped MPQ archives into physical RAM.
+// WHY:  Memory mapping creates virtual mappings but pages are not
+//       resident until first access. During loading screens, WoW
+//       streams data from MPQs — prefaulting avoids page faults later.
+// HOW:  1. Called once per loading screen (g_prefetchDone flag)
+//       2. Uses PrefetchVirtualMemory (Win8+) if available
+//       3. Falls back to sequential memory touch (read each 4 KB page)
+//       4. ResetPrefetchFlag clears the flag when loading ends
+// STATUS: Active — reduces loading screen stutter from page faults
 
 typedef BOOL (WINAPI* PrefetchVirtualMemory_fn)(
     HANDLE, ULONG_PTR, PVOID, ULONG);
@@ -1841,6 +2074,12 @@ static void ResetPrefetchFlag() {
 
 // ================================================================
 // 9b. FlushFileBuffers — Skip for MPQ (read-only)
+//
+// WHAT: Skips FlushFileBuffers calls for MPQ handles.
+// WHY:  MPQ archives are read-only. Flushing write buffers is a
+//       no-op but still incurs syscall overhead.
+// HOW:  Checks IsMpqHandle() → returns TRUE immediately
+// STATUS: Active — eliminates useless flush syscalls on read-only files
 // ================================================================
 
 typedef BOOL (WINAPI* FlushFileBuffers_fn)(HANDLE);
@@ -1864,7 +2103,19 @@ static bool InstallFlushFileBuffersHook() {
     return true;
 }
 
-// 9d. Multi-client detection via named mutex, adjusts timer and sleep behavior.
+// 9d. Multi-client detection via named mutex.
+//
+// WHAT: Detects if multiple WoW clients are running.
+// WHY:  Multi-client mode requires conservative settings to avoid
+//       resource contention and 32-bit address space pressure.
+// HOW:  Creates named mutex "wow_optimize_instance_v2".
+//       If ERROR_ALREADY_EXISTS → another instance is running.
+// EFFECTS: 1. Timer: 1.0ms (vs 0.5ms single)
+//          2. Sleep: pure yield (vs busy-wait single)
+//          3. Working set: 64-512 MB (vs 256 MB-2 GB single)
+//          4. mimalloc: purge_delay=100ms (vs 0ms single)
+//          5. mimalloc collect: every 1024 steps (vs 4096 single)
+// STATUS: Active — essential for stable multi-client operation
 
 static void DetectMultiClient() {
     g_instanceMutex = CreateMutexA(NULL, FALSE, "wow_optimize_instance_v2");
@@ -1878,6 +2129,13 @@ static void DetectMultiClient() {
 }
 
 // 10. System timer resolution.
+//
+// WHAT: Sets system-wide timer resolution via NtSetTimerResolution.
+// WHY:  Default Windows timer is 15.6 ms. WoW's Sleep(1) calls round
+//       up to this, causing imprecise frame pacing.
+// HOW:  Single client: 0.5 ms (5000 * 100ns units)
+//       Multi-client: 1.0 ms (10000 units — less CPU overhead)
+// STATUS: Active — enables PreciseSleep sub-millisecond accuracy
 static void SetHighTimerResolution() {
     typedef LONG (WINAPI* NtSetTimerRes_fn)(ULONG, BOOLEAN, PULONG);
     HMODULE h = GetModuleHandleA("ntdll.dll");
@@ -1908,7 +2166,14 @@ static void SetHighTimerResolution() {
     }
 }
 
-// 11. Large pages requires SeLockMemoryPrivilege.
+// 11. Large pages — requires SeLockMemoryPrivilege.
+//
+// WHAT: Enables mimalloc large page support if privilege is available.
+// WHY:  Large pages (2 MB) reduce TLB pressure and page table overhead.
+// HOW:  1. Opens process token, looks up SeLockMemoryPrivilege
+//       2. Adjusts token privileges to enable it
+//       3. Sets mi_option_allow_large_os_pages = 1
+// STATUS: Active (if privilege granted — requires admin policy)
 static void TryEnableLargePages() {
     HANDLE hToken;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
@@ -1927,7 +2192,16 @@ static void TryEnableLargePages() {
     Log("Large pages: enabled for mimalloc");
 }
 
-// 12. Thread optimization : ideal processor, priority.
+// 12. Thread optimization — ideal processor, priority.
+//
+// WHAT: Sets main thread ideal processor and priority ABOVE_NORMAL.
+// WHY:  WoW's main thread handles all rendering, Lua, and game logic.
+//       Giving it priority ensures the scheduler favors it over worker
+//       threads (network, audio, MPQ streaming).
+// HOW:  1. Scans all threads in process, finds earliest-creation (main)
+//       2. Sets ideal processor to core 1 (or core 0 on single-core)
+//       3. Sets thread priority to THREAD_PRIORITY_ABOVE_NORMAL
+// STATUS: Active — main thread gets scheduler preference
 static void OptimizeThreads() {
     DWORD pid = GetCurrentProcessId();
     DWORD mainTid = 0;
@@ -1966,6 +2240,12 @@ static void OptimizeThreads() {
 }
 
 // 13. Process priority.
+//
+// WHAT: Sets process to ABOVE_NORMAL_PRIORITY_CLASS + enables priority boost.
+// WHY:  Ensures WoW gets CPU time over background apps.
+//       Priority boost allows temporary elevation for I/O completion.
+// HOW:  SetPriorityClass + SetProcessPriorityBoost
+// STATUS: Active — system-wide process priority elevation
 static void OptimizeProcess() {
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
     SetProcessPriorityBoost(GetCurrentProcess(), TRUE);
@@ -1973,6 +2253,14 @@ static void OptimizeProcess() {
 }
 
 // 14. Working set.
+//
+// WHAT: Sets process minimum/maximum working set size.
+// WHY:  Controls how much physical RAM WoW can use.
+//       Too small → excessive page faults. Too large → starves other
+//       processes (especially in multi-client mode).
+// HOW:  Single client: 256 MB - 2 GB (generous for HD textures)
+//       Multi-client: 64 MB - 512 MB (prevents 32-bit OOM)
+// STATUS: Active — memory pressure management
 static void OptimizeWorkingSet() {
     SIZE_T minWS, maxWS;
     if (g_isMultiClient) {
@@ -1993,6 +2281,13 @@ static void OptimizeWorkingSet() {
 }
 
 // 15. mimalloc configuration.
+//
+// WHAT: Configures mimalloc options and pre-warms the allocator.
+// WHY:  mimalloc needs tuning for WoW's usage pattern.
+// HOW:  1. Enables large pages (if privilege available)
+//       2. Sets purge_delay=0 (single) or 100 (multi — adjusted later)
+//       3. Pre-warms 64 MB to populate mimalloc's thread caches
+// STATUS: Active — allocator warm and ready at init
 static void ConfigureMimalloc() {
     mi_option_set(mi_option_allow_large_os_pages, 1);
 
@@ -2018,7 +2313,16 @@ static void AdjustMimallocForMultiClient() {
     }
 }
 
-// 16. FPS cap removal - patches CMP EAX, 200 to CMP EAX, 999.
+// 16. FPS cap removal — patches CMP EAX, 200 to CMP EAX, 999.
+//
+// WHAT: Scans Wow.exe for the hardcoded 200 FPS cap and raises it to 999.
+// WHY:  WoW 3.3.5a has a built-in 200 FPS limit. With all optimizations
+//       active, WoW can exceed this — the cap becomes a bottleneck.
+// HOW:  1. Pattern scans for "3D C8 00 00 00" (CMP EAX, 200)
+//       2. Verifies next byte is conditional jump (JLE/JG)
+//       3. Patches the immediate value from 200 to 999
+//       4. VirtualProtect for PAGE_EXECUTE_READWRITE
+// STATUS: Active — removes artificial FPS ceiling
 static uintptr_t FindPattern(uintptr_t base, size_t size, const uint8_t* pat, const char* mask) {
     for (size_t i = 0; i < size; i++) {
         bool found = true;
@@ -2079,7 +2383,19 @@ static void TryRemoveFPSCap() {
 }
 
 // Periodic stats dump called from hooked_Sleep.
-// WoW often hangs on exit so DLL_PROCESS_DETACH stats are unreliable.
+//
+// WHAT: Dumps comprehensive optimization statistics to the log file.
+// WHY:  WoW often hangs on exit so DLL_PROCESS_DETACH stats are
+//       unreliable. Periodic dumps ensure we capture runtime data.
+// HOW:  Called every 30 seconds from RunPeriodicMaintenanceOnMainThread
+//       (triggered by hooked_Sleep on main thread).
+// DUMPS: 1. Process memory (working set, page faults, VA fragmentation)
+//        2. MPQ mmap stats (reads, faults, mapped files, MB)
+//        3. QPC cache hit rate
+//        4. All hook hit/fallback counters
+//        5. Lua fast path per-function stats
+//        6. VA Arena usage stats
+//        7. Lua allocator stats (mimalloc mallocs/frees)
 
 static void DumpPeriodicStats() {
     // Process memory diagnostics (helps diagnose HD/custom client OOM)
@@ -2376,8 +2692,16 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
 // ================================================================
 //  Thread Affinity — Background Worker CPU Pinning
-//  Forces async tasks (MPQ, UI, network) to cores 2..N-1.
-//  Protects main thread from scheduler preemption.
+//
+// WHAT: Pins WoW async task threads to cores 2..N-1.
+// WHY:  WoW creates background threads for MPQ streaming, UI loading,
+//       and network I/O. If the scheduler moves these to the same core
+//       as the main thread, it causes preemption and frame stutter.
+// HOW:  1. Gets process affinity mask (respects user/task manager settings)
+//       2. Skips if <=2 cores (no spare cores for pinning)
+//       3. Hooks internal WoW thread creation function (0x008D2110)
+//       4. Sets ideal processor for each new background thread
+// STATUS: Active — process-affinity-mask aware, safe on all configs
 // ================================================================
 
 static int __cdecl Hooked_ThreadWorker(void* outHandle, LPTHREAD_START_ROUTINE start, LPVOID param, int priority, int a5, int a6, HMODULE hMod) {

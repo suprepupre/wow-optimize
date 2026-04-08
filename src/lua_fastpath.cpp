@@ -1,3 +1,34 @@
+// ================================================================
+// Lua Fast Path — Direct C function hooks for WoW's Lua 5.1 VM
+// Build 12340 (IDA Pro verified addresses)
+//
+// WHAT: Hooks 28+ Lua C library functions with optimized replacements.
+// WHY:  WoW addons call these functions thousands of times per second.
+//       The original Lua implementations have generic overhead that
+//       is unnecessary for the common cases WoW actually uses.
+//
+// ARCHITECTURE:
+//   Phase 1: string.format hook (hardcoded address 0x00853C50)
+//     - Installed during DLL init via LuaFastPath::Init()
+//     - Bypasses Lua's generic format parser for common patterns
+//
+//   Phase 2: Runtime discovery + hook of other Lua functions
+//     - Installed after Lua state is ready via InitPhase2(L)
+//     - Calibrates stack layout by probing string.format closure
+//     - Reads C function pointers from Lua stack slots
+//     - Hooks: string.find, string.match, type, math.floor/ceil/abs/max/min,
+//              string.len, string.byte, tostring, tonumber, next, rawget,
+//              rawset, table.insert, table.remove, table.concat, unpack,
+//              select, rawequal, string.sub, string.lower, string.upper
+//
+// SAFETY:
+//   - All hooks have __try/__except guards
+//   - Type checks before fast path
+//   - Length/bounds checks for strings
+//   - Embedded NUL detection (lua_pushstring uses strlen)
+//   - Falls back to original function on any anomaly
+// ================================================================
+
 #include "lua_fastpath.h"
 #include <cstdint>
 #include <cstring>
@@ -8,7 +39,10 @@
 
 extern "C" void Log(const char* fmt, ...);
 
+// ================================================================
 // Lua types and API — known addresses build 12340.
+// These are direct function pointers into WoW's Lua 5.1 VM.
+// ================================================================
 
 typedef double lua_Number;
 typedef int (__cdecl *lua_CFunction_t)(lua_State* L);
@@ -99,7 +133,20 @@ static inline double ReadRawNumber(const RawTValue* tv) {
     return d;
 }
 
-// Phase 1: string.format hook (hardcoded address).
+// ================================================================
+// Phase 1: string.format hook (hardcoded address 0x00853C50).
+//
+// WHAT: Optimized replacement for Lua's string.format C function.
+// WHY:  string.format is called frequently by addons for string
+//       construction. Lua's original uses a full format parser with
+//       significant overhead for common simple patterns.
+// HOW:  1. Ultra-fast paths: "%d", "%s", "%.Nf" (single arg)
+//       2. No-specifier check: returns format string as-is
+//       3. Generic parser: handles %d/%u/%x/%X/%o/%f/%e/%g/%c/%s
+//       4. Safety: embedded NUL check, length limits, arg count check
+//       5. Falls back to original on any unsupported pattern
+// STATUS: Active — installed during DLL init
+// ================================================================
 
 static constexpr uintptr_t ADDR_str_format = 0x00853C50;
 static lua_CFunction_t orig_str_format = nullptr;
@@ -340,7 +387,48 @@ fallback:
     return orig_str_format(L);
 }
 
+// ================================================================
 // Phase 2: runtime-discovered Lua function hooks.
+//
+// WHAT: Dynamically discovers and hooks additional Lua C functions
+//       at runtime (not hardcoded except string.format).
+// WHY:  Lua library functions (string.find, math.floor, etc.) have
+//       addresses that can vary between builds. Discovery makes this
+//       robust by finding them through the Lua VM's own stack.
+// HOW:  1. CalibrateStackLayout: probes string.format closure on the
+//          stack to determine base offset, TValue size, closure.f offset
+//       2. DiscoverFunc: reads C function pointer from stack slot
+//       3. Creates MinHook for each discovered function
+//       4. All hooks use direct TValue manipulation (no Lua API calls)
+//          for maximum speed — reading/writing stack slots directly
+//
+// HOOKED FUNCTIONS (Phase 2):
+//   - string.find:     plain literal search (memchr/memcmp)
+//   - string.match:    anchored literal, class match, plain literal
+//   - type:            array lookup (no API call)
+//   - math.floor:      CRT floor()
+//   - math.ceil:       CRT ceil()
+//   - math.abs:        CRT fabs()
+//   - math.max/min:    inline comparison (2 args)
+//   - string.len:      strlen from TValue
+//   - string.byte:     single byte extraction
+//   - tostring:        inline type-to-string conversion
+//   - tonumber:        identity for already-numeric values
+//   - next:            direct luaH_next_helper call
+//   - rawget:          direct luaH_getstr/getnum/get call
+//   - rawset:          direct luaH_set call
+//   - table.insert:    append to array portion via luaH_setnum
+//   - table.remove:    remove last element via luaH_getnum/setnum
+//   - table.concat:    pre-validated string join
+//   - unpack:          direct array extraction to stack
+//   - select:          "#" special case + index arithmetic
+//   - rawequal:        direct TValue comparison
+//   - string.sub:      substring with Lua index rules
+//   - string.lower:    ASCII lowercase (inline)
+//   - string.upper:    ASCII uppercase (inline)
+//
+// STATUS: Active — installed after Lua state ready (InitPhase2)
+// ================================================================
 
 static bool IsReadableMemory(uintptr_t addr) {
     if (addr == 0) return false;

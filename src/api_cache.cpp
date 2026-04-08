@@ -1,3 +1,22 @@
+// ================================================================
+// WoW API Result Cache — GetItemInfo caching
+// Build 12340
+//
+// WHAT: Caches the return values of GetItemInfo() Lua API calls.
+// WHY:  GetItemInfo queries the WoW item database, which involves
+//       MPQ reads and data parsing. Many addons request the same
+//       items repeatedly (tooltips, inventory scans, auction house).
+// HOW:  1. Hooks GetItemInfo at 0x00516C60 via MinHook
+//       2. Hashes the item argument (name string or itemID number)
+//       3. 2048-slot direct-mapped cache (FNV-1a hash)
+//       4. Caches up to 11 return values (name, quality, level, etc.)
+//       5. Only caches successful results with >=10 valid returns
+//       6. Does NOT cache nil or partial results (items might load later)
+//       7. ReplayCachedValues pushes cached results onto Lua stack
+// STATUS: Active — reduces repeated item database queries
+// NOTE:   GetSpellInfo cache was removed (risky, caused crashes)
+// ================================================================
+
 #include "api_cache.h"
 #include <cstdint>
 #include <cstring>
@@ -6,7 +25,10 @@
 
 extern "C" void Log(const char* fmt, ...);
 
+// ================================================================
 // WoW API result cache for build 12340.
+// Lua API function pointer addresses.
+// ================================================================
 
 typedef struct lua_State lua_State;
 typedef double lua_Number;
