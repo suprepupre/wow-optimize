@@ -84,6 +84,9 @@
 #define CRASH_TEST_DISABLE_MODHANDLE_CACHE      0   // GetModuleHandleA cache — ENABLED for testing
 #define CRASH_TEST_DISABLE_LSTRCMP              0   // lstrcmp/lstrcmpiA fast path — ENABLED for testing
 #define CRASH_TEST_DISABLE_PROFILE_CACHE        0   // GetPrivateProfileStringA cache — ENABLED for testing
+#define CRASH_TEST_DISABLE_MSGPUMP_RC1          1   // sub_869E00 frame-continue (ABANDONED — freezes on char select, incompatible with command pump arch)
+#define CRASH_TEST_DISABLE_SWAP_RC1             0   // sub_69E220 swap optimization — glFinish skip (Vulkan/D3D9 only)
+#define CRASH_TEST_DISABLE_TABLERESHAPE_RC1     0   // luaH_resize table rehash prevention (rc1)
 
 // Forward declarations
 static bool IsExecutableMemory(uintptr_t addr);
@@ -145,6 +148,7 @@ static long g_wfsSpinHits = 0, g_wfsFallbacks = 0;
 static long g_modHits = 0, g_modMisses = 0;
 static long g_lstrcmpHits = 0, g_lstrcmpFallbacks = 0;
 static long g_profHits = 0, g_profMisses = 0;
+static uint64_t g_tableReshapeHits = 0;
 
 // ================================================================
 // Thread Affinity — background worker core pinning
@@ -2505,6 +2509,9 @@ static void DumpPeriodicStats() {
         Log("[Stats] GetPrivateProfile: %ld hits, %ld misses (%.1f%%)",
             g_profHits, g_profMisses,
             (double)g_profHits / (g_profHits + g_profMisses) * 100.0);
+
+    if (g_tableReshapeHits > 0)
+        Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
     
 
     if (vaOk && g_vaArenaActive) {
@@ -2540,10 +2547,13 @@ static void DumpPeriodicStats() {
             fps.rawequalHits, fps.rawequalFallbacks,
             fps.strsubHits, fps.strlowerHits, fps.strupperHits);
     }
+    // UnitName stats — DISABLED (hook permanently removed)
+    /*
     if (fps.unitNameHits + fps.unitNameFallbacks > 0)
         Log("[Stats] UnitName: %ld hits, %ld fallback (%.1f%%)",
             fps.unitNameHits, fps.unitNameFallbacks,
             (double)fps.unitNameHits / (fps.unitNameHits + fps.unitNameFallbacks) * 100.0);
+    */
     LuaInternals::Stats lis = LuaInternals::GetStats();
     if (lis.active) {
         long catTotal = lis.concatFastHits + lis.concatFallbacks;
@@ -2556,6 +2566,337 @@ static void DumpPeriodicStats() {
     Log("[Stats] ====================================");
 
 
+}
+
+// ================================================================
+// 19. sub_869E00 — Zero-Message Frame Continue (testbuild-msgpump-rc1)
+//
+// WHAT: Hooks WoW's message pump function (0x00869E00). When
+//       PeekMessageA returns 0 (no pending Windows messages),
+//       the original function returns 0, which kills the outer
+//       do...while loop in sub_480410 — the game STOPS rendering.
+//
+// WHY:  In addon-heavy raids, the message queue can be empty between
+//       addon timer firings. When the queue is empty, WoW goes
+//       completely idle — no rendering, no Lua, no GC. Then it
+//       spikes back when the next timer fires. This causes raid
+//       stutter and frametime variance.
+//
+// HOW:  1. Call original sub_869E00
+//       2. If it returns 0 (no messages → loop exit):
+//          a. Call hooked_Sleep(1) — yields CPU, prevents 100% usage
+//          b. Return 1 — keeps the outer loop alive
+//       3. The outer loop calls sub_480130 (frame render) again
+//       4. Frame pacing is still controlled by our Sleep hook
+//
+// SAFETY: Minimal — just one extra Sleep(1) per idle cycle.
+//         Frame render function handles the dword_D41400 guards.
+//         If hooked_Sleep is null, falls back to Sleep(1) directly.
+//
+// STATUS: Test build only — testbuild-msgpump-rc1
+// ================================================================
+
+typedef int (__cdecl* MsgPump_fn)(void*, int*, DWORD*, void*, void*);
+static MsgPump_fn orig_MsgPump = nullptr;
+static uint64_t g_msgPumpHits = 0;
+
+static int __cdecl hooked_MsgPump(void* a1, int* a2, DWORD* a3, void* a4, void* a5) {
+    int result = orig_MsgPump(a1, a2, a3, a4, a5);
+
+    if (result == 0) {
+        // Original would exit the render loop (no messages pending).
+        // Previous rc1 just returned 1 → stale *a1 → infinite loop.
+        // Fix: inject WM_NULL into WoW's message queue so the next
+        // PeekMessageA finds a message, goes through the normal flow
+        // (GetMessage → DispatchMessage → sub_868DB0), which updates
+        // *a1 from the command queue.
+        g_msgPumpHits++;
+
+        // Post synthetic message to WoW's main window
+        HWND hWoW = FindWindowA("GxWindowClass", nullptr);
+        if (hWoW)
+            PostMessageA(hWoW, WM_NULL, 0, 0);
+
+        // Yield CPU to avoid busy-wait
+        if (orig_Sleep)
+            orig_Sleep(1);
+        else
+            Sleep(1);
+
+        return 1;
+    }
+
+    return result;
+}
+
+static bool InstallMsgPumpHook() {
+#if CRASH_TEST_DISABLE_MSGPUMP_RC1
+    Log("MsgPump hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x00869E00;
+
+    // Verify we're hooking a real function (prologue: push ebp; mov ebp,esp)
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x55 || p[1] != 0x8B) {
+        Log("MsgPump hook: BAD PROLOGUE at 0x%08X (expected 55 8B)", (uintptr_t)target);
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_MsgPump, (void**)&orig_MsgPump) != MH_OK) {
+        Log("MsgPump hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("MsgPump hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("MsgPump hook: ACTIVE (sub_869E00 @ 0x00869E00 — zero-message frame continue)");
+    return true;
+#endif
+}
+
+// ================================================================
+// 20. sub_69E220 — Swap/Present Optimization (testbuild-swap-rc1)
+//
+// WHAT: Hooks WoW's frame-end swap function (0x0069E220).
+//       Replicates the function body but SKIPS glFinish() entirely.
+//
+// WHY:  glFinish() is a full GPU pipeline flush. In pure OpenGL it
+//       ensures the GPU has finished rendering before presenting.
+//       But with Vulkan/D3D9 wrapper (d3d9.dll → Vulkan), the
+//       Vulkan presentation engine (vkQueuePresentKHR) already
+//       synchronizes — it won't present until all command buffers
+//       are complete. The glFinish() is 100% dead overhead.
+//
+//       In raids with heavy particle effects, glFinish() blocks
+//       the CPU for milliseconds waiting for the GPU to drain
+//       its entire command queue. This causes frametime spikes.
+//
+// HOW:  1. Replicate sub_69E220 body in C
+//       2. Call all sub-functions identically
+//       3. Skip glFinish() — let Vulkan handle sync via present
+//       4. wglSwapLayerBuffers goes through unchanged (wrapper
+//          maps it to vkQueuePresentKHR)
+//
+//       If using pure OpenGL, set CRASH_TEST_DISABLE_SWAP_RC1=1.
+//
+// SAFETY: All sub-function calls are at original addresses.
+//         Only glFinish is skipped. Falls back to original
+//         if any address validation fails.
+//
+// STATUS: Test build only — testbuild-swap-rc1
+// ================================================================
+
+typedef void (__cdecl* SubFn)();
+typedef void (__fastcall* SubFnThis)(void*, void*);
+
+static SubFn orig_sub_682E50 = (SubFn)0x00682E50;
+static SubFnThis orig_sub_6841D0 = (SubFnThis)0x006841D0;
+static SubFnThis orig_sub_6836D0 = (SubFnThis)0x006836D0;
+static SubFnThis orig_sub_6833A0 = (SubFnThis)0x006833A0;
+
+typedef void (WINAPI* wglSwapLayerBuffers_fn)(HDC, UINT);
+static wglSwapLayerBuffers_fn orig_wglSwapLayerBuffers = nullptr;
+
+typedef void (__fastcall* SwapPresent_fn)(void*, void*);
+static SwapPresent_fn orig_SwapPresent = nullptr;
+static uint64_t g_glFinishSkips = 0;
+
+static void __fastcall hooked_SwapPresent(void* This, void* unused) {
+    char* T = (char*)This;
+
+    // sub_682E50()
+    orig_sub_682E50();
+
+    // if ([esi+2934h]) sub_6841D0(this)
+    void* edi = *(void**)(T + 0x2934);
+    if (edi)
+        orig_sub_6841D0(This, nullptr);
+
+    // Virtual call: eax = [esi]; edx = [eax+10h]; edx(This)
+    void* vtable = *(void**)T;
+    void* renderFn = *(void**)((char*)vtable + 0x10);
+    if (renderFn)
+        ((void(__fastcall*)(void*, void*))renderFn)(This, nullptr);
+
+    // Check [esi+275Ch] & 0x40 → wglSwapLayerBuffers, else glFinish
+    if (T[0x275C] & 0x40) {
+        HDC hdc = *(HDC*)(T + 0x3AF8);
+        if (orig_wglSwapLayerBuffers && hdc)
+            orig_wglSwapLayerBuffers(hdc, 1);
+    } else {
+        // SKIP glFinish — Vulkan/D3D9 handles presentation sync
+        g_glFinishSkips++;
+    }
+
+    // Post-swap cleanup
+    orig_sub_6836D0(This, nullptr);
+    orig_sub_6833A0(This, nullptr);
+    // nullsub_3 (0x005EEB70) is a 1-byte no-op — skipped
+}
+
+static bool InstallSwapPresentHook() {
+#if CRASH_TEST_DISABLE_SWAP_RC1
+    Log("Swap present hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x0069E220;
+
+    // Verify prologue: push esi; mov esi, ecx
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x56 || p[1] != 0x8B || p[2] != 0xF1) {
+        Log("Swap hook: BAD PROLOGUE at 0x%08X (expected 56 8B F1)", (uintptr_t)target);
+        return false;
+    }
+
+    // Resolve wglSwapLayerBuffers from opengl32.dll
+    HMODULE hGL = GetModuleHandleA("opengl32.dll");
+    if (!hGL) {
+        Log("Swap hook: opengl32.dll not loaded");
+        return false;
+    }
+    orig_wglSwapLayerBuffers = (wglSwapLayerBuffers_fn)GetProcAddress(hGL, "wglSwapLayerBuffers");
+    if (!orig_wglSwapLayerBuffers) {
+        Log("Swap hook: wglSwapLayerBuffers not found");
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_SwapPresent, (void**)&orig_SwapPresent) != MH_OK) {
+        Log("Swap hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("Swap hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("Swap present hook: ACTIVE (sub_69E220 @ 0x0069E220 — glFinish skip, Vulkan/D3D9)");
+    return true;
+#endif
+}
+
+// ================================================================
+// 21. sub_85C6F0 — Lua Table Rehash Prevention (testbuild-tablereshape-rc1)
+//
+// WHAT: Hooks luaH_resize (0x0085C6F0). When Lua allocates a new
+//       table size that's only slightly larger than the current size,
+//       rounds up to the next power of 2.
+//
+// WHY:  Lua 5.1 hash tables rehash (realloc + O(n) copy) every time
+//       the array or hash part grows. Addon-heavy raids create tables
+//       that grow incrementally (10 → 20 → 30 → 50 → 80 → 120 ...).
+//       Each resize is a main-thread spike. By rounding up, one big
+//       rehash now prevents 3-5 small ones later.
+//
+// CHAIN: rawset → lua_settable → luaH_set → luaH_newkey →
+//        luaH_resizearray (0x0085C9B0) → luaH_resize (0x0085C6F0)
+//
+// HOW:  1. Hook sub_85C6F0 at entry (naked function, __usercall conv)
+//       2. Check: a1 > *(a2+0x20) AND a1 < nextPow2(a1) AND
+//          nextPow2(a1) <= currentSize * 4 (cap to avoid over-allocation)
+//       3. If all true: set a1 = nextPow2(a1)
+//       4. Call original via MinHook trampoline
+//
+// SAFETY: Basic pointer validation. No SEH (too expensive on this path).
+//         Falls through to original if any check fails.
+//
+// STATUS: Test build only — testbuild-tablereshape-rc1
+// ================================================================
+
+static inline int luaTable_nextPow2(int n) {
+    if (n <= 1) return 1;
+    --n;
+    n |= n >> 1; n |= n >> 2; n |= n >> 4;
+    n |= n >> 8; n |= n >> 16;
+    return n + 1;
+}
+
+// Decision function — called from naked hook, must be __cdecl
+static int __cdecl luaTable_reshape_decision(int newSize, void* table) {
+    if (!table) return newSize;
+    // Validate pointer — must be in valid user-space range
+    uintptr_t p = (uintptr_t)table;
+    if (p < 0x10000 || p > 0xBFFF0000) return newSize;
+
+    __try {
+        int currentSize = *(int*)((char*)table + 0x20);
+        if (currentSize <= 0) return newSize;
+        if (newSize <= currentSize) return newSize;
+        if (newSize <= 0) return newSize;
+
+        int nextPow = luaTable_nextPow2(newSize);
+        // Only round up if we're not already at a power of 2,
+        // and the rounded size isn't more than 4x current (cap memory)
+        if (newSize < nextPow && nextPow <= currentSize * 4) {
+            g_tableReshapeHits++;
+            return nextPow;
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    return newSize;
+}
+
+// Naked hook — preserves exact __usercall register state
+// On entry: eax = a1 (newSize), ecx = a2 (table*), [esp] = ret addr, [esp+4] = a3
+static void* g_luaHResizeTrampoline = nullptr;
+
+__declspec(naked) static void hooked_luaH_resize() {
+    __asm {
+        // Save all registers and flags
+        pushad
+        pushfd
+
+        // Call C++ decision: resize_decision(newSize_in_eax, table_in_ecx)
+        push ecx                    // table*
+        push eax                    // newSize
+        call luaTable_reshape_decision
+        add esp, 8                  // clean up args
+
+        // Store result back into saved eax slot in pushad layout
+        // pushad order on stack (after pushfd):
+        //   [esp+0]=flags, [esp+4]=edi, [esp+8]=esi, [esp+12]=ebp,
+        //   [esp+16]=origEsp, [esp+20]=ebx, [esp+24]=edx, [esp+28]=ecx, [esp+32]=eax
+        mov [esp + 32], eax         // overwrite saved eax with rounded newSize
+
+        // Restore all registers and flags
+        popfd
+        popad
+
+        // eax = (potentially rounded) newSize, ecx = table* (unchanged)
+        // Jump to MinHook trampoline which runs the original prologue
+        jmp g_luaHResizeTrampoline
+    }
+}
+
+static bool InstallLuaHResizeHook() {
+#if CRASH_TEST_DISABLE_TABLERESHAPE_RC1
+    Log("LuaH_resize hook: DISABLED (crash isolation)");
+    return false;
+#else
+    void* target = (void*)0x0085C6F0;
+
+    // Verify prologue: push ebp; mov ebp, esp
+    unsigned char* p = (unsigned char*)target;
+    if (p[0] != 0x55 || p[1] != 0x8B) {
+        Log("LuaH_resize hook: BAD PROLOGUE at 0x%08X (expected 55 8B)", (uintptr_t)target);
+        return false;
+    }
+
+    if (MH_CreateHook(target, (void*)hooked_luaH_resize, &g_luaHResizeTrampoline) != MH_OK) {
+        Log("LuaH_resize hook: MH_CreateHook FAILED");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("LuaH_resize hook: MH_EnableHook FAILED");
+        return false;
+    }
+
+    Log("LuaH_resize hook: ACTIVE (sub_85C6F0 @ 0x0085C6F0 — table rehash prevention, round-up to pow2)");
+    return true;
+#endif
 }
 
 // Main initialization thread.
@@ -2644,6 +2985,15 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool lstrOk = InstallLstrcmpHook();
     Log("--- Profile String Cache ---");
     bool profOk = InstallGetPrivateProfileCache();
+
+    Log("--- Message Pump (testbuild) ---");
+    bool msgPumpOk = InstallMsgPumpHook();
+
+    Log("--- Swap/Present (testbuild) ---");
+    bool swapOk = InstallSwapPresentHook();
+
+    Log("--- Lua Table Rehash (testbuild) ---");
+    bool tableReshapeOk = InstallLuaHResizeHook();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -2742,6 +3092,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] API cache (ItemInfo only)",    apiCacheOk  ? " OK " : "SKIP");
     Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
     Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
+    Log("  [%s] MsgPump (frame-continue rc1)", msgPumpOk   ? " OK " : "SKIP");
+    Log("  [%s] Swap/Present (glFinish skip)", swapOk      ? " OK " : "SKIP");
+    Log("  [%s] Lua Table Rehash (pow2 rc1)", tableReshapeOk ? " OK " : "SKIP");
 
     return 0;
 }

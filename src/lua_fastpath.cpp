@@ -1947,7 +1947,13 @@ void Shutdown() {
 // ================================================================
 // Phase 3: WoW C-level API hooks
 //
-// UnitName cache — safe because unit names never change during a session.
+// DISABLED HOOKS:
+//   UnitName — 0% hit rate in real sessions (1000+ fallbacks, 0 hits).
+//     Dynamic units (raid1, nameplate1, etc.) change every frame — cache
+//     never reuses. Static units (player, target) are called once at UI load.
+//     Permanently disabled — adds overhead with zero benefit.
+
+#define PHASE3_DISABLE_UNITNAME  1   // permanently disabled (0% hit rate)
 // UnitName returns 2 values: name, realm (or nil for unknown).
 // Cached results are pushed directly to Lua stack, skipping all
 // WoW's internal unit lookup + object resolution code.
@@ -2058,7 +2064,8 @@ bool InitWoWHooks(lua_State* L) {
 
     int hooked = 0;
 
-    // Hook UnitName
+    // Hook UnitName — DISABLED (0% hit rate, permanently)
+#if !PHASE3_DISABLE_UNITNAME
     if (IsWoWExeMemory(ADDR_UnitName)) {
         MH_STATUS s = MH_CreateHook((void*)ADDR_UnitName, (void*)Hooked_UnitName, (void**)&orig_UnitName);
         if (s == MH_OK) {
@@ -2069,11 +2076,21 @@ bool InitWoWHooks(lua_State* L) {
             }
         }
     }
+#else
+    Log("[FastPath]   UnitName  DISABLED (0%% hit rate — dynamic units never cache-hit)");
+#endif
 
+#if !PHASE3_DISABLE_UNITNAME
     if (hooked == 0) {
         Log("[FastPath]  No WoW API hooks installed");
         return false;
     }
+#else
+    // All Phase 3 hooks are disabled — this is expected
+    Log("[FastPath]  Phase 3 [ SKIP ] — all WoW API hooks disabled (0%% hit rate)");
+    Log("[FastPath] ====================================");
+    return false;
+#endif
 
     Log("[FastPath]  Phase 3 [ OK ] — %d WoW API hook(s) active", hooked);
     Log("[FastPath] ====================================");
