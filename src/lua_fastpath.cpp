@@ -1944,6 +1944,156 @@ void Shutdown() {
     g_phase2Active = false;
 }
 
+// ================================================================
+// Phase 3: WoW C-level API hooks
+//
+// UnitName cache — safe because unit names never change during a session.
+// UnitName returns 2 values: name, realm (or nil for unknown).
+// Cached results are pushed directly to Lua stack, skipping all
+// WoW's internal unit lookup + object resolution code.
+//
+// Addresses: hardcoded for build 12340 (IDA Pro verified)
+// Safety:  Falls back to original on any type mismatch or unknown unit.
+//          Cache is invalidated on lua_State change (UI reload).
+// ================================================================
+
+// UnitName: 0x0060E740 — returns (name, realm) for a unit string
+static constexpr uintptr_t ADDR_UnitName = 0x0060E740;
+static lua_CFunction_t orig_UnitName = nullptr;
+
+static constexpr int UNITNAME_CACHE_SIZE = 128;
+static constexpr int UNITNAME_CACHE_MASK = UNITNAME_CACHE_SIZE - 1;
+static constexpr int UNITNAME_MAX_LEN  = 64;
+
+struct UnitNameCacheEntry {
+    uint32_t unitHash;
+    char     name[UNITNAME_MAX_LEN];
+    char     realm[UNITNAME_MAX_LEN];
+    bool     hasName;
+    bool     hasRealm;
+    bool     valid;
+};
+
+static UnitNameCacheEntry g_unitNameCache[UNITNAME_CACHE_SIZE] = {};
+static long g_unitNameHits = 0;
+static long g_unitNameFallbacks = 0;
+
+static inline uint32_t HashUnitStr(const char* s, size_t len) {
+    uint32_t h = 0x811C9DC5;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h ^= (uint8_t)c;
+        h *= 0x01000193;
+    }
+    return h;
+}
+
+static int __cdecl Hooked_UnitName(lua_State* L) {
+    int nargs = lua_gettop_(L);
+    if (nargs < 1) return orig_UnitName(L);
+    if (lua_type_(L, 1) != LUA_TSTRING) return orig_UnitName(L);
+
+    size_t unitLen = 0;
+    const char* unit = lua_tolstring_(L, 1, &unitLen);
+    if (!unit || unitLen == 0) return orig_UnitName(L);
+
+    uint32_t hash = HashUnitStr(unit, unitLen);
+    int slot = hash & UNITNAME_CACHE_MASK;
+    UnitNameCacheEntry* e = &g_unitNameCache[slot];
+
+    if (e->valid && e->unitHash == hash) {
+        // Cache hit — push cached results
+        lua_settop_(L, 0);  // clear stack (pop the unit arg)
+        if (e->hasName)  lua_pushstring_(L, e->name);
+        else             lua_pushnil_(L);
+        if (e->hasRealm) lua_pushstring_(L, e->realm);
+        else             lua_pushnil_(L);
+        g_unitNameHits++;
+        return 2;
+    }
+
+    // Cache miss — call original
+    int ret = orig_UnitName(L);
+    g_unitNameFallbacks++;
+
+    // Capture results
+    if (ret >= 1 && lua_type_(L, -ret + 1) == LUA_TSTRING) {
+        size_t nLen = 0;
+        const char* name = lua_tolstring_(L, -ret + 1, &nLen);
+        if (name && nLen < UNITNAME_MAX_LEN) {
+            e->unitHash = hash;
+            memcpy(e->name, name, nLen);
+            e->name[nLen] = '\0';
+            e->hasName = true;
+
+            if (ret >= 2 && lua_type_(L, -ret + 2) == LUA_TSTRING) {
+                size_t rLen = 0;
+                const char* realm = lua_tolstring_(L, -ret + 2, &rLen);
+                if (realm && rLen < UNITNAME_MAX_LEN) {
+                    memcpy(e->realm, realm, rLen);
+                    e->realm[rLen] = '\0';
+                    e->hasRealm = true;
+                } else {
+                    e->hasRealm = false;
+                }
+            } else {
+                e->hasRealm = false;
+            }
+
+            e->valid = true;
+        }
+    }
+
+    return ret;
+}
+
+static bool IsWoWExeMemory(uintptr_t addr);  // forward declaration
+
+bool InitWoWHooks(lua_State* L) {
+    Log("[FastPath] ====================================");
+    Log("[FastPath]  WoW C-level API Hooks — Phase 3");
+    Log("[FastPath]  Build 12340");
+    Log("[FastPath] ====================================");
+
+    int hooked = 0;
+
+    // Hook UnitName
+    if (IsWoWExeMemory(ADDR_UnitName)) {
+        MH_STATUS s = MH_CreateHook((void*)ADDR_UnitName, (void*)Hooked_UnitName, (void**)&orig_UnitName);
+        if (s == MH_OK) {
+            s = MH_EnableHook((void*)ADDR_UnitName);
+            if (s == MH_OK) {
+                hooked++;
+                Log("[FastPath]   UnitName  0x%08X  [ OK ]", (unsigned)ADDR_UnitName);
+            }
+        }
+    }
+
+    if (hooked == 0) {
+        Log("[FastPath]  No WoW API hooks installed");
+        return false;
+    }
+
+    Log("[FastPath]  Phase 3 [ OK ] — %d WoW API hook(s) active", hooked);
+    Log("[FastPath] ====================================");
+    return hooked > 0;
+}
+
+static bool IsWoWExeMemory(uintptr_t addr) {
+    if (addr == 0) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    return (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+void InvalidateWoWCache() {
+    memset(g_unitNameCache, 0, sizeof(g_unitNameCache));
+    Log("[FastPath] WoW API cache cleared");
+}
+
 Stats GetStats() {
     Stats s;
     s.formatFastHits      = g_formatFastHits;
@@ -1986,8 +2136,10 @@ Stats GetStats() {
     s.unpackHits          = g_unpackHits;
     s.unpackFallbacks     = g_unpackFallbacks;
     s.selectHits          = g_selectHits;
-    s.selectFallbacks     = g_selectFallbacks;    
+    s.selectFallbacks     = g_selectFallbacks;
     s.strsubHits          = g_strsubHits;
+    s.unitNameHits        = g_unitNameHits;
+    s.unitNameFallbacks   = g_unitNameFallbacks;
     return s;
 }
 

@@ -2538,8 +2538,12 @@ static void DumpPeriodicStats() {
             fps.unpackHits, fps.unpackFallbacks,
             fps.selectHits, fps.selectFallbacks,
             fps.rawequalHits, fps.rawequalFallbacks,
-            fps.strsubHits, fps.strlowerHits, fps.strupperHits); 
+            fps.strsubHits, fps.strlowerHits, fps.strupperHits);
     }
+    if (fps.unitNameHits + fps.unitNameFallbacks > 0)
+        Log("[Stats] UnitName: %ld hits, %ld fallback (%.1f%%)",
+            fps.unitNameHits, fps.unitNameFallbacks,
+            (double)fps.unitNameHits / (fps.unitNameHits + fps.unitNameFallbacks) * 100.0);
     LuaInternals::Stats lis = LuaInternals::GetStats();
     if (lis.active) {
         long catTotal = lis.concatFastHits + lis.concatFallbacks;

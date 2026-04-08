@@ -879,6 +879,8 @@ static void UpdateLuaStats(lua_State* L) {
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_HITS",      (double)fpStats.formatFastHits);
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_FASTPATH_FALLBACKS", (double)fpStats.formatFallbacks);
         WriteLuaGlobal_Bool(L,   "LUABOOST_DLL_FASTPATH_ACTIVE",    fpStats.active);
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UNITNAME_HITS",      (double)fpStats.unitNameHits);
+        WriteLuaGlobal_Number(L, "LUABOOST_DLL_UNITNAME_FALLBACKS", (double)fpStats.unitNameFallbacks);
  
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -1036,6 +1038,13 @@ static void DoMainThreadInit() {
         Log("[LuaOpt] EXCEPTION in LuaFastPath::InitPhase2");
     }
 
+    // Phase 3: WoW C-level API hooks (UnitName, etc.)
+    __try {
+        LuaFastPath::InitWoWHooks(Api.L);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("[LuaOpt] EXCEPTION in LuaFastPath::InitWoWHooks");
+    }
+
     if (Api.lua_pushnumber && Api.lua_setfield) {
         UpdateLuaStats(Api.L);
     }
@@ -1132,7 +1141,8 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
         ReplaceLuaAllocator(Api.L);
         OptimizeGC(Api.L);
         PreSizeStringTable(Api.L);
-        LuaInternals::InvalidateCache();         
+        LuaInternals::InvalidateCache();
+        LuaFastPath::InvalidateWoWCache();
         SetupLuaInterface(Api.L);
         LuaFastPath::ResetPhase2Discovery();
         __try {
