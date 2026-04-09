@@ -2708,9 +2708,9 @@ static void DumpPeriodicStats() {
         Log("[Stats] GetSystemTimeAsFileTime: %ld hits, %ld misses (%.1f%%)",
             g_systimeHits, g_systimeMisses,
             (double)g_systimeHits / (g_systimeHits + g_systimeMisses) * 100.0);
-    if (g_workerTasksSubmitted > 0)
-        Log("[Stats] Worker Pool: %ld submitted, %ld completed, %ld queue full",
-            g_workerTasksSubmitted, g_workerTasksCompleted, g_workerQueueFull);
+    // Always show worker pool stats (even if 0)
+    Log("[Stats] Worker Pool: %ld submitted, %ld completed, %ld queue full",
+        g_workerTasksSubmitted, g_workerTasksCompleted, g_workerQueueFull);
 
     if (g_tableReshapeHits > 0)
         Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
