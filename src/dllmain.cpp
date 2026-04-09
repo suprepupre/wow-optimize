@@ -208,9 +208,9 @@ static DWORD WINAPI MiscThreadProc(LPVOID);
 
 static bool SPSC_Push(SPSCQueue* q, void (*fn)(void*), void* arg) {
     LONG w = InterlockedIncrement(&q->writePos) - 1;
-    LONG r = *(volatile LONG*)&q->readPos;  // atomic read
-    if ((w & WP_QUEUE_MASK) == (r & WP_QUEUE_MASK)) {
-        // Queue full
+    LONG r = *(volatile LONG*)&q->readPos;
+    if ((w - r) >= WP_QUEUE_SIZE) {
+        // Queue actually full
         InterlockedDecrement(&q->writePos);
         g_workerQueueFull++;
         return false;
@@ -222,8 +222,9 @@ static bool SPSC_Push(SPSCQueue* q, void (*fn)(void*), void* arg) {
 }
 
 static bool SPSC_TryPop(SPSCQueue* q, WorkerTask* out) {
-    LONG r = InterlockedCompareExchange(&q->readPos, q->readPos, q->readPos);
-    if (r >= InterlockedCompareExchange(&q->writePos, q->writePos, q->writePos))
+    LONG r = *(volatile LONG*)&q->readPos;
+    LONG w = *(volatile LONG*)&q->writePos;
+    if (r >= w)
         return false;
     int slot = r & WP_QUEUE_MASK;
     *out = q->tasks[slot];
