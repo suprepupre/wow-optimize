@@ -148,6 +148,8 @@ static long g_wfsSpinHits = 0, g_wfsFallbacks = 0;
 static long g_modHits = 0, g_modMisses = 0;
 static long g_lstrcmpHits = 0, g_lstrcmpFallbacks = 0;
 static long g_profHits = 0, g_profMisses = 0;
+static long g_profIntHits = 0, g_profIntMisses = 0;
+static long g_profWriteHits = 0, g_profWriteInvalidates = 0;
 static uint64_t g_tableReshapeHits = 0;
 
 // ================================================================
@@ -2506,9 +2508,16 @@ static void DumpPeriodicStats() {
             g_lstrcmpHits, g_lstrcmpFallbacks,
             (double)g_lstrcmpHits / (g_lstrcmpHits + g_lstrcmpFallbacks) * 100.0);
     if (g_profHits + g_profMisses > 0)
-        Log("[Stats] GetPrivateProfile: %ld hits, %ld misses (%.1f%%)",
+        Log("[Stats] GetPrivateProfileStringA: %ld hits, %ld misses (%.1f%%)",
             g_profHits, g_profMisses,
             (double)g_profHits / (g_profHits + g_profMisses) * 100.0);
+    if (g_profIntHits + g_profIntMisses > 0)
+        Log("[Stats] GetPrivateProfileIntA: %ld hits, %ld misses (%.1f%%)",
+            g_profIntHits, g_profIntMisses,
+            (double)g_profIntHits / (g_profIntHits + g_profIntMisses) * 100.0);
+    if (g_profWriteHits + g_profWriteInvalidates > 0)
+        Log("[Stats] WritePrivateProfileStringA: %ld write-through, %ld invalidates",
+            g_profWriteHits, g_profWriteInvalidates);
 
     if (g_tableReshapeHits > 0)
         Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
@@ -3392,19 +3401,24 @@ static bool InstallLstrcmpHook() {
 }
 
 // ================================================================
-// 21. GetPrivateProfileStringA — Cache
+// ================================================================
+// 21. GetPrivateProfileStringA / GetPrivateProfileIntA / WritePrivateProfileStringA — Cache
 //
-// WHAT: Caches INI file reads (config.wtf, bindings-cache.wtf).
+// WHAT: Caches INI file reads (config.wtf, bindings-cache.wtf) and
+//       accelerates writes with write-through + invalidate semantics.
 // WHY:  WoW reads .wtf files during addon init, key binding setup,
 //       and CVAR initialization. Each read is a file open + parse.
-//       Values rarely change during a session.
-// HOW:  1. 128-slot cache using combined hash of (appName, keyName)
-//       2. Only caches successful reads (value retrieved)
-//       3. Returns cached string directly — no file I/O
-// STATUS: Active — eliminates redundant .wtf file reads
+//       GetPrivateProfileIntA calls GetPrivateProfileStringA internally
+//       then atoi() — caching both saves the full I/O + parse path.
+//       Write caching avoids re-parsing the file on next read.
+// HOW:  1. Unified 256-slot cache using FNV-1a hash of (appName, keyName, fileName)
+//       2. GetPrivateProfileStringA: cache hit → return string; miss → read + cache
+//       3. GetPrivateProfileIntA: cache hit → parse int; miss → read + cache + parse
+//       4. WritePrivateProfileStringA: write-through + invalidate cache slot
+// STATUS: Active — eliminates redundant .wtf file reads + parses
 // ================================================================
 
-static constexpr int PROF_CACHE_SIZE = 128;
+static constexpr int PROF_CACHE_SIZE = 256;
 static constexpr int PROF_CACHE_MASK = PROF_CACHE_SIZE - 1;
 static constexpr int PROF_MAX_VALUE  = 512;
 
@@ -3415,9 +3429,45 @@ struct ProfCacheEntry {
 };
 
 static ProfCacheEntry g_profCache[PROF_CACHE_SIZE] = {};
+static SRWLOCK g_profCacheLock = SRWLOCK_INIT;
+
+// FNV-1a hash for (appName, keyName, fileName) — reduces collisions vs 2-key hash
+static uint32_t ProfCacheHash(LPCSTR appName, LPCSTR keyName, LPCSTR fileName) {
+    uint32_t hash = 0x811C9DC5;
+    if (appName) {
+        for (const char* p = appName; *p; p++) {
+            char c = *p;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            hash ^= (uint8_t)c;
+            hash *= 0x01000193;
+        }
+    }
+    if (keyName) {
+        for (const char* p = keyName; *p; p++) {
+            char c = *p;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            hash ^= (uint8_t)c;
+            hash *= 0x01000193;
+        }
+    }
+    if (fileName) {
+        for (const char* p = fileName; *p; p++) {
+            char c = *p;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            hash ^= (uint8_t)c;
+            hash *= 0x01000193;
+        }
+    }
+    return hash;
+}
 
 typedef DWORD (WINAPI* GetPrivateProfileStringA_fn)(LPCSTR, LPCSTR, LPCSTR, LPSTR, DWORD, LPCSTR);
+typedef UINT  (WINAPI* GetPrivateProfileIntA_fn)(LPCSTR, LPCSTR, INT, LPCSTR);
+typedef BOOL  (WINAPI* WritePrivateProfileStringA_fn)(LPCSTR, LPCSTR, LPCSTR, LPCSTR);
+
 static GetPrivateProfileStringA_fn orig_GetPrivateProfileStringA = nullptr;
+static GetPrivateProfileIntA_fn    orig_GetPrivateProfileIntA    = nullptr;
+static WritePrivateProfileStringA_fn orig_WritePrivateProfileStringA = nullptr;
 
 static DWORD WINAPI hooked_GetPrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
     LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
@@ -3425,60 +3475,143 @@ static DWORD WINAPI hooked_GetPrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpK
     if (!lpAppName || !lpKeyName || !lpReturnedString || nSize == 0)
         return orig_GetPrivateProfileStringA(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName);
 
-    uint32_t hash = 0x811C9DC5;
-    if (lpAppName) {
-        for (const char* p = lpAppName; *p; p++) {
-            char c = *p;
-            if (c >= 'A' && c <= 'Z') c += 32;
-            hash ^= (uint8_t)c;
-            hash *= 0x01000193;
-        }
-    }
-    if (lpKeyName) {
-        for (const char* p = lpKeyName; *p; p++) {
-            char c = *p;
-            if (c >= 'A' && c <= 'Z') c += 32;
-            hash ^= (uint8_t)c;
-            hash *= 0x01000193;
-        }
-    }
+    uint32_t hash = ProfCacheHash(lpAppName, lpKeyName, lpFileName);
     int slot = hash & PROF_CACHE_MASK;
-    ProfCacheEntry* e = &g_profCache[slot];
 
-    if (e->valid && e->keyHash == hash) {
+    AcquireSRWLockShared(&g_profCacheLock);
+    ProfCacheEntry* e = &g_profCache[slot];
+    bool hit = (e->valid && e->keyHash == hash);
+    if (hit) {
         DWORD valLen = (DWORD)strlen(e->value);
         DWORD copyLen = (valLen < nSize - 1) ? valLen : (nSize - 1);
         memcpy(lpReturnedString, e->value, copyLen);
         lpReturnedString[copyLen] = '\0';
         g_profHits++;
+        ReleaseSRWLockShared(&g_profCacheLock);
         return copyLen;
     }
+    ReleaseSRWLockShared(&g_profCacheLock);
 
     DWORD result = orig_GetPrivateProfileStringA(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName);
 
     if (result > 0 && lpReturnedString[0] != '\0' && result < PROF_MAX_VALUE) {
+        AcquireSRWLockExclusive(&g_profCacheLock);
         e->keyHash = hash;
         memcpy(e->value, lpReturnedString, result + 1);
         e->valid = true;
+        ReleaseSRWLockExclusive(&g_profCacheLock);
     }
 
     g_profMisses++;
     return result;
 }
 
+static UINT WINAPI hooked_GetPrivateProfileIntA(LPCSTR lpAppName, LPCSTR lpKeyName,
+    INT nDefault, LPCSTR lpFileName)
+{
+    if (!lpAppName || !lpKeyName)
+        return orig_GetPrivateProfileIntA(lpAppName, lpKeyName, nDefault, lpFileName);
+
+    uint32_t hash = ProfCacheHash(lpAppName, lpKeyName, lpFileName);
+    int slot = hash & PROF_CACHE_MASK;
+
+    AcquireSRWLockShared(&g_profCacheLock);
+    ProfCacheEntry* e = &g_profCache[slot];
+    bool hit = (e->valid && e->keyHash == hash);
+    if (hit) {
+        // Parse cached string value as int
+        char* endPtr = nullptr;
+        long val = strtol(e->value, &endPtr, 10);
+        ReleaseSRWLockShared(&g_profCacheLock);
+        if (endPtr != e->value) {
+            g_profIntHits++;
+            return (UINT)val;
+        }
+        // Fall back to original if parse fails (e.g., empty or non-numeric)
+        return orig_GetPrivateProfileIntA(lpAppName, lpKeyName, nDefault, lpFileName);
+    }
+    ReleaseSRWLockShared(&g_profCacheLock);
+
+    // Miss — read from file
+    char buf[64];
+    UINT result = (UINT)orig_GetPrivateProfileStringA(lpAppName, lpKeyName, nullptr, buf, sizeof(buf), lpFileName);
+    if (result > 0 && buf[0] != '\0') {
+        char* endPtr = nullptr;
+        long val = strtol(buf, &endPtr, 10);
+        if (endPtr == buf) {
+            // Non-numeric — cache the string but return default
+            g_profIntMisses++;
+            return nDefault;
+        }
+        g_profIntMisses++;
+        return (UINT)val;
+    }
+
+    g_profIntMisses++;
+    return nDefault;
+}
+
+static BOOL WINAPI hooked_WritePrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
+    LPCSTR lpString, LPCSTR lpFileName)
+{
+    BOOL result = orig_WritePrivateProfileStringA(lpAppName, lpKeyName, lpString, lpFileName);
+
+    if (result && lpAppName && lpKeyName) {
+        // Write-through: update cache immediately
+        uint32_t hash = ProfCacheHash(lpAppName, lpKeyName, lpFileName);
+        int slot = hash & PROF_CACHE_MASK;
+
+        AcquireSRWLockExclusive(&g_profCacheLock);
+        ProfCacheEntry* e = &g_profCache[slot];
+        if (lpString && lpString[0] != '\0' && strlen(lpString) < PROF_MAX_VALUE) {
+            e->keyHash = hash;
+            strncpy(e->value, lpString, PROF_MAX_VALUE - 1);
+            e->value[PROF_MAX_VALUE - 1] = '\0';
+            e->valid = true;
+            g_profWriteHits++;
+        } else {
+            // Delete/null write — invalidate slot
+            if (e->valid && e->keyHash == hash) {
+                e->valid = false;
+                g_profWriteInvalidates++;
+            }
+        }
+        ReleaseSRWLockExclusive(&g_profCacheLock);
+    }
+
+    return result;
+}
+
 static bool InstallGetPrivateProfileCache() {
 #if CRASH_TEST_DISABLE_PROFILE_CACHE
-    Log("GetPrivateProfileStringA cache: DISABLED (crash isolation)");
+    Log("GetPrivateProfile cache: DISABLED (crash isolation)");
     return false;
 #else
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
     if (!hK32) return false;
-    void* p = (void*)GetProcAddress(hK32, "GetPrivateProfileStringA");
-    if (!p) return false;
-    if (MH_CreateHook(p, (void*)hooked_GetPrivateProfileStringA, (void**)&orig_GetPrivateProfileStringA) != MH_OK) return false;
-    if (MH_EnableHook(p) != MH_OK) return false;
-    Log("GetPrivateProfileStringA hook: ACTIVE (cache, %d slots, %dB max value)", PROF_CACHE_SIZE, PROF_MAX_VALUE);
-    return true;
+
+    int ok = 0;
+
+    // GetPrivateProfileStringA
+    void* pStr = (void*)GetProcAddress(hK32, "GetPrivateProfileStringA");
+    if (pStr && MH_CreateHook(pStr, (void*)hooked_GetPrivateProfileStringA, (void**)&orig_GetPrivateProfileStringA) == MH_OK)
+        if (MH_EnableHook(pStr) == MH_OK) ok++;
+
+    // GetPrivateProfileIntA
+    void* pInt = (void*)GetProcAddress(hK32, "GetPrivateProfileIntA");
+    if (pInt && MH_CreateHook(pInt, (void*)hooked_GetPrivateProfileIntA, (void**)&orig_GetPrivateProfileIntA) == MH_OK)
+        if (MH_EnableHook(pInt) == MH_OK) ok++;
+
+    // WritePrivateProfileStringA
+    void* pWrite = (void*)GetProcAddress(hK32, "WritePrivateProfileStringA");
+    if (pWrite && MH_CreateHook(pWrite, (void*)hooked_WritePrivateProfileStringA, (void**)&orig_WritePrivateProfileStringA) == MH_OK)
+        if (MH_EnableHook(pWrite) == MH_OK) ok++;
+
+    if (ok > 0) {
+        Log("GetPrivateProfile cache: ACTIVE (%d/3 hooks — StringA+IntA+WriteA, %d slots, write-through)", ok, PROF_CACHE_SIZE);
+        return true;
+    }
+    return false;
 #endif
 }
 
