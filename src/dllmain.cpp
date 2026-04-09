@@ -3736,38 +3736,7 @@ static void* __cdecl hooked_luaH_get(int table, void* key) {
                     InterlockedIncrement(&g_tableGetHits);
                     return (void*)(array + 16 * (iKey - 1));
                 }
-                // Integer key not in array — check hash collision chain
-                unsigned char lsizenode = *(unsigned char*)(table + TABLE_LSIZE_OFF);
-                if (lsizenode > 0 && lsizenode <= 31) {
-                    unsigned int hashSize = (1u << lsizenode);
-                    // Lua 5.1 integer hash: (dkey + 1) mod hashSize (or mod odd variant)
-                    double dk = (double)iKey;
-                    int iKeyPlus1 = iKey + 1;
-                    int hiPart = *(int*)((char*)&dk + 4);
-                    unsigned int h = (unsigned int)(iKeyPlus1 + hiPart);
-                    unsigned int mask = (hashSize > 1) ? (hashSize - 1) : 0u;
-                    if (mask == 0) h = 0; else h %= (hashSize | 1u);
-
-                    uintptr_t nodeBase = *(uintptr_t*)(table + TABLE_NODE_OFF);
-                    uintptr_t node = nodeBase + 40 * h;
-
-                    while (node != 0) {
-                        int nkt = *(int*)(node + 0x18);
-                        if (nkt == LUA_TNUMBER) {
-                            double nk = *(double*)(node + 0x10);
-                            if ((double)iKey == nk) {
-                                InterlockedIncrement(&g_tableGetHits);
-                                return (void*)node;
-                            }
-                        }
-                        int nn = *(int*)(node + 0x20);
-                        if (nn == 0) break;
-                        node = (uintptr_t)nn;
-                    }
-                    // Not found — nil sentinel
-                    InterlockedIncrement(&g_tableGetHits);
-                    return (void*)g_luaNilObject;
-                }
+                // Integer key not in array part — fallback to original
             }
         }
 
