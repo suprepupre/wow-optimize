@@ -294,6 +294,12 @@ static bool InstallWorkerThreadPool() {
     g_miscThread = CreateThread(NULL, 0, MiscThreadProc, NULL, 0, NULL);
 
     if (g_workerThread && g_miscThread) {
+        // Queue a warm-up task to verify worker pipeline
+        WorkerSubmitTask([](void*){
+            // Warm-up: touch memory on worker thread
+            volatile char scratch[256];
+            for (int i = 0; i < 256; i++) scratch[i] = (char)i;
+        }, nullptr);
         return true;
     }
     return false;
