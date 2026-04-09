@@ -87,8 +87,10 @@
 #define CRASH_TEST_DISABLE_MSGPUMP_RC1          1   // sub_869E00 frame-continue (ABANDONED — freezes on char select, incompatible with command pump arch)
 #define CRASH_TEST_DISABLE_SWAP_RC1             0   // sub_69E220 swap optimization — glFinish skip (Vulkan/D3D9 only)
 #define CRASH_TEST_DISABLE_TABLERESHAPE_RC1     0   // luaH_resize table rehash prevention (rc1)
+#define CRASH_TEST_DISABLE_TABLE_LOOKUP_FASTPATH 0   // luaH_get/luaH_set fast path (rc1)
 
 // Forward declarations
+static bool InstallTableLookupFastPath();
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
 
@@ -150,6 +152,8 @@ static long g_lstrcmpHits = 0, g_lstrcmpFallbacks = 0;
 static long g_profHits = 0, g_profMisses = 0;
 static long g_profIntHits = 0, g_profIntMisses = 0;
 static long g_profWriteHits = 0, g_profWriteInvalidates = 0;
+static long g_tableGetHits = 0, g_tableGetFallbacks = 0;
+static long g_tableSetHits = 0, g_tableSetFallbacks = 0;
 static uint64_t g_tableReshapeHits = 0;
 
 // ================================================================
@@ -2518,6 +2522,14 @@ static void DumpPeriodicStats() {
     if (g_profWriteHits + g_profWriteInvalidates > 0)
         Log("[Stats] WritePrivateProfileStringA: %ld write-through, %ld invalidates",
             g_profWriteHits, g_profWriteInvalidates);
+    if (g_tableGetHits + g_tableGetFallbacks > 0)
+        Log("[Stats] luaH_get: %ld hits, %ld fallbacks (%.1f%%)",
+            g_tableGetHits, g_tableGetFallbacks,
+            (double)g_tableGetHits / (g_tableGetHits + g_tableGetFallbacks) * 100.0);
+    if (g_tableSetHits + g_tableSetFallbacks > 0)
+        Log("[Stats] luaH_set: %ld hits, %ld fallbacks (%.1f%%)",
+            g_tableSetHits, g_tableSetFallbacks,
+            (double)g_tableSetHits / (g_tableSetHits + g_tableSetFallbacks) * 100.0);
 
     if (g_tableReshapeHits > 0)
         Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
@@ -3003,6 +3015,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Lua Table Rehash (testbuild) ---");
     bool tableReshapeOk = InstallLuaHResizeHook();
+
+    Log("--- Table Lookup Fast Path ---");
+    bool tableLookupOk = InstallTableLookupFastPath();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -3611,6 +3626,227 @@ static bool InstallGetPrivateProfileCache() {
         Log("GetPrivateProfile cache: ACTIVE (%d/3 hooks — StringA+IntA+WriteA, %d slots, write-through)", ok, PROF_CACHE_SIZE);
         return true;
     }
+    return false;
+#endif
+}
+
+// ================================================================
+// 22. Lua Table Lookup Fast Path — luaH_get / luaH_set
+//
+// WHAT: Fast path for common Lua table access patterns:
+//       - Integer key in array part: array[key-1] direct access
+//       - String key in hash part: pointer equality on first node
+// WHY:  Table lookup is the MOST frequent Lua VM operation.
+//       Every t[key] and t[key] = value goes through luaH_get/luaH_set.
+//       In addon-heavy raids, this is millions of calls per session.
+// HOW:  1. Hooks luaH_get (0x0085C470) and luaH_set (0x0085C520)
+//       2. Fast path for integer keys: if (key-1) < sizearray → direct
+//       3. Fast path for string keys: if hash first node matches → direct
+//       4. Fallback: original luaH_get/luaH_set
+// SAFETY: SEH-protected, validates Table* fields, never breaks metamethods
+//         (metamethods checked by luaV_gettable BEFORE calling luaH_get)
+// STATUS: Active (CRASH_TEST_DISABLE_TABLE_LOOKUP_FASTPATH to disable)
+// ================================================================
+
+// Table structure (from sub_85C3A0, sub_85BCB0 analysis):
+//   +0x0B: lsizenode (byte) — hash table size = 2^lsizenode
+//   +0x10: array  (TValue*)  — array part pointer
+//   +0x14: node   (Node*)    — hash part base pointer
+//   +0x20: sizearray (int)   — number of array elements
+
+// Node structure (40 bytes, from sub_85C470 analysis):
+//   +0x00: TValue i_val (value stored)
+//   +0x10: TValue i_key (key: 8B value + 4B type + 4B padding/gc)
+//   +0x20: int next (collision chain index)
+
+// TString structure (from sub_856BC0):
+//   +0x0C: hash (DWORD)
+
+// TValue (16 bytes):
+//   +0x00: union { double n; void* gc; void* p; }
+//   +0x08: int tt (type tag)
+//   +0x0C: padding
+
+// nil object sentinel
+static const void* g_luaNilObject = nullptr;
+
+// Known addresses (build 12340)
+#define LUAH_GET_ADDR     0x0085C470
+#define LUAH_SET_ADDR     0x0085C520
+
+// Table struct offsets
+#define TABLE_ARRAY_OFF    0x10
+#define TABLE_NODE_OFF     0x14
+#define TABLE_LSIZE_OFF    0x0B
+#define TABLE_SIZEARRAY_OFF 0x20
+
+// TValue offsets
+#define TValue_TYPE_OFF    0x08
+#define TValue_N_OFF       0x00
+
+// TString offsets
+#define TString_HASH_OFF   0x0C
+
+// Node size
+#define NODE_SIZE          40
+
+// Type tags (Lua 5.1)
+#define LUA_TNIL           0
+#define LUA_TNUMBER        3
+#define LUA_TSTRING        4
+
+typedef void* (__cdecl* luaH_get_fn)(int, void*);
+typedef void* (__cdecl* luaH_set_fn)(int, int, void*);
+
+static luaH_get_fn orig_luaH_get = nullptr;
+static luaH_set_fn orig_luaH_set = nullptr;
+
+static void* __cdecl hooked_luaH_get(int table, void* key) {
+    // Validate table pointer (basic sanity)
+    if (table == 0 || key == nullptr) {
+        InterlockedIncrement(&g_tableGetFallbacks);
+        return orig_luaH_get(table, key);
+    }
+
+    __try {
+        int keyType = *(int*)((uintptr_t)key + TValue_TYPE_OFF);
+
+        // Fast path 1: Integer key in array part
+        if (keyType == LUA_TNUMBER) {
+            double dKey = *(double*)((uintptr_t)key + TValue_N_OFF);
+            int iKey = (int)dKey;
+
+            // Check if it's an exact integer
+            if ((double)iKey == dKey) {
+                int sizeArray = *(int*)(table + TABLE_SIZEARRAY_OFF);
+
+                if ((unsigned int)(iKey - 1) < (unsigned int)sizeArray) {
+                    // Key is in array part — direct access
+                    uintptr_t array = *(uintptr_t*)(table + TABLE_ARRAY_OFF);
+                    InterlockedIncrement(&g_tableGetHits);
+                    return (void*)(array + 16 * (iKey - 1));
+                }
+                // Integer key not in array — fallback to original
+            }
+        }
+
+        // Fast path 2: String key in hash part
+        if (keyType == LUA_TSTRING) {
+            uintptr_t ts = *(uintptr_t*)((uintptr_t)key);  // TString*
+            if (ts != 0) {
+                unsigned int strHash = *(unsigned int*)(ts + TString_HASH_OFF);
+                unsigned char lsizenode = *(unsigned char*)(table + TABLE_LSIZE_OFF);
+
+                if (lsizenode > 0 && lsizenode <= 31) {
+                    unsigned int mask = (1u << lsizenode) - 1;
+                    uintptr_t nodeBase = *(uintptr_t*)(table + TABLE_NODE_OFF);
+                    uintptr_t node = nodeBase + 40 * (strHash & mask);
+
+                    // Check first node — pointer equality
+                    int nodeKeyType = *(int*)(node + 0x18);
+                    if (nodeKeyType == LUA_TSTRING) {
+                        uintptr_t nodeKeyStr = *(uintptr_t*)(node + 0x1C);
+                        if (nodeKeyStr == ts) {
+                            // Exact match on first node — most common case
+                            InterlockedIncrement(&g_tableGetHits);
+                            return (void*)node;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // SEH guard — fallback on any exception
+    }
+
+    InterlockedIncrement(&g_tableGetFallbacks);
+    return orig_luaH_get(table, key);
+}
+
+static void* __cdecl hooked_luaH_set(int L, int table, void* key) {
+    if (table == 0 || key == nullptr) {
+        InterlockedIncrement(&g_tableSetFallbacks);
+        return orig_luaH_set(L, table, key);
+    }
+
+    __try {
+        int keyType = *(int*)((uintptr_t)key + TValue_TYPE_OFF);
+
+        // Fast path: Integer key in array part
+        if (keyType == LUA_TNUMBER) {
+            double dKey = *(double*)((uintptr_t)key + TValue_N_OFF);
+            int iKey = (int)dKey;
+
+            if ((double)iKey == dKey) {
+                int sizeArray = *(int*)(table + TABLE_SIZEARRAY_OFF);
+
+                if ((unsigned int)(iKey - 1) < (unsigned int)sizeArray) {
+                    uintptr_t array = *(uintptr_t*)(table + TABLE_ARRAY_OFF);
+                    InterlockedIncrement(&g_tableSetHits);
+                    return (void*)(array + 16 * (iKey - 1));
+                }
+            }
+        }
+
+        // Fast path: String key already exists in hash
+        if (keyType == LUA_TSTRING) {
+            uintptr_t ts = *(uintptr_t*)((uintptr_t)key);
+            if (ts != 0) {
+                unsigned int strHash = *(unsigned int*)(ts + TString_HASH_OFF);
+                unsigned char lsizenode = *(unsigned char*)(table + TABLE_LSIZE_OFF);
+
+                if (lsizenode > 0 && lsizenode <= 31) {
+                    unsigned int mask = (1u << lsizenode) - 1;
+                    uintptr_t nodeBase = *(uintptr_t*)(table + TABLE_NODE_OFF);
+                    uintptr_t node = nodeBase + 40 * (strHash & mask);
+
+                    // Check first node
+                    int nodeKeyType = *(int*)(node + 0x18);
+                    if (nodeKeyType == LUA_TSTRING) {
+                        uintptr_t nodeKeyStr = *(uintptr_t*)(node + 0x1C);
+                        if (nodeKeyStr == ts) {
+                            InterlockedIncrement(&g_tableSetHits);
+                            return (void*)(node + 0x00);  // i_val pointer
+                        }
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    InterlockedIncrement(&g_tableSetFallbacks);
+    return orig_luaH_set(L, table, key);
+}
+
+static bool InstallTableLookupFastPath() {
+#if CRASH_TEST_DISABLE_TABLE_LOOKUP_FASTPATH
+    Log("Table Lookup Fast Path: DISABLED (crash isolation)");
+    return false;
+#else
+    // Set nil object sentinel (luaO_nilobject from WoW.exe)
+    g_luaNilObject = (const void*)0x00A46F78;
+
+    if (!IsExecutableMemory(LUAH_GET_ADDR) || !IsExecutableMemory(LUAH_SET_ADDR)) {
+        Log("Table Lookup Fast Path: INVALID addresses");
+        return false;
+    }
+
+    int ok = 0;
+
+    if (MH_CreateHook((void*)LUAH_GET_ADDR, (void*)hooked_luaH_get, (void**)&orig_luaH_get) == MH_OK)
+        if (MH_EnableHook((void*)LUAH_GET_ADDR) == MH_OK) ok++;
+
+    if (MH_CreateHook((void*)LUAH_SET_ADDR, (void*)hooked_luaH_set, (void**)&orig_luaH_set) == MH_OK)
+        if (MH_EnableHook((void*)LUAH_SET_ADDR) == MH_OK) ok++;
+
+    if (ok > 0) {
+        Log("Table Lookup Fast Path: ACTIVE (%d/2 hooks — luaH_get/luaH_set)", ok);
+        return true;
+    }
+    Log("Table Lookup Fast Path: FAILED to hook");
     return false;
 #endif
 }
