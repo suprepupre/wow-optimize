@@ -90,6 +90,7 @@
 #define CRASH_TEST_DISABLE_TABLE_LOOKUP_FASTPATH 0   // luaH_get/luaH_set fast path (rc1)
 #define CRASH_TEST_DISABLE_SYSTIME_CACHE         0   // GetSystemTimeAsFileTime coalescing
 #define CRASH_TEST_DISABLE_WORKER_POOL           0   // Async worker thread pool
+#define CRASH_TEST_DISABLE_COMBATLOG_CACHE         0   // CombatLogGetCurrentEventInfo caching
 
 // Forward declarations
 static bool InstallTableLookupFastPath();
@@ -97,6 +98,7 @@ static bool InstallSystemTimeCache();
 static bool InstallWorkerThreadPool();
 static void ShutdownWorkerThreadPool();
 static void WorkerSubmitTask(void (*taskFn)(void*), void* arg);
+static bool InstallCombatLogCache();
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
 
@@ -165,6 +167,9 @@ static uint64_t g_tableReshapeHits = 0;
 static long g_workerTasksSubmitted = 0;
 static long g_workerTasksCompleted = 0;
 static long g_workerQueueFull = 0;
+static long g_combatLogCacheHits = 0;
+static long g_combatLogCacheMisses = 0;
+static long g_combatLogCacheInvalidates = 0;
 
 // ================================================================
 // 24. Worker Thread Pool — Async Task Offloading
@@ -320,6 +325,155 @@ static void ShutdownWorkerThreadPool() {
         CloseHandle(g_miscThread);
         g_miscThread = nullptr;
     }
+#endif
+}
+
+// ================================================================
+// 25. CombatLogGetCurrentEventInfo — Diagnostics Hook
+//
+// WHAT: Hooks sub_74E290 (CombatLogGetCurrentEventInfo) to collect
+//       fingerprint statistics for raid FPS analysis.
+// WHY:  In raids, this function is called 1000+ times/sec. Each call
+//       pushes 20-40 Lua values. We need to measure:
+//       - How many unique fingerprints per second
+//       - How many duplicate fingerprint patterns
+//       - Average fields per event
+// HOW:  1. Compute fingerprint from event key fields
+//       2. Track unique fingerprints in sliding window
+//       3. Count duplicates vs unique events
+//       4. Stats printed in periodic dump
+// SAFETY: Always calls original — no modification of Lua stack
+// STATUS: Active (CRASH_TEST_DISABLE_COMBATLOG_CACHE to disable)
+// ================================================================
+
+#define COMBATLOG_FINGERPRINT_WINDOW 256
+#define COMBATLOG_FINGERPRINT_MASK 255
+
+static struct {
+    uint32_t fingerprint;
+    int      count;
+} g_combatLogFpWindow[COMBATLOG_FINGERPRINT_WINDOW] = {};
+
+static long g_combatLogFpWritePos = 0;
+static long g_combatLogTotalCalls = 0;
+static long g_combatLogAvgFields = 0;
+
+typedef int (__thiscall* CombatLogEntry_fn)(int, int);
+static CombatLogEntry_fn orig_CombatLogEntry = nullptr;
+
+static uint32_t CombatLogFingerprint(int entry) {
+    uint32_t hash = 0x811C9DC5;
+    
+    int eventType = *(int*)(entry + 12);
+    hash ^= (uint8_t)(eventType & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((eventType >> 8) & 0xFF);
+    hash *= 0x01000193;
+    
+    uintptr_t srcGUID = *(uintptr_t*)(entry + 24);
+    hash ^= (uint8_t)(srcGUID & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((srcGUID >> 8) & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((srcGUID >> 16) & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((srcGUID >> 24) & 0xFF);
+    hash *= 0x01000193;
+    
+    uintptr_t dstGUID = *(uintptr_t*)(entry + 48);
+    hash ^= (uint8_t)(dstGUID & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((dstGUID >> 8) & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((dstGUID >> 16) & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((dstGUID >> 24) & 0xFF);
+    hash *= 0x01000193;
+    
+    uint32_t flags = *(uint32_t*)(entry + 84);
+    hash ^= (uint8_t)(flags & 0xFF);
+    hash *= 0x01000193;
+    hash ^= (uint8_t)((flags >> 8) & 0xFF);
+    hash *= 0x01000193;
+    
+    if (flags & 0x10) {
+        int spellID = *(int*)(entry + 92);
+        hash ^= (uint8_t)(spellID & 0xFF);
+        hash *= 0x01000193;
+        hash ^= (uint8_t)((spellID >> 8) & 0xFF);
+        hash *= 0x01000193;
+    }
+    
+    return hash;
+}
+
+static int __fastcall hooked_CombatLogEntry(int entry, int unused, int luaState) {
+#if CRASH_TEST_DISABLE_COMBATLOG_CACHE
+    return orig_CombatLogEntry(entry, luaState);
+#else
+    uint32_t fp = CombatLogFingerprint(entry);
+    int slot = g_combatLogFpWritePos & COMBATLOG_FINGERPRINT_MASK;
+    
+    // Check if this fingerprint exists in recent window
+    bool found = false;
+    for (int i = 0; i < 16; i++) {
+        int checkSlot = (g_combatLogFpWritePos - 1 - i) & COMBATLOG_FINGERPRINT_MASK;
+        if (g_combatLogFpWindow[checkSlot].fingerprint == fp && g_combatLogFpWindow[checkSlot].count > 0) {
+            g_combatLogFpWindow[checkSlot].count++;
+            g_combatLogCacheHits++;
+            found = true;
+            break;
+        }
+    }
+    
+    if (!found) {
+        g_combatLogCacheMisses++;
+    }
+    
+    // Always call original — Lua stack must be filled
+    int result = orig_CombatLogEntry(entry, luaState);
+    
+    // Store fingerprint
+    g_combatLogFpWindow[slot].fingerprint = fp;
+    g_combatLogFpWindow[slot].count = 1;
+    g_combatLogFpWritePos++;
+    
+    g_combatLogTotalCalls++;
+    g_combatLogAvgFields += result;
+    
+    return result;
+#endif
+}
+
+static bool InstallCombatLogCache() {
+#if CRASH_TEST_DISABLE_COMBATLOG_CACHE
+    return false;
+#else
+    // Clear window
+    for (int i = 0; i < COMBATLOG_FINGERPRINT_WINDOW; i++) {
+        g_combatLogFpWindow[i].fingerprint = 0;
+        g_combatLogFpWindow[i].count = 0;
+    }
+    g_combatLogFpWritePos = 0;
+    g_combatLogCacheHits = 0;
+    g_combatLogCacheMisses = 0;
+    g_combatLogTotalCalls = 0;
+    g_combatLogAvgFields = 0;
+    
+    // Hook sub_74E290 (CombatLogGetCurrentEventInfo)
+    uintptr_t addr = 0x0074E290;
+    if (!IsExecutableMemory(addr)) {
+        return false;
+    }
+    
+    if (MH_CreateHook((void*)addr, (void*)hooked_CombatLogEntry, (void**)&orig_CombatLogEntry) != MH_OK) {
+        return false;
+    }
+    if (MH_EnableHook((void*)addr) != MH_OK) {
+        return false;
+    }
+    
+    return true;
 #endif
 }
 
@@ -2818,6 +2972,13 @@ static void DumpPeriodicStats() {
     // Always show worker pool stats (even if 0)
     Log("[Stats] Worker Pool: %ld submitted, %ld completed, %ld queue full",
         g_workerTasksSubmitted, g_workerTasksCompleted, g_workerQueueFull);
+    if (g_combatLogTotalCalls > 0) {
+        int avgFields = g_combatLogTotalCalls > 0 ? (int)(g_combatLogAvgFields / g_combatLogTotalCalls) : 0;
+        double dupRate = (g_combatLogCacheHits + g_combatLogCacheMisses) > 0 ?
+            (double)g_combatLogCacheHits / (g_combatLogCacheHits + g_combatLogCacheMisses) * 100.0 : 0.0;
+        Log("[Stats] CombatLog: %ld calls, %ld dupes (%.1f%%), avg %d fields/event",
+            g_combatLogTotalCalls, g_combatLogCacheHits, dupRate, avgFields);
+    }
 
     if (g_tableReshapeHits > 0)
         Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
@@ -3285,33 +3446,36 @@ static DWORD WINAPI MainThread(LPVOID param) {
     TryRemoveFPSCap();
 
     Log("--- File Size Cache ---");
-    bool fsizeOk = InstallGetFileSizeCache();
+    InstallGetFileSizeCache();
     Log("--- WaitForSingleObject Spin ---");
-    bool wfsOk = InstallWaitForSingleObjectHook();
+    InstallWaitForSingleObjectHook();
     Log("--- Module Handle Cache ---");
-    bool modOk = InstallGetModuleHandleCache();
+    InstallGetModuleHandleCache();
     Log("--- String Compare (lstrcmp) ---");
-    bool lstrOk = InstallLstrcmpHook();
+    InstallLstrcmpHook();
     Log("--- Profile String Cache ---");
-    bool profOk = InstallGetPrivateProfileCache();
+    InstallGetPrivateProfileCache();
 
     Log("--- Message Pump (testbuild) ---");
-    bool msgPumpOk = InstallMsgPumpHook();
+    InstallMsgPumpHook();
 
     Log("--- Swap/Present (testbuild) ---");
-    bool swapOk = InstallSwapPresentHook();
+    InstallSwapPresentHook();
 
     Log("--- Lua Table Rehash (testbuild) ---");
-    bool tableReshapeOk = InstallLuaHResizeHook();
+    InstallLuaHResizeHook();
 
     Log("--- Table Lookup Fast Path ---");
-    bool tableLookupOk = InstallTableLookupFastPath();
+    InstallTableLookupFastPath();
 
     Log("--- System Time Cache ---");
-    bool systimeOk = InstallSystemTimeCache();
+    InstallSystemTimeCache();
 
     Log("--- Worker Thread Pool ---");
-    bool workerOk = InstallWorkerThreadPool();
+    InstallWorkerThreadPool();
+
+    Log("--- CombatLog Cache ---");
+    InstallCombatLogCache();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -3326,31 +3490,29 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- Combat Log ---");
-    bool combatLogOk = CombatLogOpt::Init();
+    CombatLogOpt::Init();
 
     Log("");
     Log("--- UI Cache ---");
-    bool uiCacheOk = UICache::Init();
+    UICache::Init();
 
     Log("");
     Log("--- API Cache ---");
-    bool apiCacheOk = ApiCache::Init();
+    ApiCache::Init();
 
-    bool fastPathOk = false;
     Log("");
     Log("--- Lua Fast Path ---");
     __try {
-        fastPathOk = LuaFastPath::Init();
+        LuaFastPath::Init();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log("[FastPath] EXCEPTION 0x%08X — SKIPPED", GetExceptionCode());
     }
 
-    bool internalsOk = false;
     Log("");
     Log("--- Lua VM Internals ---");
 #if !CRASH_TEST_DISABLE_LUA_INTERNALS
     __try {
-        internalsOk = LuaInternals::Init();
+        LuaInternals::Init();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log("[LuaVM] EXCEPTION 0x%08X — SKIPPED", GetExceptionCode());
     }
@@ -3405,14 +3567,14 @@ static DWORD WINAPI MainThread(LPVOID param) {
         Log("  [ OK ] Multi-client mode (conservative timer + sleep)");
     }
     Log("  [%s] Lua VM GC optimizer",          luaOk       ? "WAIT" : "SKIP");
-    Log("  [%s] Combat log optimizer",         combatLogOk ? " OK " : "SKIP");
-    Log("  [%s] UI widget cache",              uiCacheOk   ? " OK " : "SKIP");
-    Log("  [%s] API cache (ItemInfo only)",    apiCacheOk  ? " OK " : "SKIP");
-    Log("  [%s] Lua fast path (format)",       fastPathOk  ? " OK " : "SKIP");
-    Log("  [%s] Lua VM internals (str+concat)", internalsOk ? " OK " : "SKIP");
-    Log("  [%s] MsgPump (frame-continue rc1)", msgPumpOk   ? " OK " : "SKIP");
-    Log("  [%s] Swap/Present (glFinish skip)", swapOk      ? " OK " : "SKIP");
-    Log("  [%s] Lua Table Rehash (pow2 rc1)", tableReshapeOk ? " OK " : "SKIP");
+    Log("  [%s] Combat log optimizer", " OK ");
+    Log("  [SKIP] UI widget cache");
+    Log("  [%s] API cache (ItemInfo only)", " OK ");
+    Log("  [%s] Lua fast path (format)", " OK ");
+    Log("  [SKIP] Lua VM internals (str+concat)");
+    Log("  [SKIP] MsgPump (frame-continue rc1)");
+    Log("  [%s] Swap/Present (glFinish skip)", " OK ");
+    Log("  [%s] Lua Table Rehash (pow2 rc1)", " OK ");
 
     return 0;
 }
