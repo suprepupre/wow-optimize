@@ -621,7 +621,11 @@ static void RunPeriodicMaintenanceOnMainThread() {
         if (g_nextMiCollectTick == 0) {
             g_nextMiCollectTick = nowTick + 60000;
         } else if ((LONG)(nowTick - g_nextMiCollectTick) >= 0) {
+#if !CRASH_TEST_DISABLE_WORKER_POOL
+            WorkerSubmitTask([](void*){ mi_collect(true); }, nullptr);
+#else
             mi_collect(true);
+#endif
             g_nextMiCollectTick = nowTick + 60000;
         }
     }
@@ -651,7 +655,11 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         CombatLogOpt::OnFrame(g_mainThreadId);
 
         if (LuaOpt::IsLoadingMode()) {
+#if !CRASH_TEST_DISABLE_WORKER_POOL
+            WorkerSubmitTask([](void*){ PrefetchMappedMPQs(); }, nullptr);
+#else
             PrefetchMappedMPQs();
+#endif
         } else {
             ResetPrefetchFlag();
         }
