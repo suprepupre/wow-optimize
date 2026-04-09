@@ -187,7 +187,7 @@ static long g_combatLogCacheInvalidates = 0;
 // STATUS: Active (CRASH_TEST_DISABLE_WORKER_POOL to disable)
 // ================================================================
 
-static constexpr int WP_QUEUE_SIZE = 256;
+static constexpr int WP_QUEUE_SIZE = 4096;
 static constexpr int WP_QUEUE_MASK = WP_QUEUE_SIZE - 1;
 
 struct WorkerTask {
@@ -346,8 +346,8 @@ static void ShutdownWorkerThreadPool() {
 // STATUS: Active (CRASH_TEST_DISABLE_COMBATLOG_CACHE to disable)
 // ================================================================
 
-#define COMBATLOG_FINGERPRINT_WINDOW 256
-#define COMBATLOG_FINGERPRINT_MASK 255
+#define COMBATLOG_FINGERPRINT_WINDOW 1024
+#define COMBATLOG_FINGERPRINT_MASK 1023
 
 static struct {
     uint32_t fingerprint;
@@ -414,9 +414,9 @@ static int __fastcall hooked_CombatLogEntry(int entry, int unused, int luaState)
     uint32_t fp = CombatLogFingerprint(entry);
     int slot = g_combatLogFpWritePos & COMBATLOG_FINGERPRINT_MASK;
     
-    // Check if this fingerprint exists in recent window
+    // Check if this fingerprint exists in recent window (64-slot lookback)
     bool found = false;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 64; i++) {
         int checkSlot = (g_combatLogFpWritePos - 1 - i) & COMBATLOG_FINGERPRINT_MASK;
         if (g_combatLogFpWindow[checkSlot].fingerprint == fp && g_combatLogFpWindow[checkSlot].count > 0) {
             g_combatLogFpWindow[checkSlot].count++;
