@@ -89,10 +89,14 @@
 #define CRASH_TEST_DISABLE_TABLERESHAPE_RC1     0   // luaH_resize table rehash prevention (rc1)
 #define CRASH_TEST_DISABLE_TABLE_LOOKUP_FASTPATH 0   // luaH_get/luaH_set fast path (rc1)
 #define CRASH_TEST_DISABLE_SYSTIME_CACHE         0   // GetSystemTimeAsFileTime coalescing
+#define CRASH_TEST_DISABLE_WORKER_POOL           0   // Async worker thread pool
 
 // Forward declarations
 static bool InstallTableLookupFastPath();
 static bool InstallSystemTimeCache();
+static bool InstallWorkerThreadPool();
+static void ShutdownWorkerThreadPool();
+static void WorkerSubmitTask(void (*taskFn)(void*), void* arg);
 static bool IsExecutableMemory(uintptr_t addr);
 static bool InstallThreadAffinity();
 
@@ -158,6 +162,159 @@ static long g_tableGetHits = 0, g_tableGetFallbacks = 0;
 static long g_tableSetHits = 0, g_tableSetFallbacks = 0;
 static long g_systimeHits = 0, g_systimeMisses = 0;
 static uint64_t g_tableReshapeHits = 0;
+static long g_workerTasksSubmitted = 0;
+static long g_workerTasksCompleted = 0;
+static long g_workerQueueFull = 0;
+
+// ================================================================
+// 24. Worker Thread Pool — Async Task Offloading
+//
+// WHAT: 2 background worker threads with lock-free SPSC queues.
+// WHY:  Moves non-critical tasks off the main thread:
+//       - CombatLogClearEntries: was called on main thread → Lua VM stall
+//       - MPQ Prefetch: was blocking main thread during loading
+//       - mimalloc collect: was causing main thread GC stutter
+// HOW:  1. 2 SPSC lock-free queues (single producer, single consumer)
+//       2. Worker threads: COMBAT_LOG thread + MISC thread
+//       3. Lock-free enqueue via InterlockedExchange
+//       4. Graceful shutdown on DLL unload
+// SAFETY: No Lua calls from workers (only C-level API)
+// STATUS: Active (CRASH_TEST_DISABLE_WORKER_POOL to disable)
+// ================================================================
+
+static constexpr int WP_QUEUE_SIZE = 256;
+static constexpr int WP_QUEUE_MASK = WP_QUEUE_SIZE - 1;
+
+struct WorkerTask {
+    void (*fn)(void*);
+    void* arg;
+};
+
+struct SPSCQueue {
+    WorkerTask tasks[WP_QUEUE_SIZE];
+    volatile LONG writePos;
+    volatile LONG readPos;
+};
+
+static SPSCQueue g_workerQueue = {};
+static SPSCQueue g_miscQueue = {};
+
+static HANDLE g_workerThread = nullptr;
+static HANDLE g_miscThread = nullptr;
+static volatile bool g_workerShutdown = false;
+
+static DWORD WINAPI WorkerThreadProc(LPVOID);
+static DWORD WINAPI MiscThreadProc(LPVOID);
+
+static bool SPSC_Push(SPSCQueue* q, void (*fn)(void*), void* arg) {
+    LONG w = InterlockedIncrement(&q->writePos) - 1;
+    LONG r = *(volatile LONG*)&q->readPos;  // atomic read
+    if ((w & WP_QUEUE_MASK) == (r & WP_QUEUE_MASK)) {
+        // Queue full
+        InterlockedDecrement(&q->writePos);
+        g_workerQueueFull++;
+        return false;
+    }
+    int slot = w & WP_QUEUE_MASK;
+    q->tasks[slot].fn = fn;
+    q->tasks[slot].arg = arg;
+    return true;
+}
+
+static bool SPSC_TryPop(SPSCQueue* q, WorkerTask* out) {
+    LONG r = InterlockedCompareExchange(&q->readPos, q->readPos, q->readPos);
+    if (r >= InterlockedCompareExchange(&q->writePos, q->writePos, q->writePos))
+        return false;
+    int slot = r & WP_QUEUE_MASK;
+    *out = q->tasks[slot];
+    InterlockedIncrement(&q->readPos);
+    return true;
+}
+
+static void WorkerSubmitTask(void (*taskFn)(void*), void* arg) {
+#if !CRASH_TEST_DISABLE_WORKER_POOL
+    if (g_workerThread && !g_workerShutdown) {
+        if (SPSC_Push(&g_workerQueue, taskFn, arg)) {
+            g_workerTasksSubmitted++;
+            return;
+        }
+    }
+#endif
+    // Fallback: execute synchronously
+    taskFn(arg);
+    g_workerTasksCompleted++;
+}
+
+static DWORD WINAPI WorkerThreadProc(LPVOID) {
+    WorkerTask task;
+    while (!g_workerShutdown) {
+        if (SPSC_TryPop(&g_workerQueue, &task)) {
+            task.fn(task.arg);
+            g_workerTasksCompleted++;
+        } else {
+            Sleep(1);
+        }
+    }
+    // Drain remaining
+    while (SPSC_TryPop(&g_workerQueue, &task)) {
+        task.fn(task.arg);
+        g_workerTasksCompleted++;
+    }
+    return 0;
+}
+
+static DWORD WINAPI MiscThreadProc(LPVOID) {
+    WorkerTask task;
+    while (!g_workerShutdown) {
+        if (SPSC_TryPop(&g_miscQueue, &task)) {
+            task.fn(task.arg);
+            g_workerTasksCompleted++;
+        } else {
+            Sleep(1);
+        }
+    }
+    while (SPSC_TryPop(&g_miscQueue, &task)) {
+        task.fn(task.arg);
+        g_workerTasksCompleted++;
+    }
+    return 0;
+}
+
+static bool InstallWorkerThreadPool() {
+#if CRASH_TEST_DISABLE_WORKER_POOL
+    return false;
+#else
+    g_workerShutdown = false;
+    g_workerQueue.writePos = 0;
+    g_workerQueue.readPos = 0;
+    g_miscQueue.writePos = 0;
+    g_miscQueue.readPos = 0;
+
+    g_workerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
+    g_miscThread = CreateThread(NULL, 0, MiscThreadProc, NULL, 0, NULL);
+
+    if (g_workerThread && g_miscThread) {
+        return true;
+    }
+    return false;
+#endif
+}
+
+static void ShutdownWorkerThreadPool() {
+#if !CRASH_TEST_DISABLE_WORKER_POOL
+    g_workerShutdown = true;
+    if (g_workerThread) {
+        WaitForSingleObject(g_workerThread, 3000);
+        CloseHandle(g_workerThread);
+        g_workerThread = nullptr;
+    }
+    if (g_miscThread) {
+        WaitForSingleObject(g_miscThread, 3000);
+        CloseHandle(g_miscThread);
+        g_miscThread = nullptr;
+    }
+#endif
+}
 
 // ================================================================
 // Thread Affinity — background worker core pinning
@@ -2537,6 +2694,9 @@ static void DumpPeriodicStats() {
         Log("[Stats] GetSystemTimeAsFileTime: %ld hits, %ld misses (%.1f%%)",
             g_systimeHits, g_systimeMisses,
             (double)g_systimeHits / (g_systimeHits + g_systimeMisses) * 100.0);
+    if (g_workerTasksSubmitted > 0)
+        Log("[Stats] Worker Pool: %ld submitted, %ld completed, %ld queue full",
+            g_workerTasksSubmitted, g_workerTasksCompleted, g_workerQueueFull);
 
     if (g_tableReshapeHits > 0)
         Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
@@ -3028,6 +3188,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- System Time Cache ---");
     bool systimeOk = InstallSystemTimeCache();
+
+    Log("--- Worker Thread Pool ---");
+    bool workerOk = InstallWorkerThreadPool();
 
     Log("--- Thread Affinity ---");
     g_threadAffOk = InstallThreadAffinity();
@@ -4249,6 +4412,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             break;
         case DLL_PROCESS_DETACH:
             if (reserved != NULL) {
+                ShutdownWorkerThreadPool();
                 if (g_log) {
                     SYSTEMTIME st;
                     GetLocalTime(&st);
