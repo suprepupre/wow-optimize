@@ -1,8 +1,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     3,5,1,0
-PRODUCTVERSION  3,5,1,0
+FILEVERSION     3,5,2,0
+PRODUCTVERSION  3,5,2,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS__WINDOWS32
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Suprematist"
             VALUE "FileDescription",  "WoW 3.3.5a Performance Optimizer"
-            VALUE "FileVersion",      "3.5.1"
+            VALUE "FileVersion",      "3.5.2"
             VALUE "InternalName",     "wow_optimize"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "wow_optimize.dll"
             VALUE "ProductName",      "wow_optimize"
-            VALUE "ProductVersion",   "3.5.1"
+            VALUE "ProductVersion",   "3.5.2"
         END
     END
     BLOCK "VarFileInfo"

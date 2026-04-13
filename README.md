@@ -39,7 +39,7 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
 
 ### WoW API result cache
 - `GetItemInfo` — 8192-slot cache, Direct Memory Access
-- `GetSpellInfo` — 8192-slot cache, Direct Memory Access
+- `GetSpellInfo` — disabled (icon corruption, crashes on relog)
 
 ### Lua fast paths
 - Phase 1:
