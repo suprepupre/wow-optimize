@@ -4380,7 +4380,22 @@ static bool InstallLuaHResizeHook() {
 
 // Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
-    Sleep(5000);
+    // Brief defensive delay before we install MinHook trampolines and
+    // open the log. The original value was Sleep(5000) (since v1.0,
+    // 33a709e — no documented rationale). Five seconds is long enough
+    // that a fast-logging user can be in the world before any of our
+    // hooks are installed; the FrameScript_Execute hook in particular
+    // misses the world-state lua_State swap, so !LuaBoost's hasDLL()
+    // returns false and the addon installs its Lua-side ThrashGuard
+    // fallback. (This delay is independent of the version.dll proxy's
+    // own LoaderThread Sleep — users running through wow_loader.exe
+    // bypass that proxy and hit only this one.)
+    //
+    // 100 ms is enough for the loader to release the lock acquired
+    // during DllMain and for WoW.exe's CRT init to settle past
+    // anything the original 5 s might have been waiting for, while
+    // staying inside any plausible enter-world path.
+    Sleep(100);
 
     LogOpen();
     Log("========================================");

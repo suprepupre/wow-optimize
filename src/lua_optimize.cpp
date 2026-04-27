@@ -984,6 +984,49 @@ static void UpdateLuaStats(lua_State* L) {
 }
 
 
+// ================================================================
+//  Detection surface — published immediately on every lua_State swap
+//
+// WHAT: Sets the bare minimum that the !LuaBoost companion addon's
+//       hasDLL() predicate looks for:
+//
+//         type(_G.LuaBoostC_IsLoaded) == "function"
+//             and _G.LUABOOST_DLL_LOADED == true
+//
+// WHY:  SetupLuaInterface is gated behind a 50 ms / 2-frame settle
+//       window after a lua_State swap (login -> world transition,
+//       /reload). The settle exists for the heavy init steps
+//       (allocator, GC, string-table) that previously crashed on a
+//       half-built VM. The detection surface itself needs none of
+//       that. Decoupling them closes the race where PLAYER_LOGIN
+//       fires inside the settle window and the addon concludes the
+//       DLL is absent.
+// HOW:  Direct lua_pushboolean+lua_setfield for the boolean, plus a
+//       trivial FrameScript_Execute snippet to install
+//       LuaBoostC_IsLoaded as a Lua function. Both wrapped in
+//       __try/__except so a half-built lua_State surfaces as a
+//       logged SEH crash rather than an unhandled access violation.
+// ================================================================
+static void PublishDetectionSurface(lua_State* L) {
+    if (!L) return;
+
+    __try {
+        WriteLuaGlobal_Bool(L, "LUABOOST_DLL_LOADED", true);
+
+        if (Api.FrameScript_Execute) {
+            Api.FrameScript_Execute(
+                "function LuaBoostC_IsLoaded() return true end",
+                "LuaOpt", 0);
+        }
+
+        Log("[LuaOpt] detection surface published on L=0x%08X",
+            (unsigned)(uintptr_t)L);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[LuaOpt] EXCEPTION in PublishDetectionSurface");
+    }
+}
+
+
 static void SetupLuaInterface(lua_State* L) {
     if (!Api.FrameScript_Execute) {
         if (Api.lua_pushboolean && Api.lua_setfield) {
@@ -1185,6 +1228,11 @@ static void DoMainThreadInit() {
 
     Log("[LuaOpt] lua_State* = 0x%08X", (unsigned)(uintptr_t)Api.L);
 
+    // Publish minimal detection surface before heavy init runs. Defensive:
+    // makes the !LuaBoost addon's hasDLL() succeed even if a later step
+    // (allocator replace, GC tune, FrameScript) faults.
+    PublishDetectionSurface(Api.L);
+
     bool allocOk = ReplaceLuaAllocator(Api.L);
     bool gcOk = OptimizeGC(Api.L);
     bool strOk = PreSizeStringTable(Api.L);
@@ -1230,6 +1278,82 @@ static void DoMainThreadInit() {
     Log("[LuaOpt] ====================================");
 }
 
+// ================================================================
+//  FrameScript_Execute hook — synchronous lua_State swap detector
+//
+// WHAT: MinHook trampoline on FrameScript_Execute. On every entry,
+//       check whether *0x00D3F78C has changed since we last saw it;
+//       if so, run PublishDetectionSurface against the new state
+//       BEFORE calling the original.
+// WHY:  OnMainThreadSleep only fires when the main thread actually
+//       sleeps. During the post-enter-world loading screen the main
+//       thread can stay busy for 5+ seconds, so a fast user clicks
+//       through to PLAYER_LOGIN (which fires through this exact
+//       FrameScript_Execute call path) before our publish has a
+//       chance to land. The addon's hasDLL() then reads nil and
+//       commits to its Lua-side ThrashGuard fallback.
+//
+//       The hook turns the publish into a synchronous,
+//       happens-before-PLAYER_LOGIN guarantee: any Lua chunk WoW or
+//       an addon executes forces our publish first, on whichever
+//       lua_State is current right now.
+// ================================================================
+static fn_FrameScript_Execute orig_FrameScript_Execute = nullptr;
+static lua_State* g_fsHookLastSeenL = nullptr;
+static bool g_fsHookActive = false;
+
+static void __cdecl Hooked_FrameScript_Execute(const char* code, const char* source, int unknown) {
+    static thread_local bool s_inHook = false;
+
+    if (!s_inHook) {
+        s_inHook = true;
+        __try {
+            lua_State* curL = ReadLuaState();
+            if (curL && curL != g_fsHookLastSeenL) {
+                g_fsHookLastSeenL = curL;
+                PublishDetectionSurface(curL);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log("[LuaOpt] EXCEPTION in FrameScript_Execute hook");
+        }
+        s_inHook = false;
+    }
+
+    if (orig_FrameScript_Execute) {
+        orig_FrameScript_Execute(code, source, unknown);
+    }
+}
+
+static void InstallFrameScriptExecuteHook() {
+    if (g_fsHookActive) return;
+    if (!Api.FrameScript_Execute) {
+        Log("[LuaOpt] FrameScript_Execute hook: skipped (target not resolved)");
+        return;
+    }
+
+    if (MH_CreateHook((void*)Api.FrameScript_Execute,
+                      (void*)Hooked_FrameScript_Execute,
+                      (void**)&orig_FrameScript_Execute) != MH_OK) {
+        Log("[LuaOpt] FrameScript_Execute hook: MH_CreateHook failed");
+        return;
+    }
+
+    if (MH_EnableHook((void*)Api.FrameScript_Execute) != MH_OK) {
+        Log("[LuaOpt] FrameScript_Execute hook: MH_EnableHook failed");
+        return;
+    }
+
+    // Route Api.FrameScript_Execute through the trampoline so our own
+    // PublishDetectionSurface / SetupLuaInterface calls invoke the
+    // original directly and don't re-enter the hook (the s_inHook
+    // recursion guard already handles re-entry, but skipping the
+    // extra branch is cheaper).
+    Api.FrameScript_Execute = orig_FrameScript_Execute;
+
+    g_fsHookActive = true;
+    Log("[LuaOpt] FrameScript_Execute hook: ACTIVE (synchronous lua_State swap detection)");
+}
+
 namespace LuaOpt {
 
 bool PrepareFromWorkerThread() {
@@ -1257,6 +1381,8 @@ bool PrepareFromWorkerThread() {
     } else {
         Log("[LuaOpt] lua_State* = NULL (will retry on main thread)");
     }
+
+    InstallFrameScriptExecuteHook();
 
     g_addressesValid = true;
     InterlockedExchange(&g_luaInitState, 1);
@@ -1290,6 +1416,14 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
                                            : LUA_RELOAD_SETTLE_FRAMES_SINGLE;
 
         if (currentL != g_pendingLuaState) {
+            // Close the !LuaBoost detection race during the settle window:
+            // publish LUABOOST_DLL_LOADED + LuaBoostC_IsLoaded onto the new
+            // state *now*, before we wait 50 ms / 2 frames for the heavy
+            // SetupLuaInterface re-run. PLAYER_LOGIN often fires inside
+            // that window; without this, hasDLL() returns false and the
+            // addon concludes the DLL is absent.
+            PublishDetectionSurface(currentL);
+
             g_pendingLuaState = currentL;
             g_pendingLuaStateTick = nowTick;
             g_pendingLuaStateFrames = 1;
@@ -1450,7 +1584,7 @@ Stats GetStats() {
     return s;
 }
 
-bool LuaOpt::IsLoadingMode() {
+bool IsLoadingMode() {
     return Config.isLoading;
 }
 
