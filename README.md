@@ -305,13 +305,16 @@ This reduces CPU pressure compared to forcing aggressive single-client timing on
 
 ## Building
 
-### Requirements
-- Windows 10 or 11
-- Visual Studio with C++
-- CMake
-- Win32 / 32-bit build
+The build target is always Win32 i386, but you can produce it from either a Windows host (native MSVC) or a macOS host (cross-compile). Both paths drive the same `CMakeLists.txt` and ship binary-equivalent DLLs to within ~30 KB.
 
-### Build
+### Windows (native MSVC)
+
+Requirements:
+- Windows 10 or 11
+- Visual Studio with the C++ desktop workload
+- CMake
+- Win32 / 32-bit build configuration
+
 ```bash
 git clone https://github.com/suprepupre/wow-optimize.git
 cd wow-optimize
@@ -322,6 +325,33 @@ Output:
 - `build\Release\wow_optimize.dll`
 - `build\Release\version.dll`
 - `build\Release\wow_loader.exe`
+
+### macOS (cross-compile to Win32)
+
+Requirements:
+- macOS (Apple Silicon or Intel)
+- Homebrew
+- [xwin](https://github.com/Jake-Shadle/xwin) for the Windows SDK / MSVC CRT
+
+One-time setup:
+```bash
+brew install llvm lld cmake ninja
+xwin splat --output /opt/xwin
+```
+
+Build:
+```bash
+git clone https://github.com/suprepupre/wow-optimize.git
+cd wow-optimize
+make
+```
+
+Output:
+- `build/wow_optimize.dll`
+- `build/version.dll`
+- `build/wow_loader.exe`
+
+The Makefile drives `clang-cl` (Homebrew `llvm`) and `lld-link` (Homebrew `lld`) through the toolchain file in `cmake/toolchain-clang-msvc-x86.cmake`. `make verify` prints PE headers; `make clean` / `make rebuild` work as expected. Override `LLVM_DIR`, `LLD_DIR`, or `XWIN` on the command line if your paths differ.
 
 ---
 

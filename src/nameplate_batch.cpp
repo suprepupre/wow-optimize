@@ -46,8 +46,9 @@ static volatile LONG g_maxOutputQueueDepth = 0;
 // ================================================================
 // Lock-Free Queues (4096 entries each, ring buffer)
 // ================================================================
-static NameplateMT::NameplateTask g_inputQueue[QUEUE_SIZE] = {};
-static NameplateMT::NameplateResult g_outputQueue[QUEUE_SIZE] = {};
+// WO_KEEP_BSS: see version.h — keeps clang-cl from putting these in .rdata.
+WO_KEEP_BSS static NameplateMT::NameplateTask   g_inputQueue [QUEUE_SIZE] = {};
+WO_KEEP_BSS static NameplateMT::NameplateResult g_outputQueue[QUEUE_SIZE] = {};
 static volatile LONG g_inputHead = 0;  // Consumer index (worker threads)
 static volatile LONG g_inputTail = 0;  // Producer index (main thread)
 static volatile LONG g_outputHead = 0; // Consumer index (main thread)

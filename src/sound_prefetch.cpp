@@ -28,7 +28,8 @@ struct PrefetchRequest {
     uint32_t priority; // 0 = low, 1 = normal, 2 = high
 };
 
-static PrefetchRequest g_queue[QUEUE_SIZE];
+// WO_KEEP_BSS: see version.h — keeps clang-cl from putting this in .rdata.
+WO_KEEP_BSS static PrefetchRequest g_queue[QUEUE_SIZE];
 static std::atomic<size_t> g_head{0};
 static std::atomic<size_t> g_tail{0};
 

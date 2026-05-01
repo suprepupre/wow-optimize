@@ -12,6 +12,18 @@
 #define CRASH_TEST_DISABLE_PHASE2   0
 #endif
 
+// Apply to large file-scope mutable globals (queues, ring buffers) that
+// would otherwise be eligible for clang's globalopt promotion to LLVM IR
+// `constant` at /O2. That promotion lands them in read-only .rdata as
+// on-disk zero bytes, which (a) bloats the cross-built DLL and (b) makes
+// the buffers unwritable at runtime. MSVC's cl.exe doesn't do this
+// promotion, so the macro expands to nothing there.
+#if defined(__clang__)
+#define WO_KEEP_BSS __attribute__((used))
+#else
+#define WO_KEEP_BSS
+#endif
+
 // ================================================================
 // FLAG CONVENTION:
 //   0 = ENABLED  (feature is active)
