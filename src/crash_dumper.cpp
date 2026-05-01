@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include "version.h"
 
@@ -30,6 +31,40 @@ static LONG WINAPI ExceptionHandler(EXCEPTION_POINTERS* ExceptionInfo) {
         code == EXCEPTION_SINGLE_STEP ||         // Single step (debugger)
         code == EXCEPTION_DATATYPE_MISALIGNMENT) { // Alignment fault (handled)
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Anti-debug / anti-tamper probe inside ClientExtensions.dll (Project
+    // Epoch). It raises a deterministic EXCEPTION_ILLEGAL_INSTRUCTION at
+    // ClientExtensions+0x11fc42 every launch and resolves it via its own
+    // __except frame at step 3 of the Win32 dispatch chain. Our VEH (step 2)
+    // fires first and would otherwise write a misleading minidump every run.
+    //
+    // Observed only on macOS / Wine so far; native Windows behaviour is
+    // unverified, so the filter may be a no-op there. The module-identity
+    // check makes the no-op case harmless.
+    //
+    // Only filter when the faulting address resolves to ClientExtensions.dll —
+    // genuine illegal-instruction crashes anywhere else (Wow.exe, our DLL, any
+    // other loaded PE, or MEM_PRIVATE shellcode pages) still produce a dump.
+    // GetModuleHandleEx with FROM_ADDRESS|UNCHANGED_REFCOUNT is safe from a VEH:
+    // no allocations, no callbacks, no refcount mutation.
+    if (code == EXCEPTION_ILLEGAL_INSTRUCTION) {
+        HMODULE hMod = NULL;
+        if (GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)ExceptionInfo->ExceptionRecord->ExceptionAddress,
+                &hMod) && hMod != NULL) {
+            char path[MAX_PATH];
+            DWORD n = GetModuleFileNameA(hMod, path, sizeof(path));
+            if (n > 0 && n < sizeof(path)) {
+                const char* base = strrchr(path, '\\');
+                base = base ? base + 1 : path;
+                if (_stricmp(base, "ClientExtensions.dll") == 0) {
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
+            }
+        }
     }
     
     // Set flag before processing to prevent re-entry
