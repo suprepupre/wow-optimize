@@ -133,7 +133,19 @@ __declspec(dllexport) DWORD WINAPI Export_VerLanguageNameW(DWORD a, LPWSTR b, DW
 // Loader thread
 // ================================================================
 static DWORD WINAPI LoaderThread(LPVOID param) {
-    Sleep(3000);
+    // Brief defensive delay before LoadLibrary'ing wow_optimize.dll. The
+    // original value was Sleep(3000) (since the proxy's first commit, no
+    // documented rationale). Three seconds is long enough that a fast-
+    // logging user can be in the world before our DLL is even loaded —
+    // !LuaBoost's PLAYER_LOGIN handler then runs hasDLL() against globals
+    // that don't exist yet, the addon installs its Lua-side ThrashGuard
+    // fallback, and `/lb` shows "wow_optimize.dll: NOT DETECTED".
+    //
+    // 100 ms is enough for the Wine/Windows PE loader to release the
+    // loader lock and for WoW.exe's CRT init to progress past anything
+    // the original 3 s might have been waiting for, while keeping us
+    // injected before any plausible enter-world path completes.
+    Sleep(100);
 
     char dllPath[MAX_PATH];
     char modulePath[MAX_PATH];
