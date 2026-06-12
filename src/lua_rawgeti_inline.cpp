@@ -40,6 +40,7 @@
 #include <emmintrin.h>
 #include "MinHook.h"
 #include "lua_rawgeti_inline.h"
+#include "lua_optimize.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -91,6 +92,12 @@ static int __cdecl Optimized_RawGetI(int L, int idx, int n)
 {
     InterlockedIncrement64(&g_total_calls);
 
+    // Bail out during lua_State swap — L->base and L->top become garbage
+    // when WoW destroys the old Lua VM during UI reload/logout.
+    if (LuaOpt::IsReloading() || LuaOpt::IsSwapping()) {
+        return g_orig_rawgeti(L, idx, n);
+    }
+
     // Validate L pointer
     if ((uintptr_t)L < 0x10000 || (uintptr_t)L > 0xBFFF0000) {
         return g_orig_rawgeti(L, idx, n);
@@ -107,6 +114,9 @@ static int __cdecl Optimized_RawGetI(int L, int idx, int n)
                 tableSlot = L_base + (idx - 1) * 4;
         } else if (idx >= -10000) {
             tableSlot = L_top + idx * 4;
+            if (tableSlot < L_base) {
+                return g_orig_rawgeti(L, idx, n);
+            }
         } else if (idx == -10002) {
             tableSlot = L_base + 18 * 4;  // GLOBALSINDEX
         }

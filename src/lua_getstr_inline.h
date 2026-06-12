@@ -2,3 +2,4 @@
 
 bool InstallLuaGetStrInline();
 void UninstallLuaGetStrInline();
+void InvalidateLuaGetStrInlineCache();

@@ -16,7 +16,7 @@ FetchContent_MakeAvailable(minhook)
 FetchContent_Declare(
     mimalloc
     GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
-    GIT_TAG        v3.2.8
+    GIT_TAG        v3.3.2
 )
 set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(MI_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
@@ -71,6 +71,16 @@ add_library(wow_optimize SHARED
     src/lua_vm_cache.h
     src/tooltip_cache.cpp
     src/tooltip_cache.h
+    src/lua_settable_cache.cpp
+    src/lua_settable_cache.h
+    src/regex_cache.cpp
+    src/regex_cache.h
+    src/trig_lut.cpp
+    src/trig_lut.h
+    src/data_caches.cpp
+    src/data_caches.h
+    src/compute_caches.cpp
+    src/compute_caches.h
     src/spell_cache.cpp
     src/spell_cache.h
     src/lua_bytecode_cache.cpp
@@ -120,6 +130,12 @@ add_library(wow_optimize SHARED
     src/heap_compactor.cpp
     src/heap_compactor.h
     src/lua_tonumber_fast.cpp
+    src/lua_pushnumber_fast.cpp
+    src/gettime_fast.cpp
+    src/lua_pushvalue_fast.cpp
+    src/render_state_dedup.cpp
+    src/event_name_hash.cpp
+    src/cdatastore_batch.cpp
     src/lua_tonumber_fast.h
     src/strcat_fast.cpp
     src/strcat_fast.h
@@ -129,9 +145,17 @@ add_library(wow_optimize SHARED
     src/dbc_lookup_cache.h
     src/event_dispatch_cache.cpp
     src/event_dispatch_cache.h
+    src/event_name_cache.cpp
+    src/event_name_cache.h
     src/lua_getstr_inline.cpp
     src/lua_rawgeti_inline.cpp
     src/lua_getstr_inline.h
+    src/lua_gettable_safety.cpp
+    src/lua_gettable_safety.h
+    src/lua_vm_engine.cpp
+    src/lua_vm_engine.h
+    src/lua_vm_phase3.cpp
+    src/lua_vm_phase3.h
     src/lua_gettable_cache.cpp
     src/lua_gettable_cache.h
     src/saved_vars_async.cpp
@@ -166,6 +190,18 @@ add_library(wow_optimize SHARED
     src/wow_source_opt.h
     src/tls_object_cache.cpp
     src/tls_object_cache.h
+    src/hooks_render.cpp
+    src/hooks_render.h
+    src/hooks_simd.cpp
+    src/hooks_simd.h
+    src/hooks_logic.cpp
+    src/hooks_logic.h
+    src/hooks_memory.cpp
+    src/hooks_memory.h
+    src/hooks_async.cpp
+    src/hooks_async.h
+    src/d3d9_state_manager.cpp
+    src/d3d9_state_manager.h
 )
 
 target_link_libraries(wow_optimize PRIVATE

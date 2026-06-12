@@ -14,9 +14,10 @@
 #pragma comment(lib, "psapi.lib")
 
 // Configuration
-static constexpr DWORD MONITOR_INTERVAL_MS = 3000;      // Check every 3 seconds (was 5)
-static constexpr SIZE_T CRITICAL_THRESHOLD = 16 * 1024 * 1024;  // 16MB (was 8 - trigger earlier)
-static constexpr SIZE_T WARNING_THRESHOLD = 32 * 1024 * 1024;  // 32MB (was 16)
+static constexpr DWORD MONITOR_INTERVAL_MS = 10000;     // Check every 10s (was 3 - reduce CPU overhead)
+static constexpr DWORD LOADING_INTERVAL_MS = 3000;      // Faster checks during loading screens
+static constexpr SIZE_T CRITICAL_THRESHOLD = 16 * 1024 * 1024;  // 16MB
+static constexpr SIZE_T WARNING_THRESHOLD = 32 * 1024 * 1024;  // 32MB
 
 // Statistics
 static std::atomic<uint64_t> g_checksPerformed{0};
@@ -77,13 +78,24 @@ static void ForceHeapCompaction() {
     mi_collect(true);
 }
 
+// Forward declaration for loading mode check
+namespace LuaOpt { bool IsLoadingMode(); }
+
 // Monitor thread - checks VA state periodically
 static DWORD WINAPI MonitorThread(LPVOID) {
-    Log("[HeapCompactor] Monitor thread started (interval=%dms, critical=%dMB)",
-        MONITOR_INTERVAL_MS, CRITICAL_THRESHOLD / (1024*1024));
+    Log("[HeapCompactor] Monitor thread started (interval=%dms, loading=%dms, critical=%dMB)",
+        MONITOR_INTERVAL_MS, LOADING_INTERVAL_MS, CRITICAL_THRESHOLD / (1024*1024));
     
     while (!g_shutdown) {
-        Sleep(MONITOR_INTERVAL_MS);
+        // Use faster interval during loading screens, slower during gameplay
+        DWORD interval = LuaOpt::IsLoadingMode() ? LOADING_INTERVAL_MS : MONITOR_INTERVAL_MS;
+        Sleep(interval);
+        
+        // Skip VA scanning during active gameplay to avoid CPU contention
+        // Only scan during loading screens or when already near threshold
+        if (!LuaOpt::IsLoadingMode() && g_lastLargestBlock.load() > WARNING_THRESHOLD) {
+            continue;
+        }
         
         SIZE_T largestFree = GetLargestFreeBlock();
         g_checksPerformed++;

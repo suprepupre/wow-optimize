@@ -411,6 +411,15 @@ static void* __cdecl MimallocLuaAlloc(void* ud, void* ptr, size_t osize, size_t 
 }
 
 static bool ReplaceLuaAllocator(lua_State* L) {
+    // DISABLED: mimalloc Lua allocator replacement causes ACCESS_VIOLATION crashes
+    // during login/logout transitions and multi-client scenarios. Root cause:
+    // WoW's Lua VM expects specific heap layout/alignment from its pool allocator
+    // that mimalloc doesn't guarantee. Crashes observed at 0x0084EB10 (WoW.exe)
+    // and 0x5F2FA7A0 (wow_optimize.dll) within 2 minutes of login.
+    // GC tuning, string table pre-sizing, and fast paths remain active.
+    Log("[LuaOpt-Alloc] DISABLED: mimalloc Lua allocator causes crashes during login/logout");
+    return false;
+
     if (!L || g_luaAllocReplaced) return false;
 
     uintptr_t L_addr = (uintptr_t)L;
@@ -689,9 +698,47 @@ static double g_smoothedNetAlloc = 0.0;
 static void StepGC(lua_State* L, double frameMs) {
     if (!State.gcOptimized || !Api.lua_gc) return;
 
+    // CRITICAL: Skip ALL GC during VM swap/reload to prevent freeze.
+    // During UI reload, WoW destroys old lua_State and creates new one.
+    // Accessing stale pointers causes 10+ second freezes.
+    if (g_isSwapping.load(std::memory_order_acquire) || g_isReloading.load(std::memory_order_acquire)) {
+        ResetAllocCounter();
+        return;
+    }
+
     // Skip GC during combat if frame is already slow to prevent compounding stutter
-    if (Config.inCombat && frameMs > 14.0) {
+    // Raised threshold from 14ms to 18ms — at 60fps (16.6ms) this was triggering
+    // too aggressively, causing GC starvation and memory growth during raids
+    if (Config.inCombat && frameMs > 18.0) {
         ResetAllocCounter();  // Still reset counter even when skipping
+        return;
+    }
+
+    // During combat: use micro-steps spread across frames instead of large bursts.
+    // This prevents GC spikes that cause visible stutter during boss mechanics.
+    // Instead of 64KB every frame, do 16KB every frame = same throughput, smoother.
+    if (Config.inCombat && !Config.isLoading) {
+        int microStepKB = 16;
+        LONG64 netAlloc = GetAndResetNetAlloc();
+        if (netAlloc < 0) netAlloc = 0;
+        g_smoothedNetAlloc = g_smoothedNetAlloc * 0.9 + (double)netAlloc * 0.1;
+        int adaptiveMicro = (int)(g_smoothedNetAlloc / 1024.0 * 0.5);
+        if (adaptiveMicro > microStepKB) microStepKB = adaptiveMicro;
+        if (microStepKB > 32) microStepKB = 32;
+
+        if (g_gcPerfFreq.QuadPart == 0) QueryPerformanceFrequency(&g_gcPerfFreq);
+        LARGE_INTEGER before, after;
+        QueryPerformanceCounter(&before);
+        __try {
+            Api.lua_gc(L, LUA_GCSTEP, microStepKB);
+            State.gcStepsTotal++;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            State.gcOptimized = false;
+            return;
+        }
+        QueryPerformanceCounter(&after);
+        double gcMs = (double)(after.QuadPart - before.QuadPart) * 1000.0 / (double)g_gcPerfFreq.QuadPart;
+        g_smoothedGcMs = g_smoothedGcMs * 0.95 + gcMs * 0.05;
         return;
     }
 
@@ -1445,6 +1492,26 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
             g_pendingLuaStateTick = nowTick;
             g_pendingLuaStateFrames = 1;
             Log("[LuaOpt] lua_State changed (UI reload) - waiting for new VM to settle");
+
+            // CRITICAL FIX: Invalidate ALL caches IMMEDIATELY when lua_State changes.
+            // Previously, caches were only cleared AFTER the settle period, leaving
+            // fast-path hooks active with stale pointers to the OLD lua_State's objects.
+            // This caused memory corruption, freezes, and ACCESS_VIOLATION crashes
+            // when hooks tried to access freed/reallocated Lua internals.
+            Log("[LuaOpt] Invalidating all caches immediately (old L=0x%08X, new L=0x%08X)",
+                (unsigned)(uintptr_t)Api.L, (unsigned)(uintptr_t)currentL);
+            
+            UICache::ClearCache();
+            ApiCache::ClearCache();
+            ClearLuaOptCaches();
+            LuaInternals::InvalidateCache();
+            LuaFastPath::InvalidateWoWCache();
+            ClearTableCache();
+            LuaBytecodeCache::OnLuaStateSwap();
+            ClearAddonPreload();
+            
+            // Mark GC as not optimized to prevent StepGC from running with stale state
+            State.gcOptimized = false;
 
             // ARM FrameScript_Execute hook for pre-addon marker injection.
             // The hook fires BEFORE any addon top-level code runs on the new

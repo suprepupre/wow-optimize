@@ -18,7 +18,7 @@ extern "C" void Log(const char* fmt, ...);
 
 static std::unordered_map<std::string, std::vector<uint8_t>> g_cache;
 static SRWLOCK g_cacheLock = SRWLOCK_INIT;
-static volatile bool g_ready = false;
+static volatile LONG g_ready = 0;
 
 // Track handles opened for addon files
 static constexpr int MAX_HANDLES = 1024;
@@ -31,14 +31,14 @@ static volatile LONG g_hits = 0, g_misses = 0, g_filesLoaded = 0;
 
 // Worker threads
 static HANDLE g_workers[2] = {};
-static volatile bool g_shutdown = false;
+static volatile LONG g_shutdown = 0;
 static volatile LONG g_filesToLoad = 0;
 static volatile LONG g_filesDone = 0;
 static std::vector<std::string> g_fileList;
 static SRWLOCK g_fileLock = SRWLOCK_INIT;
 
 static DWORD WINAPI WorkerProc(LPVOID) {
-    while (!g_shutdown) {
+    while (!InterlockedCompareExchange(&g_shutdown, 0, 0)) {
         std::string path;
         {
             AcquireSRWLockExclusive(&g_fileLock);
@@ -77,7 +77,7 @@ static DWORD WINAPI WorkerProc(LPVOID) {
 static std::string g_addonDir;
 
 void AddonPreload_OnCreateFile(HANDLE hFile, const char* filename) {
-    if (!g_ready || !hFile || hFile == INVALID_HANDLE_VALUE || !filename) return;
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || !hFile || hFile == INVALID_HANDLE_VALUE || !filename) return;
 
     // Only track files that are already in our pre-scan cache.
     // Files created/modified after init (SavedVariables, config)
@@ -99,7 +99,7 @@ void AddonPreload_OnCreateFile(HANDLE hFile, const char* filename) {
 
 // Invalidate cache entry when a tracked file is written to
 void AddonPreload_OnWriteFile(const char* filename) {
-    if (!g_ready || !filename) return;
+    if (!InterlockedCompareExchange(&g_ready, 0, 0) || !filename) return;
 
     AcquireSRWLockExclusive(&g_cacheLock);
     g_cache.erase(filename);
@@ -120,7 +120,7 @@ void AddonPreload_OnWriteFile(const char* filename) {
 }
 
 bool AddonPreload_TryServe(HANDLE hFile, LPVOID lpBuffer, DWORD nBytes, LPDWORD lpBytesRead) {
-    if (!g_ready) return false;
+    if (!InterlockedCompareExchange(&g_ready, 0, 0)) return false;
 
     AcquireSRWLockShared(&g_handleLock);
     for (LONG i = 0; i < g_handleCount; i++) {
@@ -196,7 +196,7 @@ bool InitAddonPreload() {
     if (total == 0) return true;
 
     // Start workers
-    g_shutdown = false;
+    InterlockedExchange(&g_shutdown, 0);
     for (int i = 0; i < 2; i++) {
         g_workers[i] = CreateThread(NULL, 0, WorkerProc, NULL, 0, NULL);
         if (g_workers[i])
@@ -212,7 +212,7 @@ bool InitAddonPreload() {
         }
     }
 
-    g_ready = true;
+    InterlockedExchange(&g_ready, 1);
     size_t totalBytes = 0;
     for (auto& p : g_cache) totalBytes += p.second.size();
     Log("[AddonPreload] Loaded %d files (%.1f MB)", g_filesLoaded,
@@ -221,8 +221,8 @@ bool InitAddonPreload() {
 }
 
 void ShutdownAddonPreload() {
-    g_shutdown = true;
-    g_ready = false;
+    InterlockedExchange(&g_shutdown, 1);
+    InterlockedExchange(&g_ready, 0);
     for (int i = 0; i < 2; i++) {
         if (g_workers[i]) {
             WaitForSingleObject(g_workers[i], 2000);

@@ -1,4 +1,4 @@
-# wow_optimize
+﻿# wow_optimize
 
 Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)
 Author: SUPREMATIST
@@ -11,25 +11,45 @@ The current public build is focused on real frametime stability, long-session sm
 
 ---
 
-## Current Status
+## What's New in v3.9.0
 
-### Active Features
-- **Memory management**: mimalloc allocator replacement for faster Lua operations
-- **Multithreaded systems**:
-  - Combat log parser (4-worker thread pool, auto-disables in raids)
-  - Addon dispatcher (4-worker thread pool)
-  - Spell prefetching (async loading before cast completion)
-  - MPQ prefetching (zone transition prediction)
-  - Sound prefetching (predicts sounds based on spells/zones/combat)
-  - Quest/achievement loading (async data loading)
-  - Nameplate renderer (multithreaded rendering for 25-man raids)
-- **Lua optimizations**: 27 fast paths for common operations (string.format, math, string functions)
-- **Network stack**: TCP_NODELAY, TCP_QUICKACK, optimized buffers, low-delay TOS
-- **File I/O**: MPQ memory mapping, adaptive caching, sequential-scan hints
-- **Timing**: QPC-based microsecond precision with adaptive resolution, FPS cap raised to 999
-- **System calls**: 38 kernel-call caches, IsBadPtr/Thread affinity/Swap RC1 (re-enabled)
-- **CRT SSE2**: strlen/strcmp/memcpy/memset with page-boundary guards
-- **Platform support**: Rosetta 2 / Wine / CrossOver compatibility (including WoWSilicon for native Apple Silicon WoW 3.3.5a)
+### Lua VM — Direct-Threaded Interpreter
+Replaces WoW's switch-based opcode dispatch with a direct-threaded interpreter: 8192-site x 4-way polymorphic inline cache, 4096-entry global variable cache, SSE2 TValue operations, 100K opcode execution slices before yielding to WoW's frame scheduler.
+
+### Lua VM — Safe Inline Caches
+- `luaH_getstr`: bucket-index cache (16384 entries) with content validation — safe across GC rehash
+- `lua_rawgeti`: array-direct O(1) path + bucket-index hash-part cache (8192 entries)
+- `lua_pushnumber`: direct stack TValue write, skipping full API call overhead
+- `luaV_gettable` safety patch: validates TValue type field before using as array index
+
+### 6 CPU-Side Optimization Modules
+- **Off-screen animation throttle**: 3-tier distance-based update rate (full / 1:4 / 1:16)
+- **SSE2 math**: matrix multiply, quaternion normalize, frustum AABB-vs-4-planes cull, BGRA↔ARGB batch swap, premultiplied alpha
+- **Combat text batching**: 256-entry ring buffer, flush-per-frame
+- **UI layout dirty-flag cache**: 4096-slot frame-pointer keyed, generation-based invalidation
+- **Network heartbeat filter**: suppresses CMSG_PING/CMSG_TIME_SYNC_RESP when data recently sent
+- **Invariant Lua script cache**: 256-slot cache for UnitHealth/UnitPower/UnitClass outcomes
+
+### Memory & Async
+- 64-byte aligned 8-tier slab allocator (64B–8192B) for cache-line-aligned hot structures
+- 16384-entry GUID→object FNV-1a hash-table with lock-free reads
+- 2-thread SPMC worker pool (2048 slots) for fire-and-forget task dispatch
+
+### Infrastructure & Diagnostics
+- 50-API infra_patch: object pools, deduplication, frame-time smoothing, adaptive cache TTL
+- 20-feature hot_patch: datastore lookup cache, delete prefetch, tooltip early-exit, event dedup
+- 3-hook hook_prefetch: SSE2 prefetch on cleanup/delete/datastore-reset paths
+- CrashDumper: 64-slot feature registry + 256-entry hook call trace + minidump/text crash reports
+- Freeze watchdog: 10s threshold with per-feature activity reporting
+- Priority watchdog with rate-limited logging
+
+### Caches
+- Tooltip LRU (512 slots, 30s TTL), regex compiled-pattern (256 slots, 120s TTL)
+- SSE2 trig lookup tables (4096-entry sin/cos, 1024-entry atan)
+- Render state dedup (256 slots), event name lookup/hash caches
+- O(1) script handler resolver at 0x48E680
+
+## Current Status
 
 ### Performance Metrics (Real-World Testing)
 - **Frame time**: Smoother frametimes in addon-heavy raids
@@ -37,30 +57,6 @@ The current public build is focused on real frametime stability, long-session sm
 - **Lua operations**: Faster with mimalloc allocator
 - **Timing cache**: High QPC cache hit rate
 - **String formatting**: High fast path hit rate
-
-### Disabled Features (Stability Issues)
-These features are disabled in public builds due to stability issues found via bisection testing:
-
-**Found via bisection:**
-- GetSystemMetrics cache - breaks hardware cursor with RTSSHooks.dll
-- Asset path cache - stale mimalloc pointers crash teardown/logout
-
-**Architecture limitations:**
-- Unit API fast paths - returns 0 HP
-- GetSpellInfo cache - icon corruption + relog crash
-- Phase 2 writes (rawset/insert/remove/next) - direct RawTValue* hangs
-- Phase 2 reads (rawget/concat/unpack) - direct RawTValue* hangs
-- ipairs factory hook - closure creation crashes (architectural mismatch)
-- Deferred field updates - UI/texture flickering (immediate-mode rendering)
-- GetModuleFileName cache - conflicts with OBS hook chain
-- CRT mem fastpaths - VA exhaustion (dungeon finder crash at 2.4GB)
-- Object visibility cache - stale object pointers, no synchronization
-- table.sort fast path - Lua table corruption (0x851E01 AV)
-- string.gsub fast path - Lua string corruption
-- Lua bytecode cache - WoW modified bytecode incompatible
-- Frame throttle - MoveAnything position corruption (race conditions)
-- Async texture loading - loading screen regression
-- Model async workers - loading screen regression
 
 ---
 
@@ -458,7 +454,24 @@ The Makefile drives `clang-cl` (Homebrew `llvm`) and `lld-link` (Homebrew `lld`)
 ### Main modules
 - `dllmain.cpp` - Win32 hooks, allocator, timers, file I/O, networking, threading, VA Arena
 - `lua_optimize.cpp` - Lua VM allocator, adaptive GC, Lua globals bridge
-- `lua_fastpath.cpp` - `string.format` and runtime-discovered Phase 2 hooks
+- `lua_fastpath.cpp` - `string.format` and runtime-discovered Phase 2 hooks (20/27 functions)
+- `lua_vm_engine.cpp` - Direct-threaded Lua VM interpreter with inline cache
+- `lua_getstr_inline.cpp` - Safe bucket-index cache for luaH_getstr (16384 entries)
+- `lua_rawgeti_inline.cpp` - Safe array-direct + bucket-index cache for lua_rawgeti (8192)
+- `lua_pushnumber_fast.cpp` - Direct TValue stack write for lua_pushnumber
+- `lua_gettable_safety.cpp` - TValue type validation crash fix
+- `hooks_render.cpp` - 3-tier off-screen animation throttle, backbuffer LockRect skip
+- `hooks_simd.cpp` - SSE2 matrix, quaternion, frustum cull, BGRA↔ARGB, premultiplied alpha
+- `hooks_logic.cpp` - Combat text batching, UI layout cache, heartbeat filter, script cache
+- `hooks_memory.cpp` - 64B-aligned slab allocator, 16384-entry GUID hash-table
+- `hooks_async.cpp` - 2-thread worker pool, particle SSE2, ADT prefetch
+- `d3d9_state_manager.cpp` - 15-hook D3D9 vtable patcher (disabled — DXVK conflict)
+- `hot_patch.cpp` - 20 runtime hot-patch optimizations
+- `infra_patch.cpp` - 50 infrastructure APIs (pools, caches, dedup, perfmon)
+- `hook_prefetch.cpp` - 3 SSE2 prefetch hooks for cleanup/delete/reset paths
+- `data_caches.cpp` - 10 game-data lookup caches (spell, M2, FMOD, DBC, etc.)
+- `compute_caches.cpp` - 10 compute/transform caches (BZ2, vertex SSE2, regex ext, etc.)
+- `crash_dumper.cpp` - Enhanced crash reporter with feature tracking + hook trace
 - `lua_internals.cpp` - stable VM baseline (disabled unsafe hooks)
 - `combatlog_optimize.cpp` - combat log retention and cleanup behavior
 - `combatlog_mt.cpp` - multithreaded combat log parser
@@ -499,14 +512,32 @@ wow-optimize/
 ├── src/
 │   ├── dllmain.cpp                       # Win32/CRT hooks, allocator, timers
 │   ├── lua_optimize.cpp/.h               # Lua VM allocator, GC, string table
-│   ├── lua_fastpath.cpp/.h               # Lua C-function fast paths
-│   ├── lua_internals.cpp/.h              # Lua VM internals
-│   ├── lua_vm_cache.cpp/.h               # luaV_gettable cache
+│   ├── lua_fastpath.cpp/.h               # Lua C-function fast paths (20/27)
+│   ├── lua_vm_engine.cpp/.h              # Direct-threaded Lua VM interpreter
+│   ├── lua_getstr_inline.cpp/.h          # Safe luaH_getstr cache (16384)
+│   ├── lua_rawgeti_inline.cpp/.h         # Safe lua_rawgeti cache (8192)
+│   ├── lua_pushnumber_fast.cpp/.h        # Direct TValue stack write
+│   ├── lua_gettable_safety.cpp/.h        # TValue type validation crash fix
+│   ├── lua_vm_cache.cpp/.h               # luaV_gettable primitive cache
 │   ├── lua_vm_phase3.cpp/.h              # luaD_call dispatch
+│   ├── lua_internals.cpp/.h              # Lua VM internals
 │   ├── lua_bytecode_cache.cpp/.h         # Compiled bytecode cache
 │   ├── lua_bytecode_pre_compiler.cpp/.h  # Addon file pre-scanner
+│   ├── lua_settable_cache.cpp/.h         # luaV_settable cache
+│   ├── hooks_render.cpp/.h               # 3-tier off-screen animation throttle
+│   ├── hooks_simd.cpp/.h                 # SSE2 matrix/quat/frustum cull
+│   ├── hooks_logic.cpp/.h                # Combat text, UI cache, heartbeat
+│   ├── hooks_memory.cpp/.h               # 64B slabs, GUID hash-table
+│   ├── hooks_async.cpp/.h                # 2-thread worker pool
+│   ├── d3d9_state_manager.cpp/.h         # D3D9 15-hook vtable patcher
+│   ├── hot_patch.cpp/.h                  # 20 runtime hot-patch optimizations
+│   ├── infra_patch.cpp/.h                # 50 infrastructure APIs
+│   ├── hook_prefetch.cpp/.h              # 3 SSE2 prefetch hooks
+│   ├── data_caches.cpp/.h                # 10 game-data lookup caches
+│   ├── compute_caches.cpp/.h             # 10 compute/transform caches
 │   ├── combatlog_optimize.cpp/.h         # Combat log retention patch
 │   ├── combatlog_mt.cpp/.h               # Multithreaded combat log parser
+│   ├── combatlog_buffer.cpp/.h           # Combat log buffer governor
 │   ├── addon_dispatcher.cpp/.h           # Multithreaded addon dispatcher
 │   ├── addon_preload.cpp/.h              # Addon file preload
 │   ├── spell_prefetch.cpp/.h             # Async spell data prefetching
@@ -514,8 +545,8 @@ wow-optimize/
 │   ├── spell_effect_mt.cpp/.h            # Multithreaded spell effects
 │   ├── model_async.cpp/.h                # Model/M2 async loading
 │   ├── texture_async.cpp/.h              # Texture async loading
-│   ├── texture_decode_mt.cpp/.h          # BLP decode
-│   ├── anim_mt.cpp/.h                    # M2 animation
+│   ├── texture_decode_mt.cpp/.h          # BLP decode worker pool
+│   ├── anim_mt.cpp/.h                    # M2 animation worker pool
 │   ├── mpq_prefetch.cpp/.h               # Predictive MPQ prefetching
 │   ├── mpq_decompress_mt.cpp/.h          # Multithreaded zlib decompress
 │   ├── obj_vis_cache.cpp/.h              # Object visibility cache
@@ -524,18 +555,30 @@ wow-optimize/
 │   ├── quest_async.cpp/.h                # Async quest data loading
 │   ├── saved_vars_async.cpp/.h           # Async SavedVariables writes
 │   ├── tooltip_cache.cpp/.h              # Tooltip string caching
+│   ├── regex_cache.cpp/.h                # Regex compiled-pattern cache
+│   ├── trig_lut.cpp/.h                   # SSE2 trig lookup tables
+│   ├── event_name_cache.cpp/.h           # Event name lookup cache
+│   ├── event_name_hash.cpp/.h            # Event name hash cache
+│   ├── render_state_dedup.cpp/.h         # Render state deduplication
+│   ├── script_handler_cache.cpp/.h       # O(1) script handler resolver
+│   ├── cdatastore_batch.cpp/.h           # CDataStore batch read detection
+│   ├── gettime_fast.cpp/.h               # Frame-cached GetTime
+│   ├── lua_pushvalue_fast.cpp/.h         # Direct TValue stack copy
 │   ├── api_cache.cpp/.h                  # GetItemInfo/GetSpellInfo cache
 │   ├── ui_cache.cpp/.h                   # UI widget cache
 │   ├── ui_frame_batch.cpp/.h             # Frame OnUpdate batching
 │   ├── frame_throttle.cpp/.h             # Script throttling
 │   ├── frame_arena.cpp/.h                # Frame-scoped allocator
 │   ├── cache_governor.cpp/.h             # Dynamic TTL/cache control
+│   ├── heap_compactor.cpp/.h             # VA fragmentation monitor
 │   ├── crt_mem_fastpath.cpp              # SSE2 strlen/strcmp/memcpy/memset
 │   ├── crt_char_fast.cpp/.h              # SSE2 memchr/strchr
 │   ├── crt_pow_sse2.cpp/.h               # SSE2 pow(x,y) fast path
 │   ├── strstr_fast.cpp/.h                # SSE2 Boyer-Moore-Horspool strstr
 │   ├── dxvk_bridge.cpp/.h                # DXVK/Vulkan detection
-│   ├── crash_dumper.cpp/.h               # Vectored exception minidump
+│   ├── crash_dumper.cpp/.h               # Enhanced crash reporter
+│   ├── format_validator_cache.cpp/.h     # string.format validator cache
+│   ├── datastore_fastpath.cpp/.h         # CDataStore TLS-cached fast path
 │   ├── version.h                         # Version and feature toggles
 │   ├── version.rc                        # Windows resource
 │   ├── version_proxy.cpp                 # version.dll proxy loader

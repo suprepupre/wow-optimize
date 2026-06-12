@@ -1,43 +1,24 @@
 #pragma once
 
-// ================================================================
-// Tooltip String Caching - Cache formatted tooltip strings
-//
-// ================================================================
-
-#include <windows.h>
-#include <unordered_map>
-#include <string>
+#include <cstdint>
 
 namespace TooltipCache {
 
-// Cache entry
-struct CacheEntry {
-    uint32_t itemID;
-    uint32_t stateHash;      // Hash of item state (enchants, gems, etc.)
-    std::string tooltip;     // Cached tooltip string
-    DWORD timestamp;         // Last access time (for LRU)
-    uint32_t accessCount;    // Access counter
-};
-
-// Cache statistics
 struct Stats {
-    long hits;
-    long misses;
-    long evictions;
-    long cacheSize;
+    int64_t hits;
+    int64_t misses;
+    int64_t evictions;
+    double hitRate;
 };
 
-// Initialize tooltip cache
-bool Init();
-
-// Shutdown and cleanup
+bool Install();
 void Shutdown();
-
-// Get cache statistics
-void GetStats(Stats* stats);
-
-// Clear cache (called on UI reload)
 void Clear();
+Stats GetStats();
+
+// Cache API for external integration
+const char* Get(uint32_t key, int* outLen);
+void Put(uint32_t key, const char* text, int len);
+uint32_t Hash(uint32_t itemID, uint32_t flags, uint32_t extra);
 
 } // namespace TooltipCache

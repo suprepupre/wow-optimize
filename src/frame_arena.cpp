@@ -43,6 +43,12 @@ bool Init() {
 
 void Shutdown() {
     InterlockedExchange(&g_active, 0);
+    // Wait for any in-flight TryAlloc/Owns/SizeOf calls to complete.
+    // Those functions check g_active first, so after setting it to 0
+    // no NEW callers will proceed, but one thread may have passed the
+    // check before we cleared the flag.  A short sleep is sufficient
+    // because the arena operations are lock-free and very fast (<1 µs).
+    Sleep(10);
     if (g_base) {
         VirtualFree(g_base, 0, MEM_RELEASE);
         g_base = nullptr;

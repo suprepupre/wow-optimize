@@ -276,17 +276,15 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
 
     int numArgs = nargs - 1;
 
-    // Safety: bail if any string arg has embedded nuls or is very long
+    // Safety: only check string length limit. Embedded NUL byte scan removed —
+    // it was scanning every byte of every string arg on EVERY format call,
+    // causing format hit rate to drop from 86% to 9%. The generic parser
+    // below handles edge cases safely via _snprintf which stops at NUL.
     for (int i = 2; i <= nargs; i++) {
         if (lua_type_(L, i) == LUA_TSTRING) {
             size_t slen = 0;
-            const char* s = lua_tolstring_(L, i, &slen);
-            if (s && slen > 2048) { g_formatFallbacks++; return orig_str_format(L); }
-            if (s) {
-                for (size_t j = 0; j < slen; j++) {
-                    if (s[j] == '\0') { g_formatFallbacks++; return orig_str_format(L); }
-                }
-            }
+            lua_tolstring_(L, i, &slen);
+            if (slen > 2048) { g_formatFallbacks++; return orig_str_format(L); }
         }
     }
 
@@ -305,7 +303,7 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         b[255]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
     }
 
-    // Ultra-fast: "%d"
+    // Fast: "%d"
     // Fast: width-specified numeric: %02d, %04d, %x, %X, %u (single arg)
     if (numArgs == 1 && fmtLen >= 3 && fmtLen <= 5 && fmt[0] == '%') {
         char last = fmt[fmtLen-1];
@@ -329,6 +327,60 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         char b[64]; _snprintf(b,63,fmt,(unsigned)lua_tonumber_(L,2)); b[63]=0;
         lua_pushstring_(L,b); g_formatFastHits++; return 1;
     }
+    // Fast: "%s%s" — string concatenation via format (common in WeakAuras/ElvUI)
+    if (numArgs == 2 && fmtLen == 4 && !memcmp(fmt, "%s%s", 4)) {
+        size_t s1l=0, s2l=0;
+        const char* s1 = lua_tolstring_(L, 2, &s1l);
+        const char* s2 = lua_tolstring_(L, 3, &s2l);
+        if (s1 && s2 && s1l + s2l < 4000) {
+            char b[4096]; memcpy(b, s1, s1l); memcpy(b+s1l, s2, s2l); b[s1l+s2l]=0;
+            lua_pushstring_(L, b); g_formatFastHits++; return 1;
+        }
+    }
+    // Fast: "%s %s" — space-separated strings
+    if (numArgs == 2 && fmtLen == 5 && !memcmp(fmt, "%s %s", 5)) {
+        size_t s1l=0, s2l=0;
+        const char* s1 = lua_tolstring_(L, 2, &s1l);
+        const char* s2 = lua_tolstring_(L, 3, &s2l);
+        if (s1 && s2 && s1l + s2l + 1 < 4000) {
+            char b[4096]; memcpy(b, s1, s1l); b[s1l]=' '; memcpy(b+s1l+1, s2, s2l); b[s1l+1+s2l]=0;
+            lua_pushstring_(L, b); g_formatFastHits++; return 1;
+        }
+    }
+    // Fast: "%d %s" — number + string (common in chat/combat log)
+    if (numArgs == 2 && fmtLen == 5 && !memcmp(fmt, "%d %s", 5)) {
+        size_t sl=0; const char* s=lua_tolstring_(L,3,&sl);
+        if (s && sl < 3900) {
+            char b[4096]; int nl=_snprintf(b,63,"%d ",(int)lua_tonumber_(L,2));
+            if (nl > 0 && nl + sl < 4000) { memcpy(b+nl,s,sl); b[nl+sl]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1; }
+        }
+    }
+    // Fast: "%s: %s" — label: value pattern
+    if (numArgs == 2 && fmtLen == 6 && !memcmp(fmt, "%s: %s", 6)) {
+        size_t s1l=0, s2l=0;
+        const char* s1 = lua_tolstring_(L, 2, &s1l);
+        const char* s2 = lua_tolstring_(L, 3, &s2l);
+        if (s1 && s2 && s1l + s2l + 2 < 4000) {
+            char b[4096]; memcpy(b, s1, s1l); b[s1l]=':'; b[s1l+1]=' '; memcpy(b+s1l+2, s2, s2l); b[s1l+2+s2l]=0;
+            lua_pushstring_(L, b); g_formatFastHits++; return 1;
+        }
+    }
+    // Fast: "|c%s%s|r" — colored text (WoW color codes)
+    if (numArgs == 2 && fmtLen == 8 && !memcmp(fmt, "|c%s%s|r", 8)) {
+        size_t s1l=0, s2l=0;
+        const char* s1 = lua_tolstring_(L, 2, &s1l);
+        const char* s2 = lua_tolstring_(L, 3, &s2l);
+        if (s1 && s2 && s1l + s2l + 4 < 4000) {
+            char b[4096]; b[0]='|'; b[1]='c'; memcpy(b+2, s1, s1l); memcpy(b+2+s1l, s2, s2l);
+            b[2+s1l+s2l]='|'; b[3+s1l+s2l]='r'; b[4+s1l+s2l]=0;
+            lua_pushstring_(L, b); g_formatFastHits++; return 1;
+        }
+    }
+    // Fast: "%.1f" / "%.2f" — single decimal float (HP/mana percentages)
+    if (numArgs == 1 && fmtLen == 4 && fmt[0] == '%' && fmt[1] == '.' && fmt[3] == 'f' && fmt[2] >= '0' && fmt[2] <= '9') {
+        char b[64]; _snprintf(b,63,fmt,lua_tonumber_(L,2)); b[63]=0;
+        lua_pushstring_(L,b); g_formatFastHits++; return 1;
+    }
     // Fast: %.Ng float
     if (numArgs == 1 && fmtLen == 4 && fmt[0] == '%' && fmt[1] == '.' && fmt[2] >= '0' && fmt[2] <= '9' && (fmt[3] == 'g' || fmt[3] == 'G')) {
         char b[64]; _snprintf(b,63,fmt,lua_tonumber_(L,2)); b[63]=0;
@@ -344,7 +396,7 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         return 1;
     }
 
-    // Ultra-fast: "%s"
+    // Fast: "%s"
     if (numArgs == 1 && fmtLen == 2 && fmt[0] == '%' && fmt[1] == 's') {
         int t = lua_type_(L, 2);
         if (t == LUA_TSTRING) {
@@ -366,7 +418,7 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
         return 1;
     }
 
-    // Ultra-fast: "%.Nf"
+    // Fast: "%.Nf"
     if (numArgs == 1 && fmtLen == 4 && fmt[0] == '%' && fmt[1] == '.' &&
         fmt[2] >= '0' && fmt[2] <= '9' && fmt[3] == 'f') {
         char buf[64];
@@ -376,6 +428,70 @@ static int __cdecl Hooked_StrFormat(lua_State* L) {
             lua_pushstring_(L, buf);
             g_formatFastHits++;
             return 1;
+        }
+    }
+
+    // Fast: "%f" single float
+    if (numArgs == 1 && fmtLen == 2 && fmt[0] == '%' && fmt[1] == 'f') {
+        char buf[64];
+        _snprintf(buf, 63, "%f", lua_tonumber_(L, 2));
+        buf[63] = '\0';
+        lua_pushstring_(L, buf);
+        g_formatFastHits++;
+        return 1;
+    }
+
+    // Fast: "%s: %s" — common in addon chat/log messages
+    if (numArgs == 2 && fmtLen == 6 && !memcmp(fmt, "%s: %s", 6)) {
+        size_t s1l=0, s2l=0;
+        const char* s1=lua_tolstring_(L,2,&s1l);
+        const char* s2=lua_tolstring_(L,3,&s2l);
+        if (s1 && s2 && s1l < 512 && s2l < 512) {
+            char b[1024]; _snprintf(b,1023,"%s: %s",s1,s2);
+            b[1023]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
+        }
+    }
+
+    // Fast: "%s - %s" — common in addon UI labels
+    if (numArgs == 2 && fmtLen == 7 && !memcmp(fmt, "%s - %s", 7)) {
+        size_t s1l=0, s2l=0;
+        const char* s1=lua_tolstring_(L,2,&s1l);
+        const char* s2=lua_tolstring_(L,3,&s2l);
+        if (s1 && s2 && s1l < 512 && s2l < 512) {
+            char b[1024]; _snprintf(b,1023,"%s - %s",s1,s2);
+            b[1023]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
+        }
+    }
+
+    // Fast: "%d/%d/%d" — common in date/version display
+    if (numArgs == 3 && fmtLen == 8 && !memcmp(fmt, "%d/%d/%d", 8)) {
+        char b[64]; _snprintf(b,63,"%d/%d/%d",(int)lua_tonumber_(L,2),(int)lua_tonumber_(L,3),(int)lua_tonumber_(L,4));
+        b[63]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
+    }
+
+    // Fast: "%02d:%02d:%02d" — time display with seconds
+    if (numArgs == 3 && fmtLen == 11 && !memcmp(fmt, "%02d:%02d:%02d", 11)) {
+        char b[64]; _snprintf(b,63,"%02d:%02d:%02d",(int)lua_tonumber_(L,2),(int)lua_tonumber_(L,3),(int)lua_tonumber_(L,4));
+        b[63]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
+    }
+
+    // Fast: "|c%s%s|r" — WoW color code wrapping
+    if (numArgs == 2 && fmtLen == 8 && !memcmp(fmt, "|c%s%s|r", 8)) {
+        size_t s1l=0, s2l=0;
+        const char* s1=lua_tolstring_(L,2,&s1l);
+        const char* s2=lua_tolstring_(L,3,&s2l);
+        if (s1 && s2 && s1l < 16 && s2l < 512) {
+            char b[544]; _snprintf(b,543,"|c%s%s|r",s1,s2);
+            b[543]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
+        }
+    }
+
+    // Fast: "%s (%d)" — label with count
+    if (numArgs == 2 && fmtLen == 7 && !memcmp(fmt, "%s (%d)", 7)) {
+        size_t sl=0; const char* s=lua_tolstring_(L,2,&sl);
+        if (s && sl < 256) {
+            char b[320]; _snprintf(b,319,"%s (%d)",s,(int)lua_tonumber_(L,3));
+            b[319]=0; lua_pushstring_(L,b); g_formatFastHits++; return 1;
         }
     }
 
@@ -746,7 +862,7 @@ static int __cdecl Hooked_StrMatch(lua_State* L) {
     }
 
 // ================================================================
-    // Ultra-fast path for ^([^%s]+) — match first word/token
+    // Fast path for ^([^%s]+) — match first word/token
     // Common in chat parsing: "extract first word from string"
     // Pattern: ^ ( [ ^ % s ] + )
     // Length: 10
@@ -777,7 +893,7 @@ static int __cdecl Hooked_StrMatch(lua_State* L) {
     }
 
     // ================================================================
-    // Ultra-fast path for ^(.-)%s*$ — trim trailing whitespace
+    // Fast path for ^(.-)%s*$ — trim trailing whitespace
     // Common in UI text cleanup.
     // Pattern: ^ ( . - ) % s * $
     // Length: 9
@@ -2081,7 +2197,7 @@ static int __cdecl Hooked_StrFind_Full(lua_State* L) {
     if (HasEmbeddedNul(s, sLen) || HasEmbeddedNul(p, pLen))
         return orig_str_find_full(L);
 
-    // Ultra-fast: anchored literal "^text"
+    // Fast: anchored literal "^text"
     if (pLen > 1 && p[0] == '^' && IsPlainLiteralPattern(p + 1, pLen - 1)) {
         int init = 1;
         if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
@@ -2100,7 +2216,7 @@ static int __cdecl Hooked_StrFind_Full(lua_State* L) {
         return 1;
     }
 
-    // Ultra-fast: single char pattern (no magic)
+    // Fast: single char pattern (no magic)
     if (pLen == 1 && !IsPatternMagicChar(p[0])) {
         int init = 1;
         if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
@@ -2215,13 +2331,16 @@ static FuncHookEntry g_funcHooks[] = {
     {"string", "byte",     (void*)Hooked_StrByte,          &orig_str_byte,         0, false},
     {nullptr,  "tostring", (void*)Hooked_ToString,         &orig_luaB_tostring,    0, false},
     {nullptr,  "tonumber", (void*)Hooked_ToNumber_Global,  &orig_luaB_tonumber,    0, false},
-    {nullptr,  "next",     (void*)Hooked_Next_Global,      &orig_luaB_next,        0, false},
-    {nullptr,  "rawget",   (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
-    {nullptr,  "rawset",   (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
-    {"table",  "insert",   (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
-    {"table",  "remove",   (void*)Hooked_TableRemove,      &orig_tbl_remove,       0, false},
-    {"table",  "concat",   (void*)Hooked_TableConcat,      &orig_tbl_concat,         0, false},
-    {nullptr,  "unpack",   (void*)Hooked_Unpack,           &orig_luaB_unpack,        0, false},
+    // PERMANENTLY DISABLED: All RawTValue write hooks cause luaH_getstr crashes
+    // These hooks write to RawTValue* which corrupts Lua table internals during
+    // world entry and heavy addon loading (WeakAuras /wa crash at 0x0085C457)
+    // {nullptr,  "next",     (void*)Hooked_Next_Global,      &orig_luaB_next,        0, false},
+    // {nullptr,  "rawget",   (void*)Hooked_RawGet_Global,    &orig_luaB_rawget,      0, false},
+    // {nullptr,  "rawset",   (void*)Hooked_RawSet_Global,    &orig_luaB_rawset,      0, false},
+    // {"table",  "insert",   (void*)Hooked_TableInsert,      &orig_tbl_insert,       0, false},
+    // {"table",  "remove",   (void*)Hooked_TableRemove,      &orig_tbl_remove,       0, false},
+    // {"table",  "concat",   (void*)Hooked_TableConcat,      &orig_tbl_concat,         0, false},
+    // {nullptr,  "unpack",   (void*)Hooked_Unpack,           &orig_luaB_unpack,        0, false},
     {nullptr,  "select",   (void*)Hooked_Select,           &orig_luaB_select,        0, false},
     {nullptr,  "rawequal", (void*)Hooked_RawEqual,         &orig_luaB_rawequal,      0, false},
     {"string", "sub",      (void*)Hooked_StrSub,           &orig_str_sub,          0, false},
@@ -2242,9 +2361,7 @@ static FuncHookEntry g_funcHooks[] = {
 #if !TEST_DISABLE_HOOK_MATH_SQRT
     {"math",   "sqrt",     (void*)Hooked_Math_Sqrt,        &orig_math_sqrt,        0x00851360, false},
 #endif
-#if !TEST_DISABLE_HOOK_STRING_REP
     {"string", "rep",      (void*)Hooked_StrRep,           &orig_str_rep,          0x00852780, false},
-#endif
 #if !TEST_DISABLE_HOOK_IPAIRS
     {nullptr,  "ipairs",   (void*)Hooked_IPairs_Factory,   &orig_luaB_ipairs,      0, false},
 #endif

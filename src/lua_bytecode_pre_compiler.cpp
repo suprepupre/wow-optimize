@@ -1,4 +1,5 @@
 #include "lua_bytecode_pre_compiler.h"
+#include "lua_optimize.h"
 #include "version.h"
 #include <vector>
 #include <string>
@@ -67,10 +68,17 @@ static bool TryEnqueue(const wchar_t* path) {
 
 static DWORD WINAPI Worker(LPVOID) {
     while (!g_stop) {
-        WaitForSingleObject(g_wakeup, 200);
+        WaitForSingleObject(g_wakeup, 500);
+
+        // Only preload during loading screens to avoid I/O contention during gameplay
+        if (!LuaOpt::IsLoadingMode()) continue;
+
         for (;;) {
             LONG tail = g_queueTail;
             if (tail == g_queueHead || !g_queue[tail].ready) break;
+
+            // Re-check loading mode before each file read
+            if (!LuaOpt::IsLoadingMode()) break;
 
             wchar_t path[MAX_PATH];
             wcsncpy_s(path, MAX_PATH, g_queue[tail].path, _TRUNCATE);
@@ -120,6 +128,15 @@ static void EnqueueWowAddonRoots() {
     for (auto& f : files) TryEnqueue(f.c_str());
 }
 
+static DWORD WINAPI EnumeratorThread(LPVOID) {
+    // Sleep 15s to avoid competing with login screen rendering
+    Sleep(15000);
+    if (g_stop) return 0;
+    EnqueueWowAddonRoots();
+    Log("[LuaPreCompile] enumeration complete, scanned=%ld files", g_filesScanned);
+    return 0;
+}
+
 bool Init() {
     g_wakeup = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (!g_wakeup) return false;
@@ -130,8 +147,14 @@ bool Init() {
     }
     InterlockedExchange(&g_active, 1);
 
-    EnqueueWowAddonRoots();
-    Log("[LuaPreCompile] active workers=%d scanned=%ld", WORKER_COUNT, g_filesScanned);
+    // Defer addon enumeration to background thread with delay
+    // to avoid blocking the login screen
+    HANDLE hEnum = CreateThread(NULL, 0, EnumeratorThread, NULL, 0, NULL);
+    if (hEnum) {
+        SetThreadPriority(hEnum, THREAD_PRIORITY_LOWEST);
+        CloseHandle(hEnum);
+    }
+    Log("[LuaPreCompile] active workers=%d (enumeration deferred 15s)", WORKER_COUNT);
     return true;
 }
 

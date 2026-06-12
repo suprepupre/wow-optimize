@@ -64,6 +64,7 @@ static HANDLE         g_freezeWatchdogThread = NULL;
 
 static void UpdateMainThreadActivity() {
     g_lastMainThreadTick = GetTickCount();
+    CrashDumper::FeatureCall("SleepHook");
 }
 
 static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
@@ -160,12 +161,27 @@ static void StopFreezeWatchdog() {
 #include "string_ops_fast.h"
 #include "heap_compactor.h"
 #include "lua_tonumber_fast.h"
+#include "lua_pushnumber_fast.h"
+#include "gettime_fast.h"
+#include "lua_pushvalue_fast.h"
+#include "render_state_dedup.h"
+#include "lua_settable_cache.h"
+#include "regex_cache.h"
+#include "trig_lut.h"
+#include "data_caches.h"
+#include "compute_caches.h"
+#include "event_name_hash.h"
+#include "cdatastore_batch.h"
 #include "strcat_fast.h"
 #include "script_handler_cache.h"
 #include "dbc_lookup_cache.h"
 #include "event_dispatch_cache.h"
+#include "event_name_cache.h"
 #include "lua_getstr_inline.h"
 #include "lua_rawgeti_inline.h"
+#include "lua_gettable_safety.h"
+#include "lua_vm_engine.h"
+#include "lua_vm_phase3.h"
 #include "lua_gettable_cache.h"
 #include "saved_vars_async.h"
 #include "texture_decode_mt.h"
@@ -183,6 +199,13 @@ static void StopFreezeWatchdog() {
 #include "wow_memory_opt.h"
 #include "wow_source_opt.h"
 #include "tls_object_cache.h"
+
+#include "d3d9_state_manager.h"
+#include "hooks_render.h"
+#include "hooks_simd.h"
+#include "hooks_logic.h"
+#include "hooks_memory.h"
+#include "hooks_async.h"
 
 #include "version.h"
 
@@ -872,6 +895,12 @@ static void WINAPI hooked_Sleep(DWORD ms) {
 #if !TEST_DISABLE_NAMEPLATE_MT
         NameplateMT::OnFrame(g_mainThreadId);
 #endif
+
+        // D3D9 disabled (DXVK vtable mismatch), other 4 enabled
+        // OnFrameD3D9StateManager(g_mainThreadId);
+        OnFrameRenderHooks(g_mainThreadId);
+        OnFrameLogicHooks(g_mainThreadId);
+        OnFrameAsyncHooks(g_mainThreadId);
 
         PreciseSleep((double)ms);
         return;
@@ -3043,6 +3072,7 @@ static void OptimizeProcess() {
 // Priority watchdog thread - monitors and restores process priority
 static HANDLE g_priorityWatchdogThread = NULL;
 static volatile bool g_priorityWatchdogActive = true;
+static DWORD g_priorityWatchdogLastLogTick = 0;
 
 static DWORD WINAPI PriorityWatchdogProc(LPVOID param) {
     while (g_priorityWatchdogActive) {
@@ -3052,11 +3082,19 @@ static DWORD WINAPI PriorityWatchdogProc(LPVOID param) {
         
         DWORD currentPriority = GetPriorityClass(GetCurrentProcess());
         
-        // If priority dropped below ABOVE_NORMAL, restore it
         if (currentPriority < ABOVE_NORMAL_PRIORITY_CLASS) {
             if (SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)) {
                 InterlockedIncrement(&g_priorityWatchdogRestores);
-                Log("[Priority] Watchdog restored Above Normal priority (was %lu)", currentPriority);
+                // Rate-limit: log first 3 restorations immediately, then once per 60s
+                // Loading screens repeatedly call SetPriorityClass(NORMAL), causing
+                // log spam without the rate limit.
+                LONG count = g_priorityWatchdogRestores;
+                DWORD now = GetTickCount();
+                if (count <= 3 || (now - g_priorityWatchdogLastLogTick) > 60000) {
+                    Log("[Priority] Watchdog restored Above Normal priority (was %lu, restorations=%ld)", 
+                        currentPriority, count);
+                    g_priorityWatchdogLastLogTick = now;
+                }
             }
         }
     }
@@ -3112,18 +3150,27 @@ static void OptimizeWorkingSet() {
 static void ConfigureMimalloc() {
     // Allow large OS pages when enabled by system policy
     mi_option_set(mi_option_allow_large_os_pages, 1);
-    // -1 = never purge. Keeps freed pages mapped so stale Lua string reads
-    // during reload don't ACCESS_VIOLATION. Multi-client overrides to 100ms.
+
+    // v3.3.x: eager commit arenas on Windows for faster allocation
+    // Commits entire arena at once instead of page-by-page
+    mi_option_set(mi_option_arena_eager_commit, 1);
+
+    // Purge delay: -1 = never purge (keeps freed pages mapped to prevent
+    // stale Lua string reads during reload from ACCESS_VIOLATION).
+    // Multi-client overrides to aggressive purging in AdjustMimallocForMultiClient.
     mi_option_set(mi_option_purge_delay, -1);
 
-    void* warmup = mi_malloc(64 * 1024 * 1024);
-    if (warmup) { memset(warmup, 0, 64 * 1024 * 1024); mi_free(warmup); }
+    // v3.3.x: use decommit (MEM_DECOMMIT) rather than reset (MEM_RESET)
+    // Decommit releases physical memory immediately, reducing RSS pressure
+    mi_option_set(mi_option_purge_decommits, 1);
 
-    // Pre-warm size classes: allocate+free batches to seed mimalloc's
-    // internal page caches.  First allocation of each size class triggers
-    // VirtualAlloc - pre-warming avoids this during gameplay.
-    // Sizes chosen from Lua TValue (16), Node (24-32), Table (56),
-    // TString (~24-128), Proto (~256-512), plus common addon object sizes.
+    // Pre-warm allocator with 32MB to reduce VA space pressure
+    // 64MB was too aggressive for HD clients with 37+ MPQs (VA fragmentation)
+    void* warmup = mi_malloc(32 * 1024 * 1024);
+    if (warmup) { memset(warmup, 0, 32 * 1024 * 1024); mi_free(warmup); }
+
+    // Pre-warm size classes matching WoW allocation patterns:
+    // TValue(16), Node(24-32), Table(56), TString(24-128), Proto(256-512)
     static const size_t seedSizes[] = {
         16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128,
         160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024
@@ -3135,18 +3182,18 @@ static void ConfigureMimalloc() {
         for (int i = 0; i < SEEDS_PER_SIZE; i++) if (batch[i]) mi_free(batch[i]);
     }
 
-    Log("mimalloc configured (large pages, pre-warmed 64MB + 23 size classes)");
+    Log("mimalloc v%d.%d.%d configured (eager commit, decommit purge, pre-warmed 32MB + 23 size classes)",
+        mi_version() / 100, (mi_version() % 100) / 10, mi_version() % 10);
 }
 
 static void AdjustMimallocForMultiClient() {
     if (g_isMultiClient) {
-        // In multi-client mode: aggressively return pages to OS
-        // This prevents 32-bit address space exhaustion on HD clients
-        // HD clients with 40+ MPQs can hit 2GB VA limit during boss fights
-        mi_option_set(mi_option_purge_delay, 10);   // 10ms delay (was 100ms) - faster page return
-        mi_option_set(mi_option_reset_delay, 0);    // Reset pages immediately on free
-        mi_collect(true);  // force immediate purge of any unused pages
-        Log("mimalloc: multi-client HD purge mode (10ms delay, immediate reset)");
+        // HD multi-client: aggressive memory return to prevent 32-bit VA exhaustion
+        // 40+ MPQ clients can hit 2GB VA limit during boss fights
+        mi_option_set(mi_option_purge_delay, 10);   // 10ms purge delay
+        mi_option_set(mi_option_purge_decommits, 1); // MEM_DECOMMIT for immediate RSS reduction
+        mi_collect(true);
+        Log("mimalloc: multi-client HD mode (10ms purge, decommit, immediate collect)");
     }
 }
 
@@ -3384,12 +3431,10 @@ static void DumpPeriodicStats() {
 
     // Tooltip Cache stats
     {
-        TooltipCache::Stats stats;
-        TooltipCache::GetStats(&stats);
+        TooltipCache::Stats stats = TooltipCache::GetStats();
         if (stats.hits + stats.misses > 0) {
-            double hitRate = (double)stats.hits / (stats.hits + stats.misses) * 100.0;
-            Log("[Stats] Tooltip Cache: %ld hits, %ld misses, %ld evictions, %ld entries (%.1f%% hit rate)",
-                stats.hits, stats.misses, stats.evictions, stats.cacheSize, hitRate);
+            Log("[Stats] Tooltip Cache: %lld hits, %lld misses, %lld evictions (%.1f%% hit rate)",
+                stats.hits, stats.misses, stats.evictions, stats.hitRate);
         }
     }
 
@@ -3745,167 +3790,14 @@ static void ClearLuaRawGetICache() {
     memset(g_rawGetICache, 0, sizeof(g_rawGetICache));
 }
 
-static void* (*orig_luaH_getnum)(int table, int key) = (void* (*)(int, int))0x0085C3A0;
+static void* (*orig_luaH_getnum)(int table, int key) = nullptr;  // DISABLED — unsafe across lua_State swaps
 
 typedef int (__cdecl* lua_rawgeti_fn)(int L, int idx, int n);
 static lua_rawgeti_fn orig_lua_rawgeti = nullptr;
 
 static int __cdecl hooked_lua_rawgeti(int L, int idx, int n) {
-#if CRASH_TEST_DISABLE_LUA_RAWGETI
+    // FULLY DISABLED due to crash on UI reload / exit
     return orig_lua_rawgeti(L, idx, n);
-#else
-    // Validate L pointer
-    if ((uintptr_t)L < 0x10000 || (uintptr_t)L > 0xBFFF0000) {
-        g_rawGetIMisses++;
-        return orig_lua_rawgeti(L, idx, n);
-    }
-
-    __try {
-        // Normalize index to get the table pointer
-        int* tableSlot = nullptr;
-        int* L_base = *(int**)(L + 0x10);  // L->base
-        int* L_top  = *(int**)(L + 0x0C);  // L->top
-        if (idx > 0) {
-            if (L_base + (idx - 1) * 4 < L_top)
-                tableSlot = L_base + (idx - 1) * 4;
-        } else if (idx >= -10000) {
-            tableSlot = L_top + idx * 4;
-        } else if (idx == -10002) {
-            tableSlot = L_base + 18 * 4;
-        }
-
-        if (!tableSlot) {
-            g_rawGetIMisses++;
-            return orig_lua_rawgeti(L, idx, n);
-        }
-
-        int table = tableSlot[0];
-        if (tableSlot[2] != 5 || table < 0x10000 || table > 0xBFFF0000) {
-            g_rawGetIMisses++;
-            return orig_lua_rawgeti(L, idx, n);
-        }
-
-        // Array part: direct access (already fast, no cache needed)
-        int sizearray = *(int*)(table + 32);
-        if ((unsigned int)(n - 1) < (unsigned int)sizearray) {
-            int* array = *(int**)(table + 16);
-            int* src = array + (n - 1) * 4;
-
-            __try {
-                DWORD* top = *(DWORD**)(L + 0x0C);
-                top[0] = src[0];
-                top[1] = src[1];
-                top[2] = src[2];
-                top[3] = src[3];
-                *(DWORD**)(L + 0x0C) = top + 4;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                g_rawGetIMisses++;
-                return orig_lua_rawgeti(L, idx, n);
-            }
-
-            DWORD taint = src[3];
-            if (taint) {
-                if (*(int*)0x00D413A0 && !*(int*)0x00D413A4)
-                    *(DWORD*)0x00D4139C = taint;
-            }
-
-            g_rawGetIHits++;
-            return src[3];
-        }
-
-        // Hash part - use cache with Node* from luaH_getnum (sub_85C3A0)
-        uint64_t hash = 0xCBF29CE484222325ULL;
-        hash ^= (uintptr_t)table;
-        hash *= 0x100000001B3ULL;
-        hash ^= (uint32_t)n;
-        hash *= 0x100000001B3ULL;
-
-        uint32_t cacheIdx = (uint32_t)(hash & RAWGETI_CACHE_MASK);
-        RawGetICacheEntry* entry = &g_rawGetICache[cacheIdx];
-
-        // Check cache hit
-        if (entry->keyHash == hash && entry->table == table && entry->key == n
-            && entry->node >= 0x10000 && entry->node <= 0xBFFF0000) {
-            int node = entry->node;
-            // Validate: key type tag (node+24 = key.tt) must be LUA_TNUMBER (3)
-            // Validate: key value (node+16 = key.n) must match n
-            if (*(int*)(node + 24) == 3 && *(double*)(node + 16) == (double)n) {
-                // Cache hit - push TValue from Node[0..3]
-                __try {
-                    DWORD* top = *(DWORD**)(L + 0x0C);
-                    top[0] = *(DWORD*)(node + 0);
-                    top[1] = *(DWORD*)(node + 4);
-                    top[2] = *(DWORD*)(node + 8);
-                    top[3] = *(DWORD*)(node + 12);
-                    *(DWORD**)(L + 0x0C) = top + 4;
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    g_rawGetIMisses++;
-                    return orig_lua_rawgeti(L, idx, n);
-                }
-
-                DWORD taint = *(DWORD*)(node + 12);
-                if (taint) {
-                    if (*(int*)0x00D413A0 && !*(int*)0x00D413A4)
-                        *(DWORD*)0x00D4139C = taint;
-                }
-
-                g_rawGetIHits++;
-                return taint;
-            }
-        }
-
-        // Cache miss - call luaH_getnum directly (bypass lua_rawgeti entirely)
-        void* nodePtr = orig_luaH_getnum(table, n);
-
-        // Check if it's a real Node (not nil sentinel at 0x00A46F78)
-        if (nodePtr && (uintptr_t)nodePtr >= 0x10000 && (uintptr_t)nodePtr <= 0xBFFF0000
-            && (uintptr_t)nodePtr != 0x00A46F78) {
-            int* nodeArr = (int*)nodePtr;
-
-            // Verify: key type must be number, key value must match n
-            if (nodeArr[6] == 3 && *(double*)(nodeArr + 4) == (double)n) {
-                // Cache the Node*
-                entry->keyHash = hash;
-                entry->table = table;
-                entry->key = n;
-                entry->node = (int)nodePtr;
-
-                // Push TValue from Node[0..3]
-                __try {
-                    DWORD* top = *(DWORD**)(L + 0x0C);
-                    top[0] = *(DWORD*)(nodeArr + 0);
-                    top[1] = *(DWORD*)(nodeArr + 1);
-                    top[2] = *(DWORD*)(nodeArr + 2);
-                    top[3] = *(DWORD*)(nodeArr + 3);
-                    *(DWORD**)(L + 0x0C) = top + 4;
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    g_rawGetIMisses++;
-                    return orig_lua_rawgeti(L, idx, n);
-                }
-
-                DWORD taint = *(DWORD*)(nodeArr + 3);
-                if (taint) {
-                    if (*(int*)0x00D413A0 && !*(int*)0x00D413A4)
-                        *(DWORD*)0x00D4139C = taint;
-                }
-
-                g_rawGetIHits++;
-                return taint;
-            }
-        }
-
-        // Nil or invalid - fall through to original
-        g_rawGetIMisses++;
-        return orig_lua_rawgeti(L, idx, n);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_rawGetIMisses++;
-        return orig_lua_rawgeti(L, idx, n);
-    }
-#endif
 }
 
 static bool InstallLuaRawGetICache() {
@@ -4870,7 +4762,23 @@ static int __cdecl hooked_Memcmp_Fast(const void* a, const void* b, size_t n) {
         InterlockedIncrement(&g_memcmpFast);
         return (va > vb) - (va < vb);
     }
-    // 16-byte removed - crosses page boundaries (same bug as CRT fast paths)
+    // 16-byte SSE2 path for TValue comparisons (Lua VM equality checks)
+    // Safe when both pointers are valid (caller guarantees this for TValue ops)
+    if (n == 16) {
+        __m128i va = _mm_loadu_si128((const __m128i*)a);
+        __m128i vb = _mm_loadu_si128((const __m128i*)b);
+        __m128i eq = _mm_cmpeq_epi8(va, vb);
+        int mask = _mm_movemask_epi8(eq);
+        InterlockedIncrement(&g_memcmpFast);
+        if (mask == 0xFFFF) return 0;  // All 16 bytes equal
+        // Find first differing byte for proper ordering
+        int diff = _mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) ^ 0xFFFF;
+        unsigned long idx;
+        _BitScanForward(&idx, diff);
+        unsigned char ca = ((const unsigned char*)a)[idx];
+        unsigned char cb = ((const unsigned char*)b)[idx];
+        return (ca > cb) - (ca < cb);
+    }
     return orig_Memcmp(a, b, n);
 }
 
@@ -5468,14 +5376,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CrashDumper::RegisterFeature("MemoryOpt");
     CrashDumper::RegisterFeature("SourceOpt");
     CrashDumper::RegisterFeature("TlsObjectCache");
-    CrashDumper::RegisterFeature("GetProcAddressCache");
-    CrashDumper::RegisterFeature("ModuleFileNameCache");
-    CrashDumper::RegisterFeature("EnvVarCache");
-    CrashDumper::RegisterFeature("ProfileCache");
-    CrashDumper::RegisterFeature("BatchOpt10");
-    CrashDumper::RegisterFeature("BatchOpt20");
-    CrashDumper::RegisterFeature("BatchOpt30");
-    CrashDumper::RegisterFeature("BatchOpt35");
     Log("[CrashDumper] Registered %d features for tracking", MAX_TRACKED_FEATURES);
 
     ConfigureMimalloc();
@@ -5692,6 +5592,39 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Lua tonumber Fast Path ---");
     bool luaToNumberFastOk = InstallLuaToNumberFast();
 
+    Log("--- Lua pushnumber Fast Path ---");
+    bool luaPushNumberFastOk = InstallLuaPushNumberFast();
+
+    Log("--- GetTime() Frame-Cached Fast Path ---");
+    bool getTimeFastOk = InstallGetTimeFast();
+
+    Log("--- lua_pushvalue Direct Stack Copy ---");
+    bool pushValueFastOk = InstallLuaPushValueFast();
+
+    Log("--- Render State Deduplication ---");
+    bool renderDedupOk = InstallRenderStateDedup();
+
+    Log("--- Lua SetTable Cache ---");
+    bool setTableCacheOk = InstallLuaSetTableCache();
+
+    Log("--- Regex Pattern Cache ---");
+    bool regexCacheOk = InstallRegexCache();
+
+    Log("--- SSE2 Trig LUT ---");
+    InitTrigLUT();
+
+    Log("--- Data Caches (10) ---");
+    bool dataCachesOk = InitDataCaches();
+
+    Log("--- Compute Caches (10) ---");
+    bool computeCachesOk = InitComputeCaches();
+
+    Log("--- Event Name Hash Cache ---");
+    bool eventHashOk = InstallEventNameHash();
+
+    Log("--- CDataStore Batch Read ---");
+    bool cdataBatchOk = InstallCDataStoreBatch();
+
     Log("--- SSE2 Strcpy Optimization ---");
     bool strcpyOk = InstallStrcatFast();
 
@@ -5704,6 +5637,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Event Dispatch Cache ---");
     bool eventDispatchOk = InstallEventDispatchCache();
 
+    Log("--- Event Name Cache ---");
+    bool eventNameOk = InstallEventNameCache();
+
     Log("--- luaH_getstr Inline Optimization ---");
     bool getStrInlineOk = InstallLuaGetStrInline();
 
@@ -5715,6 +5651,19 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool rawGetIInlineOk = InstallLuaRawGetIInline();
 #endif
 
+    Log("--- luaV_gettable Safety Patch (crash fix) ---");
+    bool getTableSafetyOk = InstallLuaGetTableSafety();
+
+    Log("--- Lua VM Engine (Direct-Threaded Interpreter) ---");
+    bool vmEngineOk = InstallLuaVMEngine();
+    CrashDumper::RegisterFeature("LuaVMEngine");
+    CrashDumper::FeatureSetActive("LuaVMEngine", vmEngineOk);
+
+    Log("--- Lua VM Phase3 Optimizations ---");
+    bool vmPhase3Ok = LuaVMPhase3::Init();
+    CrashDumper::RegisterFeature("LuaVMPhase3");
+    CrashDumper::FeatureSetActive("LuaVMPhase3", vmPhase3Ok);
+
     Log("--- Hardware Cursor ---");
     bool cursorOk = InstallHardwareCursorHooks();
 
@@ -5722,7 +5671,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool frameThrottleOk = InstallFrameThrottling();
 
     Log("--- Tooltip String Caching ---");
-    bool tooltipCacheOk = false;  // Placeholder - tracks hits but never caches results
+    bool tooltipCacheOk = TooltipCache::Install();
 
     Log("--- Spell Data Caching ---");
     bool spellCacheOk = SpellCache::Init();
@@ -6025,7 +5974,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Hot Patch (20 features) ---");
     bool hotPatchOk = HotPatch::InstallAll();
 
-    Log("--- Mega Patch (50 features) ---");
+    Log("--- Infra API (50 features) ---");
     bool infraPatchOk = InfraPatch::InstallAll();
 
     // ALL WoW.exe internal hooks DISABLED for crash isolation.
@@ -6060,6 +6009,31 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- TLS Object Cache ---");
     bool tlsObjCacheOk = TlsObjectCache::Install();
+
+    Log("");
+    Log("--- D3D9 State Manager (15 hooks) ---");
+    bool d3d9StateOk = false; // DISABLED: vtable patching crashes with DXVK/d3d9 wrapper
+    Log("[D3D9State] DISABLED: vtable layout mismatch (DXVK/overlay wrappers)");
+
+    Log("");
+    Log("--- Render Hooks (anim throttle, backbuffer) ---");
+    bool renderHooksOk = InstallRenderHooks(); // BISECT
+
+    Log("");
+    Log("--- SIMD Hooks (SSE2 matrix, frustum, color) ---");
+    bool simdHooksOk = InstallSimdHooks(); // BISECT
+
+    Log("");
+    Log("--- Logic Hooks (combat text, UI cache, heartbeat) ---");
+    bool logicHooksOk = InstallLogicHooks(); // BISECT
+
+    Log("");
+    Log("--- Memory Hooks (aligned slabs, GUID hash) ---");
+    bool memHooksOk = InstallMemoryHooks(); // BISECT
+
+    Log("");
+    Log("--- Async Hooks (worker pool, particle, prefetch) ---");
+    bool asyncHooksOk = InstallAsyncHooks(); // BISECT
 
     Log("");
     Log("========================================");
@@ -6140,6 +6114,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Spell data cache (LRU)",      spellCacheOk ? " OK " : "SKIP");
     Log("  [%s] RTTI type check cache",       rttiCacheOk   ? " OK " : "SKIP");
     Log("  [%s] Stream buffer fast path",     streamBufOk    ? " OK " : "SKIP");
+    Log("  [%s] D3D9 State Manager (15 hooks)",   d3d9StateOk ? " OK " : "SKIP");
+    Log("  [%s] Render Hooks (anim+backbuffer)",    renderHooksOk ? " OK " : "SKIP");
+    Log("  [%s] SIMD Hooks (SSE2 matrix+frustum)", simdHooksOk ? " OK " : "SKIP");
+    Log("  [%s] Logic Hooks (CT+UI+heartbeat)",    logicHooksOk ? " OK " : "SKIP");
+    Log("  [%s] Memory Hooks (slabs+GUID)",        memHooksOk ? " OK " : "SKIP");
+    Log("  [%s] Async Hooks (workers+particles)",  asyncHooksOk ? " OK " : "SKIP");
 
     // Start freeze detection watchdog AFTER all features initialized
     StartFreezeWatchdog();
@@ -7857,6 +7837,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             ShutdownLuaGetTableCache();
             ShutdownDataStoreFastPath();
             ShutdownStringOpsFast();
+            ShutdownLuaPushNumberFast();
+            ShutdownGetTimeFast();
+            ShutdownLuaPushValueFast();
+            ShutdownDataCaches();
+            ShutdownComputeCaches();
+            ShutdownRenderStateDedup();
+            ShutdownEventNameHash();
+            ShutdownCDataStoreBatch();
+            ShutdownD3D9StateManager();
+            ShutdownRenderHooks();
+            ShutdownSimdHooks();
+            ShutdownLogicHooks();
+            ShutdownMemoryHooks();
+            ShutdownAsyncHooks();
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
             for (int i = 0; i < MAX_CACHED_HANDLES; i++) {

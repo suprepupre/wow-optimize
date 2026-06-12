@@ -45,6 +45,7 @@
 #include "MinHook.h"
 #include "lua_getstr_inline.h"
 #include "hot_patch.h"
+#include "lua_optimize.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -95,6 +96,12 @@ static luaH_getstr_fn g_orig_getstr = nullptr;
 static void* __cdecl Optimized_GetStr(int table, int tstring)
 {
     InterlockedIncrement64(&g_total_calls);
+
+    // Bail out during lua_State swap — table and tstring pointers become
+    // garbage when WoW destroys the old Lua VM during UI reload/logout.
+    if (LuaOpt::IsReloading() || LuaOpt::IsSwapping()) {
+        return g_orig_getstr(table, tstring);
+    }
 
     // Validate inputs — reject obviously invalid pointers
     if ((uintptr_t)table < 0x10000 || (uintptr_t)table > 0xBFFF0000 ||

@@ -91,8 +91,8 @@ void UninstallHotFunctionOptimizations() {
     MH_DisableHook((void*)0x0040BB80);
     MH_RemoveHook((void*)0x0040BB80);
     
-    uint64_t calls = g_memset_calls.load();
-    uint64_t fast = g_fast_path.load();
+    uint64_t calls = g_memset_calls.load(std::memory_order_relaxed);
+    uint64_t fast = g_fast_path.load(std::memory_order_relaxed);
     
     if (calls > 0) {
         Log("[FastMemset] Stats: %llu total calls, %llu large-size",
