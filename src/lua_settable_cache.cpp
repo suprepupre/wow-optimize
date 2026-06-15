@@ -65,7 +65,7 @@ void ClearLuaSetTableCache() {
 // ================================================================
 // Hook Target: DISABLED — 0x00857CA0 is luaV_execute (VM interpreter),
 // NOT luaV_settable. Wrong function hooked with wrong signature
-// (2 params int->int, not 4 params void). See IDA decompilation.
+// (2 params int->int, not 4 params void).
 // Bug: every Lua VM opcode execution passed through this broken hook,
 // causing return value discard → Lua state corruption.
 // ================================================================
