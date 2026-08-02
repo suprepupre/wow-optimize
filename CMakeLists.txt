@@ -116,8 +116,6 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_getlocal_fast.h
     src/runtime_vm/lua_setlocal_fast.cpp
     src/runtime_vm/lua_setlocal_fast.h
-    src/runtime_vm/lua_setupvalue_fast.cpp
-    src/runtime_vm/lua_setupvalue_fast.h
     src/runtime_vm/lua_getinfo_fast.cpp
     src/runtime_vm/lua_getinfo_fast.h
     src/runtime_vm/lua_error_fast.cpp
@@ -160,8 +158,6 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_pushfstring_fast.h
     src/runtime_vm/lua_gettable_fast.cpp
     src/runtime_vm/lua_gettable_fast.h
-    src/runtime_vm/lua_concat_fast.cpp
-    src/runtime_vm/lua_concat_fast.h
     src/runtime_vm/lua_rawseti_fast.cpp
     src/runtime_vm/lua_rawseti_fast.h
     src/runtime_vm/lua_setfield_fast.cpp
@@ -239,8 +235,6 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_checknumber_cache.h
     src/runtime_vm/lua_pushstring_cache.cpp
     src/runtime_vm/lua_pushstring_cache.h
-    src/hooks_subsystems/object_accessor_cache.cpp
-    src/hooks_subsystems/object_accessor_cache.h
     src/hooks_subsystems/format_validator_cache.cpp
     src/hooks_subsystems/format_validator_cache.h
     src/allocators/heap_compactor.cpp
