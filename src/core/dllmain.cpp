@@ -447,7 +447,6 @@ static void StopFreezeWatchdog() {
 #include "render_state_dedup.h"
 #include "lua_settable_cache.h"
 #include "regex_cache.h"
-#include "trig_lut.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
@@ -7220,9 +7219,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Regex Pattern Cache ---");
     bool regexCacheOk = Config::g_settings.OptLuaOpcache && InstallRegexCache();
-
-    Log("--- SSE2 Trig LUT ---");
-    InitTrigLUT();
 
     Log("--- Event Name Hash Cache ---");
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();
