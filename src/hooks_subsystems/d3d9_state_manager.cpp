@@ -733,6 +733,37 @@ bool InstallD3D9StateManager(void) {
     return true;
 }
 
+// Process-exit variant of the above.
+//
+// Sixteen of this module's function pointers live in the device vtable, which is
+// inside d3d9.dll rather than inside us. Leaving them there while this module is
+// unloaded means d3d9 releases the device through a vtable that calls into an
+// address space we no longer occupy - after the player has already quit, with no
+// log left running to say so.
+//
+// It cannot simply call ShutdownD3D9StateManager. By the time DLL_PROCESS_DETACH
+// runs with lpReserved != NULL the OS has already terminated every other thread,
+// possibly while one held g_vtableMutex, and an SRWLOCK has no abandonment
+// recovery - blocking on it here would hang the exiting process, which is a worse
+// outcome for the player than the dangling vtable this is meant to clear.
+//
+// So it tries the lock and gives up rather than waits. Giving up leaves things
+// exactly as they were before this existed, so the failure mode is the old
+// behaviour rather than a new one. No statistics are printed: the log thread is
+// already gone at this point.
+void ShutdownD3D9StateManagerAtProcessExit(void) {
+    if (!g_vtableMutex.try_lock()) return;
+
+    if (g_deviceHooked && g_pPatchedVTable) {
+        UnpatchDeviceVTableInner();
+        g_deviceHooked = false;
+        g_pDevice = nullptr;
+        g_pPatchedVTable = nullptr;
+    }
+
+    g_vtableMutex.unlock();
+}
+
 void ShutdownD3D9StateManager(void) {
     UnpatchDeviceVTable();
 

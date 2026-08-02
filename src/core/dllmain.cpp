@@ -9926,6 +9926,30 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     // Best-effort — if unhooking fails, process is terminating anyway
                 }
+
+                // MinHook is not the only thing pointing at this module. The D3D9
+                // state manager writes sixteen of its own function pointers
+                // directly into the device vtable, which lives inside d3d9.dll -
+                // and this path used to break out before ShutdownD3D9StateManager
+                // ever ran, so those sixteen entries survived our unload. d3d9
+                // then releases the device through a vtable still calling into an
+                // unmapped module, on the way out of the process, which is where a
+                // crash lands after the player has already quit and is the hardest
+                // kind to attribute.
+                //
+                // Restoring them is cheap and self-checking: each slot is put back
+                // only if it still holds our hook, so a third-party hook layered on
+                // top is left alone, and the whole walk is inside SEH.
+                //
+                // The process-exit variant, not the ordinary one: every other
+                // thread is already dead here, possibly holding the vtable lock,
+                // and that lock is an SRWLOCK with no abandonment recovery. It
+                // tries and gives up rather than waits, because hanging a quitting
+                // process is worse than the dangling vtable being cleared.
+                __try {
+                    ShutdownD3D9StateManagerAtProcessExit();
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                }
 #if !TEST_DISABLE_SAVED_VARS_ASYNC
                 FlushSavedVarsAsyncSynchronously();
 #endif
@@ -9934,7 +9958,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 // before the log is finalized or it is lost on every normal exit.
                 FrameBench::Report("session end");
                 LogFinalizeOnProcessExit(
-                    "wow_optimize.dll: process terminating, hooks removed, skipping cleanup");
+                    "wow_optimize.dll: process terminating, detours removed and the "
+                    "D3D9 device vtable restored, skipping the rest of cleanup");
                 break;
             }
 
