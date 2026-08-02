@@ -105,6 +105,7 @@ static void BuildKnownFuncTable() {
 
         // --- Math / transform library ---
         { 0x004C1B30, "CMatrix::TranslateLocal" },
+        { 0x004C1C40, "CMatrix::FromQuaternion" },
         { 0x004C1F00, "CMatrix::Multiply" },
         { 0x004C2120, "CMatrix::ScalarMul" },
         { 0x004C21B0, "sub_4C21B0_pt_x_mat4" },

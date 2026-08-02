@@ -361,6 +361,21 @@
 // sub-ULP). In-place accumulate -> own isolation flag. Pointer-validated + SEH.
 #define TEST_DISABLE_MATRIX_TRANSLATE_SSE2         1
 
+// Quaternion -> 3x3 rotation matrix (sub_4C1C40), the arithmetic core behind
+// all three of the client's quaternion wrappers. Runs once per animated bone
+// per frame inside sub_82F0F0, the largest single entry in the main-thread
+// profile.
+//
+// The original is 72 x87 instructions, and it is not plain double arithmetic:
+// the compiler ran out of the 8-deep x87 stack and spilled three products
+// (x*2z, y*2z, z*2z) to 32-bit stack slots, so those three are rounded to float
+// and reloaded while every other intermediate stays at 53 bits. z*2z is used
+// twice - rounded in one output, unrounded in another. The replacement
+// reproduces that asymmetry deliberately; without it the result is merely close
+// rather than identical. A self-test proves it against the client's own routine
+// before the hook is installed.
+#define TEST_DISABLE_QUAT_MATRIX_SSE2    0
+
 // SSE2 6-plane frustum culling (sub_9839E0, CFrustum::IsAABBVisible).
 // Vectorized check using transposed SSE2 dot products.
 // Set to 1 to revert to original FPU scalar implementation.
