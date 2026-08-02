@@ -51,6 +51,11 @@ namespace TextureUnloadDelay {
     static volatile long g_expired          = 0;   // released after the TTL
     static volatile long g_bypassed         = 0;
 
+// Set once the measured reuse rate says holding textures is not worth the
+// memory. See the note at the queue site.
+static bool g_selfDisabled = false;
+static constexpr long SELF_CHECK_AFTER = 20000;   // decided releases before judging
+
     static bool IsBypassActive() {
         DWORD now = GetTickCount();
         // A transition ended recently, so let the engine free things itself while
@@ -111,6 +116,39 @@ namespace TextureUnloadDelay {
         // by the engine and none of our business.
         int* refCount = (int*)((char*)Block + 4);
         if (*refCount != 1)
+            return orig_Texture_Release(Block);
+
+        // Stop holding textures once the feature has measured itself useless.
+        //
+        // The whole premise is that a texture released now is often wanted again
+        // shortly, so holding it for five seconds saves a reload. Two testers
+        // have now measured that:
+        //
+        //     784051 queued, 1631 reused before TTL (0.2%), 780792 expired
+        //     (an earlier session on another machine: 0.4%)
+        //
+        // Three quarters of a million textures held to save sixteen hundred
+        // reloads. That is not a cache, it is a memory leak with a timer - and
+        // the session those numbers come from had a 32-bit process at a 2.4 GB
+        // working set, freezing for a second at a time.
+        //
+        // So it now stops after a large enough sample says it is not paying.
+        // Anything already queued still expires normally through Flush; this
+        // only stops adding more. A feature that measures itself and gives up is
+        // better than one that has to be found in a log and switched off by
+        // hand, and this one has now been found twice.
+        if (!g_selfDisabled) {
+            long q = g_queuedTotal, r = g_reused, e = g_expired;
+            long decided = r + e;
+            if (decided >= SELF_CHECK_AFTER && (double)r < 0.01 * (double)decided) {
+                g_selfDisabled = true;
+                Log("[TextureUnloadDelay] Reuse is %.2f%% over %ld decided releases - "
+                    "holding textures is not paying for itself, so it stops here. "
+                    "Queued %ld in total; the ones still held expire normally.",
+                    100.0 * (double)r / (double)decided, decided, q);
+            }
+        }
+        if (g_selfDisabled)
             return orig_Texture_Release(Block);
 
         bool queued = false;
