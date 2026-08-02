@@ -333,77 +333,17 @@ extern "C" char __cdecl Hooked_ParticleEmitterUpdate(int a1, int a2, int a3, int
     return 1;
 }
 
-// SSE2-accelerated particle transform (Phase 1 — inline math replacement)
-// Transforms N particle positions by a 4x4 matrix.
-// Input:  positions = array of {x,y,z,padding} (4 floats each, 16 bytes)
-//         count = number of particles
-//         matrix = 4x4 transform matrix (column-major, 16 floats)
-__declspec(noinline)
-static void SSE2_TransformParticles(float* positions, int count,
-                                     const float* matrix) {
-    if (count <= 0) return;
-
-    __m128 m0 = _mm_loadu_ps(matrix);       // col 0
-    __m128 m1 = _mm_loadu_ps(matrix + 4);   // col 1
-    __m128 m2 = _mm_loadu_ps(matrix + 8);   // col 2
-    __m128 m3 = _mm_loadu_ps(matrix + 12);  // col 3 (translation)
-
-    for (int i = 0; i < count; i++) {
-        float* pos = positions + i * 4;
-        __m128 p = _mm_loadu_ps(pos);  // x, y, z, w
-
-        // Transform: result = m0*x + m1*y + m2*z + m3*w
-        __m128 r = _mm_add_ps(
-                     _mm_add_ps(
-                       _mm_mul_ps(m0, _mm_shuffle_ps(p, p, _MM_SHUFFLE(0,0,0,0))),
-                       _mm_mul_ps(m1, _mm_shuffle_ps(p, p, _MM_SHUFFLE(1,1,1,1)))),
-                     _mm_add_ps(
-                       _mm_mul_ps(m2, _mm_shuffle_ps(p, p, _MM_SHUFFLE(2,2,2,2))),
-                       _mm_mul_ps(m3, _mm_shuffle_ps(p, p, _MM_SHUFFLE(3,3,3,3)))));
-
-        _mm_storeu_ps(pos, r);
-    }
-}
-
-// SSE2-accelerated color interpolation (4 particles at once)
-// srcColors / dstColors: arrays of 4 uint8_t RGBA (4 bytes each, padded to 16)
-// t: lerp factor (0.0 – 1.0, broadcast to all components)
-__declspec(noinline)
-static void SSE2_LerpColors4(uint8_t* __restrict dst,
-                              const uint8_t* __restrict srcA,
-                              const uint8_t* __restrict srcB,
-                              float t) {
-    __m128 factor = _mm_set1_ps(t);
-    __m128 oneMinusT = _mm_set1_ps(1.0f - t);
-    __m128i zero128i = _mm_setzero_si128();
-
-    __m128i a = _mm_loadu_si128((const __m128i*)srcA);
-    __m128i b = _mm_loadu_si128((const __m128i*)srcB);
-
-    __m128i aLo16 = _mm_unpacklo_epi8(a, zero128i);
-    __m128i aHi16 = _mm_unpackhi_epi8(a, zero128i);
-    __m128i bLo16 = _mm_unpacklo_epi8(b, zero128i);
-    __m128i bHi16 = _mm_unpackhi_epi8(b, zero128i);
-
-    __m128i aLo32 = _mm_unpacklo_epi16(aLo16, zero128i);
-    __m128i aHi32 = _mm_unpackhi_epi16(aLo16, zero128i);
-    __m128i bLo32 = _mm_unpacklo_epi16(bLo16, zero128i);
-    __m128i bHi32 = _mm_unpackhi_epi16(bLo16, zero128i);
-
-    __m128 aF0 = _mm_cvtepi32_ps(aLo32);
-    __m128 aF1 = _mm_cvtepi32_ps(aHi32);
-    __m128 bF0 = _mm_cvtepi32_ps(bLo32);
-    __m128 bF1 = _mm_cvtepi32_ps(bHi32);
-
-    __m128 r0 = _mm_add_ps(_mm_mul_ps(aF0, oneMinusT), _mm_mul_ps(bF0, factor));
-    __m128 r1 = _mm_add_ps(_mm_mul_ps(aF1, oneMinusT), _mm_mul_ps(bF1, factor));
-
-    __m128i ri0 = _mm_cvtps_epi32(r0);
-    __m128i ri1 = _mm_cvtps_epi32(r1);
-    __m128i packed = _mm_packus_epi16(_mm_packs_epi32(ri0, ri1), zero128i);
-
-    _mm_storeu_si128((__m128i*)dst, packed);
-}
+// Two SSE2 helpers lived here, SSE2_TransformParticles and SSE2_LerpColors4.
+// Both were static with no caller anywhere in the tree - they never ran, and
+// they made this file read as though particle transforms and colour blending
+// were accelerated when nothing of the sort was wired up.
+//
+// SSE2_LerpColors4 was also wrong, which is the reason for saying so here
+// rather than deleting them quietly: it computed aHi32 from aLo16 instead of
+// aHi16 and did the same for b, so it read the low eight bytes twice, ignored
+// the high eight entirely, and still stored a full sixteen. If anyone had
+// wired it up expecting four particles it would have blended two and
+// overwritten the rest. They are in the history if the work is ever picked up.
 
 // ================================================================
 // 2. Map (.ADT) Terrain Pre-parsing
