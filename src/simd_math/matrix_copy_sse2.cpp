@@ -537,12 +537,17 @@ static float* __cdecl Hooked_MatVec4Mul(float* result, const float* vec4, const 
 // ================================================================
 // sub_4C3420 / sub_4C3600: C3Vector::Normalize (in-place, __thiscall(this))
 // ================================================================
-// Both do v *= 1.0/sqrt(x*x+y*y+z*z) with x87 fsqrt+fdiv. We replace that with
-// full-precision SSE (sqrtss + divss) -- deliberately NOT _mm_rsqrt_ps, whose
-// approximation + the missing degenerate guard is exactly what NaN-poisoned the
-// quaternion-normalize hook. sqrtss/divss are IEEE round-to-nearest, so the result
-// matches the scalar original to sub-ULP (only the x^2+y^2+z^2 accumulation order
-// differs, x87's 80-bit vs SSE 32-bit -- invisible for a unit vector).
+// Both do v *= 1.0/sqrt(x*x+y*y+z*z) with x87 fsqrt+fdiv, at the 53-bit
+// precision the CRT leaves x87 in. We replace that with sqrtsd + divsd at the
+// same width -- deliberately NOT _mm_rsqrt_ps, whose approximation plus the
+// missing degenerate guard is exactly what NaN-poisoned the quaternion-normalize
+// hook. sqrtsd and divsd are correctly rounded, so they match fsqrt and fdivr
+// exactly and the result is bit-identical rather than close.
+//
+// The paragraph that stood here said the difference was accumulation order,
+// "x87's 80-bit vs SSE 32-bit -- invisible for a unit vector". It was 53-bit
+// against 32-bit, it was visible, and it differed on close to every vector the
+// epsilon did not skip. The measurements are in the shadow-check note below.
 //
 //   sub_4C3420: no guard. On a zero vector the original yields 1.0/0 = +Inf then
 //               v*Inf = NaN; SSE divss-by-zero (exceptions masked, as WoW runs)
@@ -905,6 +910,12 @@ static float* __cdecl Hooked_PointXformInPlace(float* a1, float* a2, float* a3) 
 // first few thousand real calls and compares all sixteen floats as bits. If the
 // order is wrong the log says so and every call goes back to the original -
 // which is a better outcome than a comment claiming sub-ULP.
+//
+// The check has since answered it: 4096 consecutive real calls in a live session
+// matched the client exactly, so the inherited order is correct. The check stays
+// anyway - it costs nothing after those first few thousand calls, and it is what
+// would catch a differently-patched client rather than a player noticing the
+// camera looks slightly off.
 #if !TEST_DISABLE_MATRIX_INVERT_SSE2
 typedef float* (__fastcall* MatInvRigid_t)(float* self, void* edx, float* out);
 static MatInvRigid_t pOrigMatInvRigid = nullptr;
@@ -1218,7 +1229,8 @@ bool InstallMatrixCopySSE2() {
     if (WineSafe_CreateHook((void*)0x004C3420, (void*)Hooked_Vec3Norm,
                             (void**)&pOrigVec3Norm) == MH_OK &&
         WO_EnableHook((void*)0x004C3420) == MH_OK) {
-        Log("[MatrixSSE2] Hooked C3Vector::Normalize at 0x004C3420 (SSE2 sqrtss, 12 callers)");
+        Log("[MatrixSSE2] Hooked C3Vector::Normalize at 0x004C3420 "
+            "(SSE2 packed double, bit-identical, 12 callers)");
     } else {
         Log("[MatrixSSE2] C3Vector::Normalize hook FAILED");
     }
@@ -1226,7 +1238,8 @@ bool InstallMatrixCopySSE2() {
     if (WineSafe_CreateHook((void*)0x004C3600, (void*)Hooked_Vec3NormSafe,
                             (void**)&pOrigVec3NormSafe) == MH_OK &&
         WO_EnableHook((void*)0x004C3600) == MH_OK) {
-        Log("[MatrixSSE2] Hooked C3Vector::Normalize(guarded) at 0x004C3600 (SSE2 sqrtss, 2^-22 guard, 22 callers)");
+        Log("[MatrixSSE2] Hooked C3Vector::Normalize(guarded) at 0x004C3600 "
+            "(SSE2 packed double, bit-identical, 2^-22 guard, 22 callers)");
     } else {
         Log("[MatrixSSE2] C3Vector::Normalize(guarded) hook FAILED");
     }
