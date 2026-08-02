@@ -836,6 +836,7 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 // Defined in dllmain.cpp; declared here because this header is included from
 // every translation unit that installs a hook.
 extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte);
+extern "C" void WowOpt_LogDuplicateHook(void* target);
 
 static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, void** original) {
 #if ALLOW_WOW_INTERNAL_HOOKS_ON_WINE == 0
@@ -889,7 +890,14 @@ static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, voi
         // knows which: it reports ALREADY_CREATED for a target it owns.
         MH_STATUS probe = MH_CreateHook(target, detour, original);
         if (probe == MH_ERROR_ALREADY_CREATED) {
-            return probe;                       // ours; the caller's own problem
+            // One of our own modules already owns this address. That is worth
+            // saying plainly: two modules aiming at one function is how a broken
+            // matrix multiply survived for months, because the half being
+            // maintained was the half that silently lost the race. The caller
+            // usually logs this as "hook FAILED", which reads like a defect in
+            // the target rather than a collision between two of ours.
+            WowOpt_LogDuplicateHook(target);
+            return probe;
         }
         if (probe == MH_OK) {
             MH_RemoveHook(target);              // created over a stranger - back out

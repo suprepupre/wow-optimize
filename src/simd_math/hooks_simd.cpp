@@ -1430,10 +1430,16 @@ bool InstallSimdHooks(void) {
 
 #if !TEST_DISABLE_MATRIX_TRANSFORM_SSE2
     if (Config::g_settings.OptSimdMatrixTransform) {
-        if (WineSafe_CreateHook((void*)0x004C2300, (void*)Hooked_sub_4C2300, (void**)&orig_sub_4C2300) == MH_OK) {
-            WO_EnableHook((void*)0x004C2300);
-            Log("[SimdHooks] sub_4C2300 (Vector-Matrix Translate) hook ACTIVE");
-        }
+        // 0x004C2300 belongs to matrix_copy_sse2, which hooks it as
+        // PointXformInPlace and installs earlier. Both modules aimed at it; the
+        // conflict is dormant only because this section is excluded from the
+        // build, and restoring that flag would recreate exactly the situation
+        // that hid a broken matrix multiply for months - two implementations,
+        // one silently losing, and the maintained one being the loser.
+        //
+        // Not hooked from here. If this section is ever built again, the
+        // implementation to keep is the one in the module that wins the race.
+        Log("[SimdHooks] sub_4C2300 is owned by MatrixSSE2 - not hooked from here");
         if (WineSafe_CreateHook((void*)0x005FED20, (void*)Hooked_sub_5FED20, (void**)&orig_sub_5FED20) == MH_OK) {
             WO_EnableHook((void*)0x005FED20);
             Log("[SimdHooks] sub_5FED20 (Vector-Matrix Rotate) hook ACTIVE");
@@ -1462,7 +1468,6 @@ void ShutdownSimdHooks(void) {
     MH_DisableHook((void*)0x00982400);
     MH_DisableHook((void*)0x00982460);
 #if !TEST_DISABLE_MATRIX_TRANSFORM_SSE2
-    MH_DisableHook((void*)0x004C2300);
     MH_DisableHook((void*)0x005FED20);
 #endif
     Log("[SimdHooks] Stats: matMul=%ld, ... frustum=%ld (culled=%ld, %.1f%%), rayTri=%ld (hit=%ld, %.1f%%)",

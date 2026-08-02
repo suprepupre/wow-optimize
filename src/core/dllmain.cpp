@@ -109,7 +109,28 @@ extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte) {
     }
 }
 
+// One of our own modules had already hooked this address. Distinct from a
+// foreign detour: that is somebody else's code, this is ours colliding with
+// ours, and the two want different fixes.
+static volatile long g_duplicateHooks = 0;
+
+extern "C" void WowOpt_LogDuplicateHook(void* target) {
+    long n = InterlockedIncrement(&g_duplicateHooks);
+    if (n <= 8) {
+        Log("[Hooks] 0x%08X is already hooked by another module of ours - two "
+            "implementations aimed at one function, and only one of them runs",
+            (unsigned)(uintptr_t)target);
+    }
+}
+
 extern "C" void WowOpt_ReportForeignDetours() {
+    long dup = g_duplicateHooks;
+    if (dup > 0) {
+        Log("[Hooks] %ld address%s targeted by more than one of our own modules. "
+            "Whichever installs first wins, which is not decided anywhere on "
+            "purpose.", dup, dup == 1 ? "" : "es");
+    }
+
     long n = g_foreignDetours;
     if (n > 0) {
         Log("[Hooks] %ld hook target%s skipped because something else had already "
