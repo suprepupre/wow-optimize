@@ -396,12 +396,17 @@
 // On multi-client setups with shared disk, set to 1 to avoid I/O contention.
 #define TEST_DISABLE_LUA_PRECOMPILE      1
 
-// SSE2 quaternion normalize. Compiled in and gated at run time by the
-// QuatNormalizeSse2 setting (default off) rather than compiled out, so it can be
-// tested. The client's version at 0x00979110 is measured at 3.13% of main-thread
-// execution in a CPU-bound profile. The replacement was checked against it over
-// 400000 quaternions: worst per-component difference is one float ULP, the result
-// is unit to within 1.6 ULP, and the two never disagree about the epsilon cutoff.
+// SSE2 quaternion normalize, gated at run time by the QuatNormalizeSse2 setting,
+// now default on. The client's version at 0x00979110 is measured at 3.13% of
+// main-thread execution in a CPU-bound profile.
+//
+// It was default off because the replacement was packed single and sat a float
+// ULP away. The client is not working in single: sub_979110 is 36 x87
+// instructions at 53-bit, accumulating the four squares strictly left to right.
+// Rewritten in packed double with that order preserved, it is bit-identical -
+// 4,000,000 quaternions against the instruction stream transcribed verbatim,
+// zero differing, at 2.01x. The single-precision version it replaces differed on
+// 1,535,779 of the roughly two million that actually normalise.
 #define TEST_DISABLE_QUAT_NORMALIZE         0
 
 // Addon file RAM-disk - interferes with WoW file I/O

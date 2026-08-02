@@ -129,10 +129,12 @@ namespace Config {
         bool OptSpellEffectCulling = false;
         // Drops a dead _msize from WoW's free wrapper. Measured at 8-10% of
         // main-thread execution in two tester profiles.
-        // SSE2 quaternion normalize. Off by default: the client's version is
-        // 3.13% of execution in a CPU-bound profile and the replacement matches
-        // it to one ULP, but it has never been run in a game.
-        bool OptQuatNormalizeSse2 = false;
+        // SSE2 quaternion normalize, 3.13% of execution in a CPU-bound profile.
+        // On by default now that it is bit-identical to the client rather than
+        // within one ULP - it reproduces the client's double-precision width and
+        // its left-to-right summation order, and a self-test refuses to install
+        // it on a single differing bit.
+        bool OptQuatNormalizeSse2 = true;
         // SSE2 4x4 matrix multiply. Off by default for the same reason: verified
         // against the client's version numerically, never run in a game.
         // On by default since the accumulation moved to packed double: the

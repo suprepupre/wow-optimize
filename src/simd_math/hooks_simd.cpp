@@ -71,24 +71,58 @@ void SSE2_MatrixMultiply(const float* __restrict a,
 // ================================================================
 static const float kQuatNormEps = 0.00000023841858f;
 
+// This was packed single with a pairwise tree sum, and it was measured at one
+// float ULP away from the client - which is why the setting that turns it on has
+// been sitting at default-off, on a function worth 3.13% of main-thread time.
+//
+// The client is not working in single. sub_979110 is 36 x87 instructions and the
+// CRT runs x87 at 53-bit, so it squares and accumulates in double and only
+// narrows on the four final stores. It also accumulates strictly left to right:
+//
+//     s = x*x;  s = s + y*y;  s = s + z*z;  s = s + w*w;
+//
+// A pairwise tree gives (xx+zz) + (yy+ww), a different grouping and therefore a
+// different rounding, on top of the different width. Two independent reasons for
+// the ULP, and neither is summation order being "sub-ULP" as the old comment
+// claimed. This is the same mistake the matrix multiply in this project was
+// found in, for the same reason.
+//
+// Packed double keeps the client's width, and doing the three adds in its order
+// keeps its grouping. sqrtsd and divsd are correctly rounded, so they match the
+// x87 fsqrt and fdivr at 53-bit exactly. The result is bit-identical rather than
+// close, which is what lets it be turned on by default.
+static const double kQuatNormEpsD = 2.384185791015625e-07;   // 2^-22, flt_9EA27C
+
 void SSE2_QuatNormalize(float* q) {
-    __m128 v = _mm_loadu_ps(q);
-    __m128 v2 = _mm_mul_ps(v, v);
-    
-    // Horizontal sum of elements [x^2+y^2+z^2+w^2] across all 4 lanes
-    __m128 shuf1 = _mm_shuffle_ps(v2, v2, _MM_SHUFFLE(2, 3, 0, 1));
-    __m128 sum1 = _mm_add_ps(v2, shuf1);
-    __m128 shuf2 = _mm_shuffle_ps(sum1, sum1, _MM_SHUFFLE(1, 0, 3, 2));
-    __m128 sum2 = _mm_add_ps(sum1, shuf2);
-    
-    float mag2;
-    _mm_store_ss(&mag2, sum2);
-    
-    if (mag2 > 0.00000023841858f) {
-        __m128 scale = _mm_div_ps(_mm_set1_ps(1.0f), _mm_sqrt_ps(sum2));
-        __m128 res = _mm_mul_ps(v, scale);
-        _mm_storeu_ps(q, res);
-    }
+    __m128  v    = _mm_loadu_ps(q);
+    __m128d v_lo = _mm_cvtps_pd(v);                        // (x, y)
+    __m128d v_hi = _mm_cvtps_pd(_mm_movehl_ps(v, v));      // (z, w)
+
+    // Four squares in two instructions; the sum still has to be sequential.
+    __m128d sq_lo = _mm_mul_pd(v_lo, v_lo);                // (xx, yy)
+    __m128d sq_hi = _mm_mul_pd(v_hi, v_hi);                // (zz, ww)
+
+    double xx = _mm_cvtsd_f64(sq_lo);
+    double yy = _mm_cvtsd_f64(_mm_unpackhi_pd(sq_lo, sq_lo));
+    double zz = _mm_cvtsd_f64(sq_hi);
+    double ww = _mm_cvtsd_f64(_mm_unpackhi_pd(sq_hi, sq_hi));
+
+    double s = xx + yy;
+    s = s + zz;
+    s = s + ww;
+
+    // The client compares the epsilon against the sum and skips on greater-or-
+    // equal OR unordered, so a NaN component leaves the quaternion untouched.
+    // Written this way round so NaN takes the same branch here.
+    if (!(s > kQuatNormEpsD)) return;
+
+    __m128d root = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(s));
+    __m128d inv  = _mm_div_sd(_mm_set_sd(1.0), root);
+    __m128d invb = _mm_unpacklo_pd(inv, inv);
+
+    __m128 out_lo = _mm_cvtpd_ps(_mm_mul_pd(v_lo, invb));  // (x', y')
+    __m128 out_hi = _mm_cvtpd_ps(_mm_mul_pd(v_hi, invb));  // (z', w')
+    _mm_storeu_ps(q, _mm_movelh_ps(out_lo, out_hi));
 }
 
 // ================================================================
@@ -1116,12 +1150,19 @@ static float* __cdecl Hooked_QuatSlerp(float* result, float t, float* q1, float*
 
 // Self-test against the function being replaced, on the machine it will run on.
 //
-// Both replacements were checked offline against a transcription of the original
-// - 400000 quaternions, 200000 matrices - and matched to within a float ULP. That
-// is a test of my reading of the disassembly, not of the client sitting in memory
-// right now. This calls the real function at the real address and compares, so a
-// wrong address, a differently-patched client or a bad transcription is caught
-// before the hook goes in rather than by a player.
+// It used to accept a tolerance of 1e-5, because the implementation it guarded
+// was packed single and could not do better. That tolerance is gone: the
+// replacement now reproduces the client's width and its summation order, so the
+// only acceptable answer is the same bits. Checked offline against the 36
+// instructions transcribed verbatim as inline asm - 4,000,000 quaternions, zero
+// differing - and the packed-single version it replaces differed on 1,535,779 of
+// the roughly two million that actually normalise. Three quarters of them, under
+// a comment that called it one ULP.
+//
+// That is still a test of my reading of the disassembly rather than of the client
+// sitting in memory right now. This calls the real function at the real address,
+// so a wrong address, a differently-patched client or a bad transcription is
+// caught before the hook goes in rather than by a player.
 //
 // Run before MinHook touches anything, so the call reaches the original.
 static bool SelfTestQuatNormalize() {
@@ -1146,9 +1187,9 @@ static bool SelfTestQuatNormalize() {
     // client that works in x87 at 53-bit, which is the same configuration.
     const int RANDOM_CASES = 4096;
     unsigned seed = 0x9E3779B9u;
-    double worst = 0.0;
-    int worstCase = -1, worstComp = -1;
-    float worstClient = 0.0f, worstOurs = 0.0f;
+    int  differing = 0;
+    int  firstCase = -1, firstComp = -1;
+    float firstClient = 0.0f, firstOurs = 0.0f;
 
     for (int i = 0; i < 5 + RANDOM_CASES; i++) {
         float a[4], b[4];
@@ -1174,28 +1215,30 @@ static bool SelfTestQuatNormalize() {
         }
         SSE2_QuatNormalize(b);
 
+        // Compared as bits, not as a distance. A quaternion that skips the
+        // epsilon test must also come back byte-for-byte untouched, and a
+        // tolerance would not notice if it did not.
         for (int k = 0; k < 4; k++) {
-            float d = a[k] - b[k];
-            if (d < 0.0f) d = -d;
-            // One ULP at unit scale, with room for the x87-versus-SSE difference.
-            float mag = (a[k] < 0.0f ? -a[k] : a[k]);
-            double rel = (mag > 1.0f) ? ((double)d / (double)mag) : (double)d;
-            if (rel > worst) {
-                worst = rel; worstCase = i; worstComp = k;
-                worstClient = a[k]; worstOurs = b[k];
+            if (memcmp(&a[k], &b[k], sizeof(float)) != 0) {
+                if (differing == 0) {
+                    firstCase = i; firstComp = k;
+                    firstClient = a[k]; firstOurs = b[k];
+                }
+                ++differing;
             }
         }
     }
 
-    if (worst > 1e-5) {
-        Log("[SimdHooks] Quaternion self-test FAILED: worst deviation %.3e at case %d "
-            "component %d (client %.9g, ours %.9g) over %d inputs - not hooking",
-            worst, worstCase, worstComp, worstClient, worstOurs, 5 + RANDOM_CASES);
+    if (differing != 0) {
+        Log("[SimdHooks] Quaternion self-test FAILED: %d components differed from "
+            "the client, first at case %d component %d (client %.9g, ours %.9g) "
+            "over %d inputs - not hooking",
+            differing, firstCase, firstComp, firstClient, firstOurs, 5 + RANDOM_CASES);
         return false;
     }
 
     Log("[SimdHooks] Quaternion self-test passed %d inputs against the client's own "
-        "routine, worst deviation %.3e", 5 + RANDOM_CASES, worst);
+        "routine, bit-identical", 5 + RANDOM_CASES);
     return true;
 }
 
