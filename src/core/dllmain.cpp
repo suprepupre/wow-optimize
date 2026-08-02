@@ -4669,6 +4669,7 @@ static void DumpPeriodicStats() {
     ApiCache::LogStats();
     TextureUnloadDelay::LogStats();
     NetDiag::LogStats();
+    RenderNullGuard_LogStats();
     AnimCensus::LogStats();
     HorizonOcclusion::LogStats();
     D3D9StateCache::LogStats();

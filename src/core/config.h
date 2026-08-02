@@ -127,6 +127,12 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // Null guard on sub_873060, the per-draw parameter setter in the M2 path.
+        // On by default - it prevents a real null dereference - but it can only
+        // do that by skipping the call, and a skipped call draws that model with
+        // the previous one's parameters. Exposed so a flicker report can be
+        // tested against it in one session instead of guessed at.
+        bool OptRenderNullGuard = true;
         // Drops a dead _msize from WoW's free wrapper. Measured at 8-10% of
         // main-thread execution in two tester profiles.
         // SSE2 quaternion normalize, 3.13% of execution in a CPU-bound profile.
