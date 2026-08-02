@@ -127,6 +127,11 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // SSE2 strncmp for the CRT copy at 0x004180A6, 1.55% of executing time.
+        // 3.88x on a 63-byte compare and 1.33x on a short one, so it does not
+        // regress the short case the way a naive block version does - though a
+        // very short compare is close to break-even once the detour is counted.
+        bool OptStrncmpSse2 = true;
         // Skips the UI layout dependency walk in sub_489710 for frames nothing
         // anchors to. That walk is the largest single executing entry in a real
         // gameplay profile - 9.06% - and it is redundant with a reverse index the

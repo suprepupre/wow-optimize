@@ -88,6 +88,8 @@ add_library(wow_optimize SHARED
     src/diagnostics/net_diag.h
     src/hooks_subsystems/layout_relink_fast.cpp
     src/hooks_subsystems/layout_relink_fast.h
+    src/hooks_subsystems/strncmp_sse2.cpp
+    src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp
     src/diagnostics/anim_census.h
     src/diagnostics/crash_dumper.cpp

@@ -446,6 +446,7 @@ static void StopFreezeWatchdog() {
 #include "lua_settable_cache.h"
 #include "regex_cache.h"
 #include "layout_relink_fast.h"
+#include "strncmp_sse2.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
@@ -4672,6 +4673,7 @@ static void DumpPeriodicStats() {
     NetDiag::LogStats();
     RenderNullGuard_LogStats();
     LayoutRelinkFast::LogStats();
+    StrncmpSse2::LogStats();
     AnimCensus::LogStats();
     HorizonOcclusion::LogStats();
     D3D9StateCache::LogStats();
@@ -7222,6 +7224,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- UI Layout Relink ---");
     LayoutRelinkFast::Init();
+
+    Log("--- SSE2 strncmp ---");
+    StrncmpSse2::Init();
 
     Log("--- Event Name Hash Cache ---");
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();
