@@ -37,6 +37,32 @@
 // execution; it does not say whether that is forty models at thirty bones or
 // four hundred at three, and those want completely different answers. This
 // counts it.
+//
+// -- Revisiting the "no distance" conclusion -------------------------------
+//
+// That conclusion was drawn from two call sites. There are seven, and the two
+// that were read are not the ones on the render path: sub_821A20 calls this
+// twice while building draw batches, and passes a register rather than a fixed
+// +132, so the claim that every caller shares one matrix was never actually
+// tested against the call that matters most.
+//
+// It is not being re-litigated in a disassembler. Reading call sites is what
+// produced the unverified claim in the first place, and static reasoning about
+// this codebase has been wrong twice before where a log was right. Three
+// measurements settle it, and all three are read-only:
+//
+//   - how many DISTINCT matrices arrive as the second argument in one frame.
+//     One means the original conclusion holds. Anything near the model count
+//     means each model brings its own placement and a distance exists.
+//   - whether the translation of the matrix at this+180 varies between models.
+//     sub_82F0F0 multiplies that by the second argument, which is what a local
+//     transform paired with a shared parent would look like - and if it varies
+//     and reads like world coordinates, the distance is there after all.
+//   - the actual spread of both, printed for the first few calls, so the
+//     numbers can be looked at rather than assumed.
+//
+// Until those come back this module still only counts. Nothing here changes
+// what the client does.
 // ============================================================================
 
 #include <windows.h>
@@ -91,6 +117,81 @@ static double   g_qpcToNs = 0.0;
 //   modelData = *(*(this + 44) + 336);  boneCount = modelData[11];
 // Guarded because this runs on every animated model and a malformed one must
 // cost a skipped count, not a crash.
+// ---- Is there a per-model transform at this call site? ---------------------
+//
+// All of this is read-only and lives behind the diagnostic's own setting, which
+// is off by default.
+
+// Distinct second-argument matrices seen in the current frame. The hook runs on
+// the main thread only - it returns to the original otherwise - so these need no
+// interlocking. The cap is deliberate: the answer worth having is "one" versus
+// "many", and a linear scan of a small table costs less than a hash on a path
+// that runs hundreds of times a frame.
+static constexpr int MAX_DISTINCT = 96;
+static void* g_distinct[MAX_DISTINCT];
+static int   g_distinctCount    = 0;
+static bool  g_distinctOverflow = false;
+
+static int  g_peakDistinct   = 0;
+static bool g_everOverflowed = false;
+
+// Spread of the candidate per-model position across one frame. If every model
+// reports the same point this stays at zero and there is nothing to drive a
+// distance from.
+static float g_locMin[3] = { 0.0f, 0.0f, 0.0f };
+static float g_locMax[3] = { 0.0f, 0.0f, 0.0f };
+static bool  g_locSeen   = false;
+static double g_worstSpread = 0.0;
+
+// A handful of raw samples, so the numbers can be read rather than inferred.
+static int g_samplesLogged = 0;
+static constexpr int MAX_SAMPLES = 16;
+
+static void NoteDistinct(void* m) {
+    for (int i = 0; i < g_distinctCount; ++i) {
+        if (g_distinct[i] == m) return;
+    }
+    if (g_distinctCount < MAX_DISTINCT) {
+        g_distinct[g_distinctCount++] = m;
+    } else {
+        g_distinctOverflow = true;
+    }
+}
+
+// Translation row of the 4x4 at this+180, which sub_82F0F0 multiplies by the
+// second argument. Guarded: a malformed model must cost a skipped sample.
+static bool ReadLocalTranslation(void* This, float out[3]) {
+    __try {
+        const float* m = (const float*)((char*)This + 180);
+        out[0] = m[12];
+        out[1] = m[13];
+        out[2] = m[14];
+        // A world coordinate in this client stays inside a few tens of
+        // thousands; anything else means the guess about the layout is wrong
+        // and the number should not be averaged into anything.
+        for (int i = 0; i < 3; ++i) {
+            if (!(out[i] > -64000.0f && out[i] < 64000.0f)) return false;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool ReadMatrixTranslation(const void* m, float out[3]) {
+    uintptr_t p = (uintptr_t)m;
+    if (p < 0x10000 || p >= 0xFFE00000) return false;
+    __try {
+        const float* f = (const float*)m;
+        out[0] = f[12];
+        out[1] = f[13];
+        out[2] = f[14];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static uint32_t BoneCountOf(void* This) {
     __try {
         uintptr_t base = *(uintptr_t*)((char*)This + 44);
@@ -112,6 +213,36 @@ static int __fastcall Hooked_AnimateModel(void* This, void* edx,
     InterlockedIncrement(&g_callsThisFrame);
     uint32_t bones = BoneCountOf(This);
     if (bones) InterlockedExchangeAdd(&g_bonesThisFrame, (LONG)bones);
+
+    NoteDistinct((void*)(uintptr_t)a2);
+
+    float loc[3];
+    if (ReadLocalTranslation(This, loc)) {
+        if (!g_locSeen) {
+            g_locSeen = true;
+            for (int i = 0; i < 3; ++i) { g_locMin[i] = loc[i]; g_locMax[i] = loc[i]; }
+        } else {
+            for (int i = 0; i < 3; ++i) {
+                if (loc[i] < g_locMin[i]) g_locMin[i] = loc[i];
+                if (loc[i] > g_locMax[i]) g_locMax[i] = loc[i];
+            }
+        }
+
+        if (g_samplesLogged < MAX_SAMPLES) {
+            ++g_samplesLogged;
+            float arg[3];
+            bool haveArg = ReadMatrixTranslation((const void*)(uintptr_t)a2, arg);
+            Log("[AnimCensus] sample %d: model=%p bones=%u  local(this+180) "
+                "= %.1f %.1f %.1f  arg2=%08X%s",
+                g_samplesLogged, This, bones, loc[0], loc[1], loc[2],
+                (unsigned)a2,
+                haveArg ? "" : " (unreadable)");
+            if (haveArg) {
+                Log("[AnimCensus]            arg2 translation = %.1f %.1f %.1f",
+                    arg[0], arg[1], arg[2]);
+            }
+        }
+    }
 
     // Sampled timing. Note this measures the call including everything it
     // recurses into, which is what a level-of-detail decision would actually
@@ -142,6 +273,20 @@ void OnFrame() {
     g_sumBones += (double)bones;
     if (calls > g_peakCalls) g_peakCalls = calls;
     if (bones > g_peakBones) g_peakBones = bones;
+
+    // Both questions are about one frame, so they are settled and reset here.
+    if (g_distinctCount > g_peakDistinct) g_peakDistinct = g_distinctCount;
+    if (g_distinctOverflow) g_everOverflowed = true;
+    g_distinctCount    = 0;
+    g_distinctOverflow = false;
+
+    if (g_locSeen) {
+        for (int i = 0; i < 3; ++i) {
+            double spread = (double)g_locMax[i] - (double)g_locMin[i];
+            if (spread > g_worstSpread) g_worstSpread = spread;
+        }
+        g_locSeen = false;
+    }
 }
 
 bool Init() {
@@ -189,6 +334,20 @@ void LogStats() {
             "about %.2f ms/frame at the average model count",
             avgNs / 1000.0, (unsigned long long)g_sampledCount,
             avgNs * avgCalls / 1e6);
+    }
+
+    // The two numbers that decide whether level of detail is possible here.
+    Log("[AnimCensus] Second argument: up to %d distinct matrices in one frame%s",
+        g_peakDistinct, g_everOverflowed ? " (hit the table cap, so at least that)" : "");
+    Log("[AnimCensus] this+180 translation varied by up to %.1f across one frame",
+        g_worstSpread);
+
+    if (g_peakDistinct <= 1 && g_worstSpread < 1.0) {
+        Log("[AnimCensus] Both are flat - every model gets the same transform at "
+            "this call, so there is still no distance here and no basis for LOD");
+    } else {
+        Log("[AnimCensus] These vary per model, so a per-model position does reach "
+            "this call after all - worth reading the samples above before acting");
     }
 }
 
