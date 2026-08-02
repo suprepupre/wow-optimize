@@ -52,6 +52,19 @@ struct SampleBucket {
     uintptr_t   addr;       // nearest known function (or 0 for unknown)
     const char* name;       // null if unknown
     uint64_t    count;
+
+    // Where inside the 4 KB window after `addr` the samples actually landed,
+    // in 256-byte steps.
+    //
+    // Without this the report is misleading in a way that is easy to act on and
+    // hard to notice. A named symbol claims every sample within 4 KB after it,
+    // and the offset was thrown away - so "tostring 4.73%" could be
+    // luaB_tostring itself or any unnamed function in the four kilobytes
+    // following it, and the line reads identically either way. That is a lot of
+    // Lua library code to attribute to one dispatcher.
+    //
+    // Costs nothing on the sampling path; this is filled in at dump time.
+    uint32_t    offHist[16];
 };
 
 static FuncEntry    g_knownFuncs[MAX_KNOWN_FUNCS];
@@ -799,11 +812,15 @@ static void DumpResults() {
     static SampleBucket buckets[MAX_BUCKETS];
     int bucketCount = 0;
 
-    // Initialize buckets from known funcs
+    // Initialize buckets from known funcs. The array is static and this runs on
+    // every periodic report, so the offset histogram has to be cleared here as
+    // well as the count - otherwise the second report annotates itself with the
+    // first one's offsets.
     for (int i = 0; i < g_knownCount; i++) {
         buckets[bucketCount].addr  = g_knownFuncs[i].addr;
         buckets[bucketCount].name  = g_knownFuncs[i].name;
         buckets[bucketCount].count = 0;
+        memset(buckets[bucketCount].offHist, 0, sizeof(buckets[bucketCount].offHist));
         bucketCount++;
     }
 
@@ -828,6 +845,8 @@ static void DumpResults() {
             for (int b = 0; b < g_knownCount; b++) {
                 if (buckets[b].addr == f->addr) {
                     buckets[b].count++;
+                    uintptr_t off = eip - f->addr;
+                    buckets[b].offHist[(off >> 8) & 15u]++;
                     goto next_sample;
                 }
             }
@@ -964,6 +983,35 @@ static void DumpResults() {
         const char* name;
         if (buckets[i].name) {
             name = buckets[i].name;
+
+            // A named symbol claims every sample within 4 KB after it, and the
+            // offset used to be discarded - so a line reading "tostring 4.73%"
+            // could be luaB_tostring itself or any unnamed function in the four
+            // kilobytes following it, with nothing to tell the two apart. That
+            // is a lot of Lua library code to hang on one dispatcher, and it was
+            // read as exact.
+            //
+            // So when the samples are not concentrated at the start, say where
+            // they actually are. The offset resolves to exactly one function in
+            // a disassembler, which is what makes the number worth acting on.
+            int domIdx = 0;
+            uint32_t domCount = buckets[i].offHist[0];
+            uint32_t histTotal = buckets[i].offHist[0];
+            for (int h = 1; h < 16; h++) {
+                histTotal += buckets[i].offHist[h];
+                if (buckets[i].offHist[h] > domCount) {
+                    domCount = buckets[i].offHist[h];
+                    domIdx = h;
+                }
+            }
+            // Only annotate when the weight really sits past the first 256 bytes;
+            // a symbol whose samples are in its own prologue needs no comment.
+            if (domIdx > 0 && histTotal > 0 &&
+                buckets[i].offHist[0] * 2u < histTotal) {
+                wsprintfA(label, "%.20s+0x%03X", buckets[i].name,
+                          (unsigned)(domIdx << 8));
+                name = label;
+            }
         } else if (g_selfBase && buckets[i].addr >= g_selfBase && buckets[i].addr < g_selfEnd) {
             // A hot page inside our own DLL — label by offset from our base so it
             // maps directly to wow_optimize.map (which of our hooks costs time).
