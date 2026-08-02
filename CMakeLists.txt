@@ -86,6 +86,8 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_internals.h
     src/diagnostics/net_diag.cpp
     src/diagnostics/net_diag.h
+    src/diagnostics/addon_profiler.cpp
+    src/diagnostics/addon_profiler.h
     src/hooks_subsystems/strncmp_sse2.cpp
     src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp

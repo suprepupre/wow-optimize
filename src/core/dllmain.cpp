@@ -446,6 +446,7 @@ static void StopFreezeWatchdog() {
 #include "lua_settable_cache.h"
 #include "regex_cache.h"
 #include "strncmp_sse2.h"
+#include "addon_profiler.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
@@ -1577,6 +1578,11 @@ static double g_lastFrameMs = 0.0;
 // twice.
 static void MainThreadPump() {
     UpdateMainThreadActivity();
+
+    // Runs Lua, so it belongs here and nowhere else, and not while the interface
+    // is between states. It self-throttles to once a minute.
+    AddonProfiler::OnFrame(LuaOpt::IsLoadingMode() || LuaOpt::IsReloading() ||
+                           LuaOpt::IsSwapping());
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -7223,6 +7229,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- SSE2 strncmp ---");
     StrncmpSse2::Init();
+
+    Log("--- Addon CPU Profiler ---");
+    AddonProfiler::Init();
 
     Log("--- Event Name Hash Cache ---");
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();

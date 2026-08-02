@@ -127,6 +127,10 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // Turns on the client's own script profiler and reports per-addon CPU to
+        // the log every minute, ranked. Off by default: the client's profiler is
+        // not free, and only someone chasing a stutter should pay for it.
+        bool OptAddonProfiler = false;
         // SSE2 strncmp for the CRT copy at 0x004180A6, 1.55% of executing time.
         // 3.88x on a 63-byte compare and 1.33x on a short one, so it does not
         // regress the short case the way a naive block version does - though a
