@@ -445,7 +445,6 @@ static void StopFreezeWatchdog() {
 #include "render_state_dedup.h"
 #include "lua_settable_cache.h"
 #include "regex_cache.h"
-#include "layout_relink_fast.h"
 #include "strncmp_sse2.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
@@ -4672,7 +4671,6 @@ static void DumpPeriodicStats() {
     TextureUnloadDelay::LogStats();
     NetDiag::LogStats();
     RenderNullGuard_LogStats();
-    LayoutRelinkFast::LogStats();
     StrncmpSse2::LogStats();
     DbcLookupCache_LogStats();
     AnimCensus::LogStats();
@@ -7222,9 +7220,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Regex Pattern Cache ---");
     bool regexCacheOk = Config::g_settings.OptLuaOpcache && InstallRegexCache();
-
-    Log("--- UI Layout Relink ---");
-    LayoutRelinkFast::Init();
 
     Log("--- SSE2 strncmp ---");
     StrncmpSse2::Init();

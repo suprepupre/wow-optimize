@@ -132,12 +132,6 @@ namespace Config {
         // regress the short case the way a naive block version does - though a
         // very short compare is close to break-even once the detour is counted.
         bool OptStrncmpSse2 = true;
-        // Skips the UI layout dependency walk in sub_489710 for frames nothing
-        // anchors to. That walk is the largest single executing entry in a real
-        // gameplay profile - 9.06% - and it is redundant with a reverse index the
-        // client already maintains. On by default; a self-check against the
-        // client's own scan disables it on the first disagreement.
-        bool OptLayoutRelinkFast = true;
         // Null guard on sub_873060, the per-draw parameter setter in the M2 path.
         // On by default - it prevents a real null dereference - but it can only
         // do that by skipping the call, and a skipped call draws that model with
