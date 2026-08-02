@@ -880,44 +880,111 @@ static float* __cdecl Hooked_PointXformInPlace(float* a1, float* a2, float* a3) 
 // _MM_TRANSPOSE4_PS with a zeroed 4th row yields the transposed rotation rows
 // with lane3 already 0; the same transposed rows are exactly the column vectors
 // needed for the three translation dot products, so trans = r0*(-tx)+r1*(-ty)+
-// r2*(-tz) lands (out12,out13,out14,0). Products and (a+b)+c summation order
-// match the FPU original; only x87 80-bit vs SSE 32-bit intermediates differ
-// (sub-ULP, invisible for a rigid transform). All reads stay inside the 64-byte
-// input matrix; the full 16-float output is written exactly as the original.
+// r2*(-tz) lands (out12,out13,out14,0). All reads stay inside the 64-byte input
+// matrix; the full 16-float output is written exactly as the original.
+//
+// This used to carry the line "only x87 80-bit vs SSE 32-bit intermediates
+// differ (sub-ULP, invisible for a rigid transform)". Both halves of that are
+// wrong. The CRT runs x87 at 53-bit, not 80, so the original accumulates in
+// double; and the gap between a double accumulation and a single one over three
+// products is not sub-ULP - it is the same divergence found in the matrix
+// multiply, the quaternion normalise and both vector normalises in this same
+// tree, each of which had a comment saying much the same thing. This one builds
+// the inverse of a view transform, which is to say it feeds the camera, and a
+// wrong camera matrix is precisely the artifact this project has already shipped
+// once.
+//
+// The three dot products now accumulate in double, which removes the width
+// difference. What is not proven here is the order of the three terms: the
+// original juggles them across an eight-deep x87 stack through two spilled
+// scratch slots, and the tail does not read unambiguously, so the grouping is
+// taken from the existing implementation rather than from the disassembly.
+//
+// That is why this hook now has a shadow check, which it never had at all.
+// Rather than assert the order is right, it runs the client beside itself on the
+// first few thousand real calls and compares all sixteen floats as bits. If the
+// order is wrong the log says so and every call goes back to the original -
+// which is a better outcome than a comment claiming sub-ULP.
 #if !TEST_DISABLE_MATRIX_INVERT_SSE2
 typedef float* (__fastcall* MatInvRigid_t)(float* self, void* edx, float* out);
 static MatInvRigid_t pOrigMatInvRigid = nullptr;
 static volatile long g_matinvrigid_calls = 0;
 
+// The arithmetic alone, so the shadow check exercises the same code the hook
+// runs rather than a second copy of it that could drift.
+static inline void InvertRigid_Build(const float* self, float* out) {
+    __m128 r0 = _mm_loadu_ps(self);        // M0..M3   (row 0)
+    __m128 r1 = _mm_loadu_ps(self + 4);    // M4..M7   (row 1)
+    __m128 r2 = _mm_loadu_ps(self + 8);    // M8..M11  (row 2)
+    __m128 r3 = _mm_setzero_ps();          // forces transposed lane3 -> 0
+    _MM_TRANSPOSE4_PS(r0, r1, r2, r3);     // pure movement, exact either way
+
+    _mm_storeu_ps(out,     r0);
+    _mm_storeu_ps(out + 4, r1);
+    _mm_storeu_ps(out + 8, r2);
+
+    // The rotation is data movement and cannot round; only these three dot
+    // products can, and they accumulate at the client's width.
+    double ntx = -(double)self[12];
+    double nty = -(double)self[13];
+    double ntz = -(double)self[14];
+
+    // Transposed rows are the columns the dot products need. Read back from the
+    // stored output so the operands are the same values the rotation block got.
+    for (int i = 0; i < 3; ++i) {
+        double a = (double)out[i]      * ntx;
+        double b = (double)out[4 + i]  * nty;
+        double c = (double)out[8 + i]  * ntz;
+        out[12 + i] = (float)((a + b) + c);
+    }
+    out[15] = 1.0f;
+}
+
+// Shadow check against the client, bit for bit, for the first few thousand real
+// calls. See the note above: the summation order here is inherited rather than
+// proven, and this is what decides whether that inheritance was correct.
+static volatile long g_invChecked   = 0;
+static bool          g_invTrusted   = false;
+static bool          g_invAbandoned = false;
+
+static constexpr long INV_VERIFY_CALLS = 4096;
+
 static float* __fastcall Hooked_MatInvertRigid(float* self, void* edx, float* out) {
     ++g_matinvrigid_calls;
+    if (g_invAbandoned) return pOrigMatInvRigid(self, nullptr, out);
+
     uintptr_t s = (uintptr_t)self, o = (uintptr_t)out;
     if (s > 0x10000 && s < 0xFFE00000 && o > 0x10000 && o < 0xFFE00000) {
         __try {
-            __m128 orig0 = _mm_loadu_ps(self);       // M0..M3   (row 0)
-            __m128 orig1 = _mm_loadu_ps(self + 4);   // M4..M7   (row 1)
-            __m128 orig2 = _mm_loadu_ps(self + 8);   // M8..M11  (row 2)
-            float tx = self[12], ty = self[13], tz = self[14];   // translation row
+            // Staged, so a fault partway through cannot leave a half-built
+            // matrix in the caller's buffer.
+            float built[16];
+            InvertRigid_Build(self, built);
 
-            // Now transpose rotation matrix first
-            __m128 r0 = orig0;
-            __m128 r1 = orig1;
-            __m128 r2 = orig2;
-            __m128 r3 = _mm_setzero_ps();         // forces transposed lane3 -> 0
-            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+            if (!g_invTrusted) {
+                long n = InterlockedIncrement(&g_invChecked);
+                float theirs[16];
+                bool comparable = true;
+                __try {
+                    pOrigMatInvRigid(self, nullptr, theirs);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    comparable = false;   // never report a false disagreement
+                }
+                if (comparable && memcmp(theirs, built, sizeof(built)) != 0) {
+                    g_invAbandoned = true;
+                    Log("[MatrixSSE2] CMatrix::InvertRigid disagreed with the client on "
+                        "call %ld - handing every call back to the original", n);
+                    return pOrigMatInvRigid(self, nullptr, out);
+                }
+                if (n >= INV_VERIFY_CALLS) {
+                    g_invTrusted = true;
+                    Log("[MatrixSSE2] CMatrix::InvertRigid matched the client exactly on "
+                        "%ld consecutive real calls - running ours alone", n);
+                }
+            }
 
-            // Compute translation vector using transposed rows:
-            // trans = r0*(-tx) + r1*(-ty) + r2*(-tz)
-            __m128 trans = _mm_add_ps(
-                _mm_add_ps(_mm_mul_ps(r0, _mm_set1_ps(-tx)),
-                           _mm_mul_ps(r1, _mm_set1_ps(-ty))),
-                _mm_mul_ps(r2, _mm_set1_ps(-tz)));          // (out12,out13,out14,0)
-            trans = _mm_add_ps(trans, _mm_setr_ps(0.0f, 0.0f, 0.0f, 1.0f)); // out15=1
-
-            _mm_storeu_ps(out,      r0);
-            _mm_storeu_ps(out + 4,  r1);
-            _mm_storeu_ps(out + 8,  r2);
-            _mm_storeu_ps(out + 12, trans);
+            _ReadWriteBarrier();
+            memcpy(out, built, sizeof(built));
             return out;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
