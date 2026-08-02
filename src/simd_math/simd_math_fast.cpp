@@ -105,7 +105,6 @@ bool Init() {
     #endif
 
     void* target_mul = (void*)0x004C21B0;
-    void* target_norm = (void*)0x004C3420;
 
     unsigned char prologue[3];
     __try {
@@ -121,18 +120,40 @@ bool Init() {
         return true;
     }
 
-    if (MH_CreateHook(target_mul, (void*)Hooked_MatVec3Mul, (void**)&orig_MatVec3Mul) == MH_OK &&
-        MH_CreateHook(target_norm, (void*)Hooked_Vec3Normalize, (void**)&orig_Vec3Normalize) == MH_OK) 
-    {
-        if (MH_EnableHook(target_mul) == MH_OK && MH_EnableHook(target_norm) == MH_OK) {
-            Log("[SimdMathFast] Matrix/Vector math detours installed.");
-            return true;
+    // These two used to be installed as one all-or-nothing step:
+    //
+    //   if (CreateHook(mul) == OK && CreateHook(norm) == OK) { enable both }
+    //
+    // 0x004C3420 belongs to matrix_copy_sse2, which installs at line 7111 of
+    // dllmain while this runs at 8015 - so the second create returned
+    // ALREADY_CREATED, the && short-circuited, and neither hook went in. Including
+    // the matrix-vector multiply, which is this module's own address and where
+    // the packed-double rewrite went. It has not been running.
+    //
+    // And the line printed afterwards said "Active - SSE2 Math Fast Paths ready"
+    // regardless, so the log claimed a module was working while it had installed
+    // nothing at all. That is the worst of the three states a feature can be in,
+    // and this is the second time it has been found in this file.
+    //
+    // Installed independently now, and 0x004C3420 is left to the module that owns
+    // it rather than fought over.
+    bool mulOk = false;
+    if (MH_CreateHook(target_mul, (void*)Hooked_MatVec3Mul, (void**)&orig_MatVec3Mul) == MH_OK) {
+        if (MH_EnableHook(target_mul) == MH_OK) {
+            mulOk = true;
+        } else {
+            MH_RemoveHook(target_mul);
         }
-        MH_RemoveHook(target_mul);
-        MH_RemoveHook(target_norm);
     }
 
-    Log("[SimdMathFast] Active - SSE2 Math Fast Paths ready.");
+    if (mulOk) {
+        Log("[SimdMathFast] MatVec3Mul hooked at 0x004C21B0 (SSE2 packed double)");
+    } else {
+        Log("[SimdMathFast] MatVec3Mul at 0x004C21B0 could NOT be hooked - this "
+            "module is doing nothing");
+    }
+    Log("[SimdMathFast] C3Vector::Normalize at 0x004C3420 is owned by MatrixSSE2 "
+        "- not hooked from here");
     // Registered so the feature list still shows it, but nothing counts per
     // call any more - see the note in the hook.
     CrashDumper::FeatureTokenForCounting("MatrixVectorSSE2");
@@ -141,8 +162,9 @@ bool Init() {
 }
 
 void Shutdown() {
+    // Only what this module actually installed. Disabling 0x004C3420 from here
+    // would tear down a hook belonging to matrix_copy_sse2.
     MH_DisableHook((void*)0x004C21B0);
-    MH_DisableHook((void*)0x004C3420);
 }
 
 } // namespace SimdMathFast
