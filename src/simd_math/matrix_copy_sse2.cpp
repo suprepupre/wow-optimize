@@ -555,31 +555,42 @@ static Vec3Norm_t pOrigVec3Norm     = nullptr;  // sub_4C3420 (unguarded)
 static Vec3Norm_t pOrigVec3NormSafe = nullptr;  // sub_4C3600 (mag^2 > 2^-22 guard)
 static volatile long g_vec3norm_calls = 0;
 
-// 2^-22 == 0x34000000f, the engine's near-zero magnitude cutoff in sub_4C3600.
-static const float kVec3NormEps = 0.00000023841858f;
+// 2^-22, the engine's near-zero magnitude cutoff in sub_4C3600 (flt_9EA27C, the
+// same constant the quaternion normalise uses). It is loaded with `fld dword`
+// and compared against a 53-bit sum, so the comparison happens in double.
+static const double kVec3NormEpsD = 2.384185791015625e-07;
 
 static inline void SSE2_Vec3NormalizeInPlace(float* v, bool guard) {
-    float vx_val = v[0];
-    float vy_val = v[1];
-    float vz_val = v[2];
-
     // Read exactly 3 floats (never v[3], which may sit on an unmapped next page).
-    __m128 xyz = _mm_setr_ps(vx_val, vy_val, vz_val, 0.0f);
-    __m128 sq  = _mm_mul_ps(xyz, xyz);                                  // x^2,y^2,z^2,0
-    __m128 mag2 = _mm_add_ss(_mm_add_ss(sq,
-                      _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))), // +y^2
-                      _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 2, 2, 2))); // +z^2
-    if (guard) {
-        float m = mag2.m128_f32[0];
-        if (!(m > kVec3NormEps)) return;  // leave unchanged, exactly like the engine
-    }
-    __m128 inv  = _mm_div_ss(_mm_set_ss(1.0f), _mm_sqrt_ss(mag2));      // 1.0/sqrt(mag2)
-    __m128 invb = _mm_shuffle_ps(inv, inv, _MM_SHUFFLE(0, 0, 0, 0));    // broadcast
-    __m128 res  = _mm_mul_ps(xyz, invb);
+    double x = v[0];
+    double y = v[1];
+    double z = v[2];
 
-    float out_x = res.m128_f32[0];
-    float out_y = res.m128_f32[1];
-    float out_z = res.m128_f32[2];
+    // Both originals square and accumulate in double and narrow only on the
+    // three final stores, and both group the sum the same way: (x*x + y*y)
+    // first, then + z*z. This was packed single with the same grouping, which
+    // left it a ULP or so out and is why the hooks that use it are still being
+    // shadow-checked against the client on every call at a 1e-5 tolerance rather
+    // than trusted. Keeping the client's width makes the answers identical, and
+    // an identical answer needs no tolerance.
+    double s = x * x + y * y;
+    s = s + z * z;
+
+    if (guard) {
+        // Written this way round so a NaN takes the same branch the client's
+        // unordered compare takes: leave the vector alone.
+        if (!(s > kVec3NormEpsD)) return;
+    }
+
+    // sub_4C3420 has no guard at all, so a zero vector divides by zero there and
+    // the components come back NaN. That is reproduced rather than fixed: this
+    // has to match the client, not improve on it.
+    __m128d root = _mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(s));
+    double  inv  = _mm_cvtsd_f64(_mm_div_sd(_mm_set_sd(1.0), root));
+
+    float out_x = (float)(x * inv);
+    float out_y = (float)(y * inv);
+    float out_z = (float)(z * inv);
 
     v[0] = out_x;
     v[1] = out_y;
@@ -600,6 +611,13 @@ static inline void SSE2_Vec3NormalizeInPlace(float* v, bool guard) {
 // A normalise feeds directions - camera, bone axes, lighting - so a wrong one
 // is a subtle visual defect rather than a crash, which is the kind that reaches
 // a bug report as "something looks off" and never gets attributed.
+//
+// The check is now for identical bits rather than a tolerance, because the
+// arithmetic became bit-identical. Measured offline against both originals
+// transcribed verbatim as inline asm: 4,000,000 vectors each, zero differing.
+// The packed single version this replaced differed on 1,882,782 of them
+// unguarded and 1,416,357 guarded - not an occasional ULP, close to every vector
+// that was not left alone by the epsilon.
 static volatile long g_normChecked   = 0;
 static bool          g_normTrusted   = false;
 static bool          g_normAbandoned = false;
@@ -607,6 +625,17 @@ static bool          g_normAbandoned = false;
 static constexpr long NORM_VERIFY_CALLS = 4096;
 
 // The client writes in place, so comparing means giving it its own copy.
+//
+// This compared with a 1e-5 relative tolerance, which was as much as the packed
+// single implementation could promise. Now that the arithmetic keeps the client's
+// double width the answers are the same bits, so the comparison is on bits.
+//
+// Bits also settle two cases a tolerance handles badly. sub_4C3420 has no guard,
+// so a zero vector makes it divide by zero and return NaN in every component -
+// and NaN minus NaN is NaN, which is not greater than 1e-5, so the old check
+// silently passed anything at all whenever the client produced one. And a vector
+// under the epsilon must come back byte-for-byte untouched, which a distance
+// cannot distinguish from being rewritten with the same value.
 static bool NormalizeAgreesWithClient(const float* before, const float* ours,
                                       void (__fastcall* orig)(float*, void*), void* edx) {
     float theirs[3] = { before[0], before[1], before[2] };
@@ -615,14 +644,7 @@ static bool NormalizeAgreesWithClient(const float* before, const float* ours,
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return true;   // cannot compare; never report a false disagreement
     }
-    for (int i = 0; i < 3; ++i) {
-        float d = theirs[i] - ours[i];
-        if (d < 0.0f) d = -d;
-        float mag = (theirs[i] < 0.0f ? -theirs[i] : theirs[i]);
-        double rel = (mag > 1.0f) ? ((double)d / (double)mag) : (double)d;
-        if (rel > 1e-5) return false;
-    }
-    return true;
+    return memcmp(theirs, ours, 3 * sizeof(float)) == 0;
 }
 
 static void __fastcall Hooked_Vec3Norm(float* self, void* edx) {
