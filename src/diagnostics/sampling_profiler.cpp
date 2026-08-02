@@ -173,6 +173,11 @@ static void BuildKnownFuncTable() {
         { 0x00516C60, "Script_GetItemInfo" },
         { 0x00540A30, "Script_GetSpellInfo" },
         { 0x0081AC90, "FrameScript_SignalEvent" },
+        // Linear walk of an intrusive list, nine pointer tests per node, until
+        // the node owning `this` is found - then relinked. 2.44% of main-thread
+        // execution. A candidate for an index rather than a search, but it is
+        // pointer surgery with side effects and wants a careful sitting.
+        { 0x00489710, "Node_FindOwnerAndRelink" },
         { 0x00821A20, "M2_DrawBatchBuilder" },
         { 0x00960D20, "Lua_Model_SetLight" },
         { 0x00979110, "CQuaternion::Normalize" },
