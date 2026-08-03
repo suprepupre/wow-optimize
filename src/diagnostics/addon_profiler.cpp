@@ -73,17 +73,43 @@ static bool  g_active       = false;
 static bool  g_profileOn    = false;
 static DWORD g_lastReport   = 0;
 static int   g_reports      = 0;
+static int   g_enableTries  = 0;
+static int   g_badReports   = 0;
 
 // Long enough that the numbers mean something, short enough to catch a session
 // that only goes bad in a raid.
-static constexpr DWORD REPORT_INTERVAL_MS = 60000;
+//
+// Two minutes rather than one: collecting means UpdateAddOnCPUUsage walking
+// every addon, and in a tester's session fifteen of his slow frames landed
+// within two seconds of one of these. That was fifteen hitches spent on a
+// report that then came back empty because of the bug above, but even a working
+// report should not be bought every sixty seconds.
+static constexpr DWORD REPORT_INTERVAL_MS = 120000;
+
+// Turning the profiler on. Every call the client might not have is inside its
+// own pcall, because a bare SetCVar on a client without scriptProfile raises,
+// and a raise from here reaches the player as an error box at the character
+// screen. It did, at every launch, until this was fixed.
+static const char* kEnableChunk =
+    "WOWOPT_PROF_STATE='missing' "
+    "if pcall(function() SetCVar('scriptProfile','1') end) then "
+    "WOWOPT_PROF_STATE='on' end";
 
 // Builds the whole report inside Lua and leaves it in one global, so the only
 // thing crossing back into C is a single string.
+//
+// Every optional API is called inside its own pcall rather than merely tested
+// for existence. Testing existence is not enough and that is what broke the
+// first version: GetFrameCPUUsage exists, so `GetFrameCPUUsage and
+// GetFrameCPUUsage()` passed the test and then raised, because it takes a frame
+// - "Usage: GetFrameCPUUsage(frame[, includeChildren])". One raise aborted the
+// whole chunk, so twenty-one reports in a row contained nothing but that error
+// and the expensive UpdateAddOnCPUUsage call before it was thrown away each
+// time. It is dropped here; it answers a different question anyway.
 static const char* kGatherChunk =
     "local ok,err=pcall(function() "
-    "if not UpdateAddOnCPUUsage or not GetAddOnCPUUsage then "
-    "WOWOPT_ADDON_CPU='unavailable: this client has no script profiler' return end "
+    "if not UpdateAddOnCPUUsage or not GetAddOnCPUUsage or not GetNumAddOns then "
+    "WOWOPT_ADDON_CPU='unavailable: this client has no addon CPU accounting' return end "
     "UpdateAddOnCPUUsage() "
     "local n=GetNumAddOns() local t={} local tot=0 "
     "for i=1,n do local c=GetAddOnCPUUsage(i) or 0 "
@@ -92,10 +118,12 @@ static const char* kGatherChunk =
     "local p={} "
     "for i=1,math.min(#t,12) do "
     "p[#p+1]=string.format('%s %.0fms %.1f%%',t[i][1],t[i][2],tot>0 and 100*t[i][2]/tot or 0) end "
-    "local ev=GetEventCPUUsage and GetEventCPUUsage() or -1 "
-    "local fr=GetFrameCPUUsage and GetFrameCPUUsage() or -1 "
-    "WOWOPT_ADDON_CPU=string.format('%d addons, %.0f ms total (events %.0f, frames %.0f) | %s',"
-    "#t,tot,ev,fr,table.concat(p,' | ')) "
+    "local ev=-1 pcall(function() ev=GetEventCPUUsage() end) "
+    "if #t==0 then "
+    "WOWOPT_ADDON_CPU='every addon reads zero - script profiling is not running "
+    "(scriptProfile missing, or the UI needs one /reload)' return end "
+    "WOWOPT_ADDON_CPU=string.format('%d addons, %.0f ms total (events %.0f) | %s',"
+    "#t,tot,ev,table.concat(p,' | ')) "
     "end) "
     "if not ok then WOWOPT_ADDON_CPU='error: '..tostring(err) end";
 
@@ -139,14 +167,19 @@ static bool ReadGlobalString(const char* name, char* out, size_t outSize) {
 // Turning the client's profiler on. It has to happen through Lua rather than by
 // poking the CVar, because SetCVar is what tells the script system to start
 // accounting; writing the variable behind its back sets a value nothing reads.
-static void EnableScriptProfile() {
+//
+// Returns false when this client has no scriptProfile CVar, in which case there
+// is nothing to collect and the module stops rather than asking every minute
+// forever. ChromieCraft's client is one of those.
+static bool EnableScriptProfile() {
+    char state[64];
     __try {
-        FrameScript_Execute_(
-            "if SetCVar then SetCVar('scriptProfile','1') end",
-            "wow_optimize:addon_profiler", 0);
-        g_profileOn = true;
+        FrameScript_Execute_(kEnableChunk, "wow_optimize:addon_profiler", 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
+    if (!ReadGlobalString("WOWOPT_PROF_STATE", state, sizeof(state))) return false;
+    return strcmp(state, "on") == 0;
 }
 
 bool Init() {
@@ -173,8 +206,20 @@ void OnFrame(bool luaBusy) {
     if (!g_profileOn) {
         // Give the UI a moment to exist before asking it for anything.
         if (now - g_lastReport < 15000) return;
-        EnableScriptProfile();
         g_lastReport = now;
+        if (++g_enableTries > 3) {
+            Log("[AddonProfiler] This client has no scriptProfile CVar, so there is "
+                "nothing to account for - stopping. Nothing further will be logged "
+                "and no time is spent.");
+            g_active = false;
+            return;
+        }
+        if (EnableScriptProfile()) {
+            g_profileOn = true;
+            Log("[AddonProfiler] Script profiling is on. First report in %lu seconds; "
+                "if every addon reads zero, /reload once.",
+                (unsigned long)(REPORT_INTERVAL_MS / 1000));
+        }
         return;
     }
 
@@ -193,8 +238,22 @@ void OnFrame(bool luaBusy) {
     if (ReadGlobalString("WOWOPT_ADDON_CPU", report, sizeof(report))) {
         ++g_reports;
         Log("[AddonProfiler] #%d  %s", g_reports, report);
+
+        // A report that is only an error is worth saying once, not twenty-one
+        // times - and each attempt costs an UpdateAddOnCPUUsage walk over every
+        // addon, which is a hitch the player feels for nothing.
+        if (strncmp(report, "error:", 6) == 0 || strncmp(report, "unavailable", 11) == 0) {
+            if (++g_badReports >= 2) {
+                Log("[AddonProfiler] Two reports in a row came back with nothing usable "
+                    "- stopping rather than paying for the collection every minute.");
+                g_active = false;
+            }
+        } else {
+            g_badReports = 0;
+        }
     } else {
         Log("[AddonProfiler] Could not read the result back this time");
+        if (++g_badReports >= 2) g_active = false;
     }
 }
 
