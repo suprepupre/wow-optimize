@@ -899,9 +899,27 @@ static bool InstallFieldUpdateHook() {
     Log("Deferred field updates: DISABLED (test toggle)");
     return false;
 #else
+    // Both of these used to return false without a word, so the log showed this
+    // module's section header and then nothing at all. A tester crashed 0x1A0
+    // bytes from this hook's target and the log gave no way to tell whether the
+    // hook was even installed - which is the one thing needed to rule it in or
+    // out. Same shape as the Lua bytecode cache, found the same day.
     void* target = (void*)0x006A3C40;
-    if (WineSafe_CreateHook(target, (void*)Hooked_OnFieldUpdate, (void**)&orig_OnFieldUpdate) != MH_OK) return false;
-    if (WO_EnableHook(target) != MH_OK) return false;
+    MH_STATUS st = WineSafe_CreateHook(target, (void*)Hooked_OnFieldUpdate,
+                                       (void**)&orig_OnFieldUpdate);
+    if (st != MH_OK) {
+        Log("Deferred field updates: NOT active - could not hook 0x006A3C40 "
+            "(status %d%s)", (int)st,
+            st == MH_ERROR_UNSUPPORTED_FUNCTION
+                ? ", something else had already detoured it" : "");
+        return false;
+    }
+    if (WO_EnableHook(target) != MH_OK) {
+        Log("Deferred field updates: NOT active - hook created but could not be "
+            "enabled at 0x006A3C40");
+        MH_RemoveHook(target);
+        return false;
+    }
 
     void* unlink_target = (void*)0x004D4C20;
     if (WineSafe_CreateHook(unlink_target, (void*)Hooked_UnlinkNode, (void**)&orig_UnlinkNode) == MH_OK) {
@@ -9965,9 +9983,29 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 // been partially freed during process teardown.
                 __try {
                     MH_DisableHook(MH_ALL_HOOKS);
-                    MH_Uninitialize();
+                    // Deliberately NOT MH_Uninitialize() here.
+                    //
+                    // DisableHook is the part that matters: it puts the client's
+                    // original bytes back, so nothing runs through our detours
+                    // while WoW tears itself down. Uninitialize only goes on to
+                    // free the trampoline pool - and freeing memory in a process
+                    // that is about to stop existing buys nothing, while every
+                    // pointer still aimed at that pool becomes a dangling one.
+                    //
+                    // A tester crashes at exit with an access violation and no
+                    // trace, and this log now shows why there is no trace: our
+                    // teardown finishes, writes its last line, and the fault
+                    // happens afterwards, in code that runs once we are already
+                    // out of the way. That is the shape of something we freed too
+                    // early rather than something we did wrong while running.
+                    //
+                    // Not claimed as the cause - the crash reports EIP 0 and a
+                    // freed trampoline would more likely report its old address.
+                    // But there is no argument for the call at all on this path,
+                    // and removing it removes a whole class of use-after-free at
+                    // exit for nothing.
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
-                    // Best-effort — if unhooking fails, process is terminating anyway
+                    // Best-effort - if unhooking fails, the process is terminating anyway
                 }
 
                 // MinHook is not the only thing pointing at this module. The D3D9
