@@ -77,8 +77,18 @@ namespace Config {
         bool OptCombatLogParser = false;
         bool OptCombatLogIncremental = false;
         bool OptEventCoalescer = false;
-        // On by default for the same reason as OptNameplateMT.
-        bool OptSavedVarsAsync = true;
+        // Off, and equally inert: InstallSavedVarsAsync is a three-line stub that
+        // logs "Bypassed for stability" and returns true, and its Shutdown is a
+        // no-op. Nothing writes SavedVariables off the main thread here.
+        //
+        // Both of these were turned on in a fix for what looked like the
+        // 3.18.0 -> 3.18.1 regression: 3.18.1 gave real gates to switches that
+        // had gated nothing, and left them defaulting off, which does silently
+        // remove a feature from everyone who never wrote the key. That reasoning
+        // is right and the rule still stands - it just does not apply to these
+        // two, because neither has run in either version. A tester's log said so
+        // plainly and I had not checked.
+        bool OptSavedVarsAsync = false;
         bool OptSavedVarsPretoken = false;
         bool OptUnitAuraFast = false;
         bool OptNetworkGuidSse2 = false;
@@ -95,9 +105,13 @@ namespace Config {
         // this only gives that behaviour a switch.
         bool OptGuidLookupCache = true;
         bool OptPacketOffload = false;
-        // On by default, because it ran on every install before 3.18.1 gave it a
-        // gate. See the note at its install site.
-        bool OptNameplateMT = true;
+        // Off, and it does not matter which way it is set: the module is compiled
+        // out by TEST_DISABLE_NAMEPLATE_MT, in this build and in 3.18.0, and its
+        // Init logs "DISABLED (test toggle)" and returns. I briefly defaulted
+        // this to on believing the gate added in 3.18.1 had taken a working
+        // feature away from everyone. It had not - there was nothing there to
+        // take. See the note on OptSavedVarsAsync.
+        bool OptNameplateMT = false;
 
         // Graphics & Sound
         // Hooks luaS_newlstr, through which every Lua string in the game is

@@ -7818,21 +7818,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // the settings struct and then consulted by nothing at all - so it ran on
     // every install and could not be turned off from the launcher that offered
     // to turn it off.
-    // Default on, because that is what every install was already running. Until
-    // 3.18.1 this switch gated nothing and the feature started its worker
-    // threads regardless; giving it a real gate with an off default silently
-    // took a working optimisation away from everyone who had never touched it,
-    // and a tester reported exactly that as "3.18.1 is worse than 3.18.0" in
-    // raids and in Dalaran - which is where nameplate work is heaviest.
-    //
-    // Not under Wine or Rosetta. Worker features there have already had to be
-    // forced off for blocking the main thread, and restoring a default is not a
-    // reason to walk back into that.
-    bool nameplateMTOk = Config::g_settings.OptNameplateMT && !IsWine() && !IsRosetta()
-                         && NameplateMT::Init();
-    if (Config::g_settings.OptNameplateMT && (IsWine() || IsRosetta())) {
-        Log("[NameplateMT] Skipped: worker threads are forced off under Wine/Rosetta");
-    }
+    // The Wine/Rosetta guard that briefly sat here is gone with the belief that
+    // motivated it: this module is compiled out by TEST_DISABLE_NAMEPLATE_MT and
+    // always has been, so there are no worker threads to guard against.
+    bool nameplateMTOk = Config::g_settings.OptNameplateMT && NameplateMT::Init();
 #endif
 
     Log("");
@@ -7897,14 +7886,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- SavedVariables Async Writer ---");
 #if !TEST_DISABLE_SAVED_VARS_ASYNC
-    // Same story as NameplateMT: no gate before 3.18.1, so this ran everywhere,
-    // and adding the gate with an off default moved SavedVariables writing back
-    // onto the main thread for every install that had never set the key.
-    bool savedVarsAsyncOk = Config::g_settings.OptSavedVarsAsync && !IsWine() && !IsRosetta()
-                            && InstallSavedVarsAsync();
-    if (Config::g_settings.OptSavedVarsAsync && (IsWine() || IsRosetta())) {
-        Log("[SavedVarsAsync] Skipped: background writes are forced off under Wine/Rosetta");
-    }
+    // Same correction as NameplateMT: InstallSavedVarsAsync is a stub that logs
+    // "Bypassed for stability" and returns true, so there is nothing on a
+    // background thread to keep off Wine either.
+    bool savedVarsAsyncOk = Config::g_settings.OptSavedVarsAsync && InstallSavedVarsAsync();
 #else
     bool savedVarsAsyncOk = false;
     Log("[SavedVarsAsync] DISABLED via feature flag");

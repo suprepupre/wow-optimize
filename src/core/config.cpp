@@ -381,18 +381,16 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptCombatLogParser     = GetPrivateProfileIntA("Combat_Net", "CombatLogParser", 0, iniPath.c_str()) != 0;
         g_settings.OptCombatLogIncremental = GetPrivateProfileIntA("Combat_Net", "CombatLogIncremental", 0, iniPath.c_str()) != 0;
         g_settings.OptEventCoalescer      = GetPrivateProfileIntA("Combat_Net", "EventCoalescer", 0, iniPath.c_str()) != 0;
-        // Default 1: both of these ran on every install until 3.18.1 gave them a
-        // gate, and defaulting the gate to off silently removed them from
-        // everyone who had never written the key. This is the value that
-        // actually applies - the struct initialiser above never survives Load().
-        g_settings.OptSavedVarsAsync      = GetPrivateProfileIntA("Combat_Net", "SavedVarsAsync", 1, iniPath.c_str()) != 0;
+        // Back to 0. Both modules are inert - see the notes in config.h - so a 1
+        // here only makes the config dump read as though something is running.
+        g_settings.OptSavedVarsAsync      = GetPrivateProfileIntA("Combat_Net", "SavedVarsAsync", 0, iniPath.c_str()) != 0;
         g_settings.OptSavedVarsPretoken   = GetPrivateProfileIntA("Combat_Net", "SavedVarsPretoken", 0, iniPath.c_str()) != 0;
         g_settings.OptUnitAuraFast        = GetPrivateProfileIntA("Combat_Net", "UnitAuraFast", 0, iniPath.c_str()) != 0;
         g_settings.OptNetworkGuidSse2     = GetPrivateProfileIntA("Combat_Net", "NetworkGuidSse2", 0, iniPath.c_str()) != 0;
         g_settings.OptApiCache   = GetPrivateProfileIntA("Combat_Net", "ApiCache", 1, iniPath.c_str()) != 0;
         g_settings.OptGuidLookupCache   = GetPrivateProfileIntA("Combat_Net", "GuidLookupCache", 1, iniPath.c_str()) != 0;
         g_settings.OptPacketOffload       = GetPrivateProfileIntA("Combat_Net", "PacketOffload", 0, iniPath.c_str()) != 0;
-        g_settings.OptNameplateMT         = GetPrivateProfileIntA("Combat_Net", "NameplateMT", 1, iniPath.c_str()) != 0;
+        g_settings.OptNameplateMT         = GetPrivateProfileIntA("Combat_Net", "NameplateMT", 0, iniPath.c_str()) != 0;
 
         // Graphics & Sound
         g_settings.OptFastMemsetOpt       = GetPrivateProfileIntA("Graphics_Sound", "FastMemsetOpt", 1, iniPath.c_str()) != 0;
