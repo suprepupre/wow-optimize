@@ -189,9 +189,14 @@ bool Init() {
     g_lastReport = GetTickCount();
     Log("[AddonProfiler] ACTIVE - turning on the client's own script profiler; "
         "per-addon CPU every %lu seconds", (unsigned long)(REPORT_INTERVAL_MS / 1000));
-    Log("[AddonProfiler] If the first report says every addon is at zero, reload "
-        "the interface once (/reload) - the client only accounts for scripts it "
-        "compiled after profiling was switched on");
+    // Worth saying up front rather than after two empty reports. The CVar has to
+    // be set before the interface compiles its scripts, and it cannot be set
+    // before the interface exists - so the first session with this on only
+    // arms it. SetCVar persists to Config.wtf, so the session after that
+    // profiles from the start. A /reload does the same thing sooner.
+    Log("[AddonProfiler] Numbers will read zero until the interface is loaded with "
+        "profiling already on. Either type /reload once now, or just play this "
+        "session and the next one will have real numbers - the setting persists.");
     return true;
 }
 
@@ -242,7 +247,13 @@ void OnFrame(bool luaBusy) {
         // A report that is only an error is worth saying once, not twenty-one
         // times - and each attempt costs an UpdateAddOnCPUUsage walk over every
         // addon, which is a hitch the player feels for nothing.
-        if (strncmp(report, "error:", 6) == 0 || strncmp(report, "unavailable", 11) == 0) {
+        // "every addon reads zero" is not a failure worth giving up on - it is
+        // the expected first-session state, and it resolves itself on the next
+        // launch because SetCVar persists. Only real errors stop the module.
+        if (strncmp(report, "every addon reads zero", 21) == 0) {
+            g_badReports = 0;
+        } else if (strncmp(report, "error:", 6) == 0 ||
+                   strncmp(report, "unavailable", 11) == 0) {
             if (++g_badReports >= 2) {
                 Log("[AddonProfiler] Two reports in a row came back with nothing usable "
                     "- stopping rather than paying for the collection every minute.");

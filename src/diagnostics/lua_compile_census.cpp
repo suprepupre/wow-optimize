@@ -85,6 +85,44 @@ static uint64_t g_totalBytes = 0;
 static uint32_t g_overflow = 0;
 static int      g_reports  = 0;
 
+// Whether the same *source* keeps being compiled, which is the question a cache
+// turns on and which counting by name cannot answer.
+//
+// The first session this ran on made that obvious: the top names were
+// "*:OnLoad", "*:OnClick", "*:OnEnter" - the chunk names WoW gives to script
+// handlers written inline in XML templates, recompiled once per frame built from
+// the template. 10,388 chunks and 218 MB of source in one dungeon run. But a
+// name like "*:OnLoad" is shared by every template in the game, so a count
+// against it says nothing about whether the text was the same.
+//
+// So the content is hashed too. If most compiles are of text already compiled,
+// they are removable and it is worth building something to remove them; if they
+// are all distinct, no cache would have helped and the cost is real work.
+static constexpr int SEEN_SLOTS = 8192;
+static uint64_t g_seen[SEEN_SLOTS];
+static int      g_seenUsed  = 0;
+static uint64_t g_dupCount  = 0;
+static uint64_t g_dupBytes  = 0;
+static bool     g_seenFull  = false;
+
+// Returns true when this exact source has been compiled before.
+static bool SeenBefore(uint64_t h) {
+    if (!h) h = 1;
+    int idx = (int)(h % SEEN_SLOTS);
+    for (int probe = 0; probe < SEEN_SLOTS; ++probe) {
+        uint64_t v = g_seen[idx];
+        if (v == h) return true;
+        if (v == 0) {
+            if (g_seenUsed < SEEN_SLOTS - 64) { g_seen[idx] = h; ++g_seenUsed; }
+            else g_seenFull = true;
+            return false;
+        }
+        idx = (idx + 1) % SEEN_SLOTS;
+    }
+    g_seenFull = true;
+    return false;
+}
+
 // Only the main thread compiles Lua, so no locking. The counters are read from
 // the periodic report on that same thread.
 static uint64_t Fnv1a(const void* d, size_t n) {
@@ -135,6 +173,17 @@ static void Record(const char* name, const char* buf, size_t sz) {
 
     ++g_total;
     g_totalBytes += (uint64_t)sz;
+
+    // Hash the source itself, capped so a pathologically large chunk cannot make
+    // this the expensive part of a compile.
+    if (buf && sz) {
+        __try {
+            size_t hn = sz < 4096 ? sz : 4096;
+            uint64_t ch = Fnv1a(buf, hn) ^ ((uint64_t)sz * 0x9E3779B97F4A7C15ULL);
+            if (SeenBefore(ch)) { ++g_dupCount; g_dupBytes += (uint64_t)sz; }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
 
     uint64_t k = Fnv1a(label, strlen(label));
     if (!k) k = 1;
@@ -254,9 +303,46 @@ void LogStats() {
         Log("[LuaCompile]   %6u x  %5llu KB  %s",
             e.count, (unsigned long long)(e.bytes / 1024), e.name);
     }
-    Log("[LuaCompile] Anything here with a five-figure count is being compiled "
-        "over and over - that addon is calling loadstring in a hot path, and "
-        "fixing or removing it is worth several percent of your CPU.");
+
+    // By bytes as well, because the two lists do not agree and the bytes are
+    // where the compiler's time actually goes. The first session this ran on
+    // showed a top-by-count list whose twelve entries account for well under a
+    // megabyte of the two hundred megabytes compiled - so the thing costing the
+    // time was not on the list at all.
+    int border[6];
+    int bn = 0;
+    for (int i = 0; i < SLOTS; ++i) {
+        if (!g_tab[i].key) continue;
+        if (bn < 6) { border[bn++] = i; }
+        else if (g_tab[i].bytes > g_tab[border[5]].bytes) { border[5] = i; }
+        else continue;
+        for (int pos = (bn < 6 ? bn - 1 : 5); pos > 0; --pos) {
+            if (g_tab[border[pos]].bytes > g_tab[border[pos - 1]].bytes) {
+                int t = border[pos]; border[pos] = border[pos - 1]; border[pos - 1] = t;
+            } else break;
+        }
+    }
+    Log("[LuaCompile] Top by source size:");
+    for (int i = 0; i < bn; ++i) {
+        const Entry& e = g_tab[border[i]];
+        Log("[LuaCompile]   %5llu KB  over %6u compile(s)  %s",
+            (unsigned long long)(e.bytes / 1024), e.count, e.name);
+    }
+
+    // The line that decides whether any of this is removable.
+    if (g_total > 0) {
+        Log("[LuaCompile] %llu of %llu compiles (%.0f%%) were of source already "
+            "compiled earlier in this session - %llu KB of repeated work%s",
+            (unsigned long long)g_dupCount, (unsigned long long)g_total,
+            100.0 * (double)g_dupCount / (double)g_total,
+            (unsigned long long)(g_dupBytes / 1024),
+            g_seenFull ? " (and the seen-set filled, so the real figure is higher)"
+                       : "");
+    }
+    Log("[LuaCompile] A high repeat share means this is removable and worth "
+        "caching; a low one means the client really is compiling that much new "
+        "source, and a five-figure count on one name is an addon calling "
+        "loadstring in a hot path.");
 }
 
 void Shutdown() {
