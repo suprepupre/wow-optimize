@@ -144,6 +144,13 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // EXPERIMENT. Patches two bytes in the client's shadow pass so it
+        // alternates its render buffer at every quality instead of only at 5,
+        // which is the one difference the shadow probe could not rule out. Off,
+        // and it must stay off unless someone is deliberately testing it - see
+        // the note in shadow_buffer_alternate.cpp for what is proven and what
+        // is not.
+        bool OptShadowBufferAlternate = false;
         // Read-only watch on the client's own shadow state, for the flicker seen
         // below extShadowQuality 5. Not our bug - a tester reproduced it with
         // every feature off and no DXVK - but nothing has ever looked at what the
