@@ -95,6 +95,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "RenderNullGuard", &Settings::OptRenderNullGuard },
     { "Graphics_Sound", "StrncmpSse2", &Settings::OptStrncmpSse2 },
     { "UI_Lua", "AddonProfiler", &Settings::OptAddonProfiler },
+    { "UI_Lua", "LuaCompileCensus", &Settings::OptLuaCompileCensus },
     { "Graphics_Sound", "QuatNormalizeSse2", &Settings::OptQuatNormalizeSse2 },
     { "Graphics_Sound", "MatrixMultiplySse2", &Settings::OptMatrixMultiplySse2 },
     { "Graphics_Sound", "DrawCensus", &Settings::OptDrawCensus },
@@ -427,6 +428,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptRenderNullGuard = GetPrivateProfileIntA("Graphics_Sound", "RenderNullGuard", 1, iniPath.c_str()) != 0;
         g_settings.OptStrncmpSse2 = GetPrivateProfileIntA("Graphics_Sound", "StrncmpSse2", 1, iniPath.c_str()) != 0;
         g_settings.OptAddonProfiler = GetPrivateProfileIntA("UI_Lua", "AddonProfiler", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaCompileCensus = GetPrivateProfileIntA("UI_Lua", "LuaCompileCensus", 1, iniPath.c_str()) != 0;
         g_settings.OptQuatNormalizeSse2 = GetPrivateProfileIntA("Graphics_Sound", "QuatNormalizeSse2", 1, iniPath.c_str()) != 0;
         g_settings.OptMatrixMultiplySse2 = GetPrivateProfileIntA("Graphics_Sound", "MatrixMultiplySse2", 1, iniPath.c_str()) != 0;
         g_settings.OptDrawCensus = GetPrivateProfileIntA("Graphics_Sound", "DrawCensus", 0, iniPath.c_str()) != 0;

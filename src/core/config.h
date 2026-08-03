@@ -130,6 +130,11 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // Counts what the client compiles at runtime, by chunk name. On by
+        // default and silent unless the totals say something is recompiling in a
+        // loop - the case that costs about 5% of a real session's CPU and that
+        // nothing has ever been able to name.
+        bool OptLuaCompileCensus = true;
         // Turns on the client's own script profiler and reports per-addon CPU to
         // the log every minute, ranked. Off by default: the client's profiler is
         // not free, and only someone chasing a stutter should pay for it.
