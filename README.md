@@ -37,7 +37,7 @@ The current public build is focused on real frametime stability, long-session sm
 ## What's New in v3.18.1
 
 A fix release. Thanks to **prince**, [txtsd](https://github.com/txtsd),
-**Signalborn Soulweaver** and **Morbent** for the logs.
+**Signalborn Soulweaver**, **Morbent** and **Doc.James** for the logs.
 
 **Fixed**
 
@@ -291,6 +291,20 @@ Morbent, Darkmoore, Ethodeus, Billy Hoyle, tuan, NoGoodLife, feh_dois, David (`_
   handles ([#7](https://github.com/suprepupre/wow-optimize/pull/7)).
 - **[POKOch](https://github.com/POKOch)** — selective rendering, spell visual blocking
   and API caching ([#12](https://github.com/suprepupre/wow-optimize/pull/12)).
+
+### Testing
+
+Every measured item in these notes came out of a log somebody sent in.
+
+- **prince** — Chinese client under DXVK; the WeakAuras talent-switch bug, the
+  loading-screen stall, and the crash report that finally pinned an access
+  violation to one instruction.
+- **[txtsd](https://github.com/txtsd)** — raids on ChromieCraft; the memory growth
+  and freeze reports, and the request for per-addon profiling that turned into the
+  addon CPU profiler and the Lua compile census.
+- **Signalborn Soulweaver**, **Morbent** — early 3.18 logs.
+- **Doc.James** — the zone-change stall, with three sessions that made it
+  reproducible.
 
 </details>
 
