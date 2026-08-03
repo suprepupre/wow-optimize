@@ -77,7 +77,8 @@ namespace Config {
         bool OptCombatLogParser = false;
         bool OptCombatLogIncremental = false;
         bool OptEventCoalescer = false;
-        bool OptSavedVarsAsync = false;
+        // On by default for the same reason as OptNameplateMT.
+        bool OptSavedVarsAsync = true;
         bool OptSavedVarsPretoken = false;
         bool OptUnitAuraFast = false;
         bool OptNetworkGuidSse2 = false;
@@ -94,7 +95,9 @@ namespace Config {
         // this only gives that behaviour a switch.
         bool OptGuidLookupCache = true;
         bool OptPacketOffload = false;
-        bool OptNameplateMT = false;
+        // On by default, because it ran on every install before 3.18.1 gave it a
+        // gate. See the note at its install site.
+        bool OptNameplateMT = true;
 
         // Graphics & Sound
         // Hooks luaS_newlstr, through which every Lua string in the game is
