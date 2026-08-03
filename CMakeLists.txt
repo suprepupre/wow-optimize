@@ -90,6 +90,8 @@ add_library(wow_optimize SHARED
     src/diagnostics/addon_profiler.h
     src/diagnostics/lua_compile_census.cpp
     src/diagnostics/lua_compile_census.h
+    src/diagnostics/shadow_state_probe.cpp
+    src/diagnostics/shadow_state_probe.h
     src/hooks_subsystems/strncmp_sse2.cpp
     src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp

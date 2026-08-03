@@ -130,6 +130,11 @@ namespace Config {
         bool OptM2MatrixSimd = false;
         bool OptMpqAsyncDecompress = false;
         bool OptSpellEffectCulling = false;
+        // Read-only watch on the client's own shadow state, for the flicker seen
+        // below extShadowQuality 5. Not our bug - a tester reproduced it with
+        // every feature off and no DXVK - but nothing has ever looked at what the
+        // engine does when it happens. Off by default.
+        bool OptShadowStateProbe = false;
         // Counts what the client compiles at runtime, by chunk name. On by
         // default and silent unless the totals say something is recompiling in a
         // loop - the case that costs about 5% of a real session's CPU and that

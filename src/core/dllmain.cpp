@@ -448,6 +448,7 @@ static void StopFreezeWatchdog() {
 #include "strncmp_sse2.h"
 #include "addon_profiler.h"
 #include "lua_compile_census.h"
+#include "shadow_state_probe.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
@@ -1602,6 +1603,9 @@ static void MainThreadPump() {
     // is between states. It self-throttles to once a minute.
     AddonProfiler::OnFrame(LuaOpt::IsLoadingMode() || LuaOpt::IsReloading() ||
                            LuaOpt::IsSwapping());
+
+    // Six reads, and only when the probe is switched on.
+    ShadowStateProbe::OnFrame();
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -7255,6 +7259,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Lua Compile Census ---");
     LuaCompileCensus::Init();
+
+    Log("--- Shadow State Probe ---");
+    ShadowStateProbe::Init();
 
     Log("--- Event Name Hash Cache ---");
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();
