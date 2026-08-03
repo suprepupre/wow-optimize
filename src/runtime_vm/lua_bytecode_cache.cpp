@@ -229,7 +229,31 @@ bool Init() {
 // Printed from the periodic report. Shutdown does not run - the DLL exits via
 // TerminateProcess - so anything reported only from there is never seen.
 void LogStats() {
-    Log("[LuaBytecode] Shutdown: hits=%lld misses=%lld", g_hits, g_misses);
+#if TEST_DISABLE_LUA_BYTECODE_CACHE
+    // This module is compiled out at its call site: dllmain never calls Init,
+    // because WoW's Lua bytecode is modified and does not survive the
+    // lua_dump/lua_load round trip this cache depends on.
+    //
+    // LogStats is not compiled out, though, so for every session it printed
+    //
+    //     [LuaBytecode] Shutdown: hits=0 misses=0
+    //
+    // which reads as a cache that ran and found no work. It cost me a wrong
+    // conclusion: a tester's log showed that line beside 5% of executing time
+    // inside the Lua code generator, and I wrote a commit blaming a third-party
+    // detour on luaL_loadbuffer. There was no detour. The feature was never
+    // built in. Say that instead.
+    static bool said = false;
+    if (!said) {
+        said = true;
+        Log("[LuaBytecode] Compiled out (TEST_DISABLE_LUA_BYTECODE_CACHE): WoW's Lua "
+            "bytecode does not survive a dump and reload, so this cache cannot work "
+            "on this client. Runtime Lua compilation is not being cached by anything.");
+    }
+    return;
+#else
+    Log("[LuaBytecode] hits=%lld misses=%lld", g_hits, g_misses);
+#endif
 }
 
 void Shutdown() {
