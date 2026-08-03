@@ -8305,6 +8305,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
     Log("  [%s] SetFilePointer (64-bit)",      sfpOk       ? " OK " : "FAIL");
     Log("  [%s] GlobalAlloc (mimalloc GMEM_FIXED)", gaOk      ? " OK " : "FAIL");
+    // Reported here because it was reported nowhere. This module's install could
+    // fail and the log carried no trace of it at either level: its own Init
+    // returned silently, and it was absent from this summary. A tester's session
+    // showed its header, a blank line, and "hits=0 misses=0" four hours later -
+    // which reads as "nothing compiled Lua", while about 5% of his executing
+    // time was inside the Lua code generator.
+    Log("  [%s] Lua bytecode cache (luaL_loadbuffer)", bytecodeOk ? " OK " : " -- ");
     Log("  [ OK ] Timer resolution (0.5ms)");
     Log("  [ OK ] Thread affinity + priority");
     if (g_isMultiClient)

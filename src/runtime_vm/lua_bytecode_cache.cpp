@@ -189,11 +189,37 @@ bool Init() {
     p_lua_settop = (lua_settop_fn)ADDR_lua_settop;
     p_lua_gettop = (lua_gettop_fn)ADDR_lua_gettop;
 
+    // Both failures used to return silently. A tester's log showed this module's
+    // section header followed by a blank line, then "hits=0 misses=0" at the end
+    // of a four-hour session - and reading that, the obvious conclusion is that
+    // nothing ever compiled Lua, which is wrong: about 5% of his executing time
+    // was inside the Lua code generator. The hook simply never installed, and
+    // nothing said so.
+    //
+    // On his client something else had already detoured this address - a client
+    // extension library that adds Lua APIs would - and the guard correctly
+    // refuses to install on top of it. That is the right behaviour and a
+    // perfectly good reason to be off. It is not a good reason to be silent.
     void* target = (void*)ADDR_luaL_loadbuffer;
-    if (MH_CreateHook(target, (void*)Hook_luaL_loadbuffer, (void**)&orig_luaL_loadbuffer) != MH_OK)
+    MH_STATUS st = MH_CreateHook(target, (void*)Hook_luaL_loadbuffer,
+                                 (void**)&orig_luaL_loadbuffer);
+    if (st != MH_OK) {
+        if (st == MH_ERROR_UNSUPPORTED_FUNCTION) {
+            Log("[LuaBytecode] NOT active: something else has already detoured "
+                "luaL_loadbuffer (0x%X). Lua compiled at runtime will not be cached "
+                "on this client.", ADDR_luaL_loadbuffer);
+        } else {
+            Log("[LuaBytecode] NOT active: could not hook luaL_loadbuffer (0x%X), "
+                "MinHook status %d", ADDR_luaL_loadbuffer, (int)st);
+        }
         return false;
-    if (MH_EnableHook(target) != MH_OK)
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("[LuaBytecode] NOT active: hook created but could not be enabled at 0x%X",
+            ADDR_luaL_loadbuffer);
+        MH_RemoveHook(target);
         return false;
+    }
 
     InterlockedExchange(&g_active, 1);
     Log("[LuaBytecode] Active: %d-slot cache on luaL_loadbuffer (0x%X)", MAX_ENTRIES, ADDR_luaL_loadbuffer);
