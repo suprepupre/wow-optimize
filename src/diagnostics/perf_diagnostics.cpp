@@ -235,9 +235,30 @@ static constexpr LONG  STUTTER_MAX_REPORTS = 12;
 static DWORD s_lastStutterReport = 0;
 static LONG  s_stutterReports    = 0;
 static LONG  s_stuttersSeen      = 0;
+static LONG  s_gapsIgnored       = 0;
+
+// Above this, the number stops describing a frame.
+//
+// One log reported "STUTTER DETECTED (Frame duration: 179395.5 ms)" - three
+// minutes. Nothing stalled for three minutes; the window was not on screen, so
+// Present was not called, and the gap between two Presents was measured as
+// though it were one frame. Alt-tabbing, minimising and sitting on a loading
+// screen all produce it, and each one burned a snapshot out of the twelve this
+// module is allowed to write - snapshots that describe an idle process.
+//
+// FrameBench already draws this line at two seconds for its percentiles. Here
+// the line is higher, because a genuine multi-second freeze is exactly what this
+// module exists to catch and must still be described. Thirty seconds is past
+// anything a player sits through and calls a stutter.
+static constexpr double STUTTER_CEILING_MS = 30000.0;
 
 void OnFrame(double elapsedMs) {
     #if !TEST_DISABLE_SAMPLING_PROFILER
+    if (elapsedMs > STUTTER_CEILING_MS) {
+        ++s_gapsIgnored;
+        return;
+    }
+
     // If a frame takes longer than 100ms (10 FPS or below), it's a severe stutter
     if (elapsedMs > 100.0) {
         ++s_stuttersSeen;
@@ -264,6 +285,11 @@ void LogStats() {
     if (s_stuttersSeen > 0) {
         Log("[PerfDiag] %ld frames over 100ms this session, %ld described in full",
             (long)s_stuttersSeen, (long)s_stutterReports);
+    }
+    if (s_gapsIgnored > 0) {
+        Log("[PerfDiag] %ld gaps over %.0f s ignored - the window was not being "
+            "drawn (alt-tab, minimise, loading), so they are not frames",
+            (long)s_gapsIgnored, STUTTER_CEILING_MS / 1000.0);
     }
 }
 

@@ -26,7 +26,6 @@ static volatile LONG g_w3Skipped = 0, g_w3Calls = 0;
 static volatile LONG g_w4Fast = 0, g_w4Calls = 0;
 static volatile LONG g_w5Cached = 0, g_w5Calls = 0;
 static volatile LONG g_w6Prefetched = 0;
-static volatile LONG g_w7Coalesced = 0, g_w7Calls = 0;
 static volatile LONG g_w8Fast = 0, g_w8Calls = 0;
 static volatile LONG g_w9Skipped = 0, g_w9Calls = 0;
 static volatile LONG g_w10Cached = 0, g_w10Calls = 0;
@@ -160,25 +159,37 @@ static void __cdecl Hooked_BlockCopy(void* src, void* dst, int srcLen, void* a4,
 }
 
 // ================================================================
-// W7: sub_4C6A40 - Sound play dispatcher (98 xrefs, 55 callers)
-// Coalesce rapid identical sound plays within same frame tick.
+// W7 (REMOVED): sub_4C6A40, the sound play dispatcher.
+//
+// It used to drop a play whose sound id matched the previous one inside a 16 ms
+// window, keeping a single global "last id" slot. A tester lost every boss voice
+// line in raids and dungeons while every other sound kept working, and this is
+// why.
+//
+// Three things were wrong with it, all visible in the target's own disassembly.
+//
+// sub_4C6A40 is PlaySoundKit out of SoundInterface2.cpp: a1 is a SoundEntries
+// row id and the return value is an error code, where 0 means the sound started
+// and 5, 6, 8..11, 14..17 and 20 each name a reason it did not. Coalescing
+// returned 0 - success - for a sound that was never handed to the mixer, so
+// nothing upstream could notice, retry or report it.
+//
+// The engine already suppresses duplicates, and it does so with information we
+// do not have: sounds whose flags carry 0x20 get registered in the list at
+// dword_B4A398 when they start, and a second play of one that is still in that
+// list returns 15 near the top of the function. Sounds without that flag are
+// meant to overlap. Our version applied one blanket rule to all of them.
+//
+// The window could not have worked either. GetTickCount advances in ~15.6 ms
+// steps, so "less than 16 ms apart" was really "zero or one ticks apart" -
+// somewhere between an instant and a frame, depending on where the plays landed
+// against a timer we do not control. With the TimingFix switch on, GetTickCount
+// was itself redirected to QPC, and the same code silently used a different
+// window.
+//
+// Deleted rather than fixed. The engine's own rule is better than any rule we
+// can reconstruct from outside it, and it is already running.
 // ================================================================
-typedef int (__cdecl *SoundPlay_fn)(int, int, int, void*, int, void*, int, int);
-static SoundPlay_fn orig_SoundPlay = nullptr;
-static volatile DWORD g_w7LastTick = 0;
-static volatile int g_w7LastSoundId = 0;
-
-static int __cdecl Hooked_SoundPlay(int soundId, int a2, int a3, void* a4, int a5, void* a6, int a7, int a8) {
-    _InterlockedIncrement(&g_w7Calls);
-    DWORD now = GetTickCount();
-    if (soundId == g_w7LastSoundId && (now - g_w7LastTick) < 16) {
-        _InterlockedIncrement(&g_w7Coalesced);
-        return 0; // Skip duplicate sound within same frame
-    }
-    g_w7LastSoundId = soundId;
-    g_w7LastTick = now;
-    return orig_SoundPlay(soundId, a2, a3, a4, a5, a6, a7, a8);
-}
 
 // ================================================================
 // W8: sub_4B9DE0 - Async file read destroy (17 xrefs, 16 callers)
@@ -413,7 +424,6 @@ namespace WowOptHooks {
             {(void*)0x00771870, (void*)Hooked_ErrorHandler,    (void**)&orig_ErrorHandler,    "W3 error handler skip"},
             {(void*)0x00424B50, (void*)Hooked_FileReadDispatch,(void**)&orig_FileReadDispatch,"W4 file read passthrough"},
             {(void*)0x004218C0, (void*)Hooked_DataSizeCalc,    (void**)&orig_DataSizeCalc,    "W5 data size cache"},
-            {(void*)0x004C6A40, (void*)Hooked_SoundPlay,       (void**)&orig_SoundPlay,       "W7 sound play coalesce"},
             {(void*)0x004B9DE0, (void*)Hooked_AsyncReadDestroy,(void**)&orig_AsyncReadDestroy,"W8 async destroy fast"},
             {(void*)0x004B4F90, (void*)Hooked_SysMsgHandler,   (void**)&orig_SysMsgHandler,   "W9 sysmsg dedup"},
             {(void*)0x00513660, (void*)Hooked_ContextGetter,   (void**)&orig_ContextGetter,   "W10 context cache"},
@@ -449,8 +459,8 @@ namespace WowOptHooks {
     void DumpStats() {
         Log("[WowOpt] Memcpy680: %d/%d | ObjDestroy: %d/%d | ErrSkip: %d/%d | FileRead: %d/%d",
             g_w1Hits, g_w1Calls, g_w2Hits, g_w2Calls, g_w3Skipped, g_w3Calls, g_w4Fast, g_w4Calls);
-        Log("[WowOpt] DataSize: %d/%d | BlkCopyPf: %d | SoundCoal: %d/%d | AsyncDest: %d/%d",
-            g_w5Cached, g_w5Calls, g_w6Prefetched, g_w7Coalesced, g_w7Calls, g_w8Fast, g_w8Calls);
+        Log("[WowOpt] DataSize: %d/%d | BlkCopyPf: %d | AsyncDest: %d/%d",
+            g_w5Cached, g_w5Calls, g_w6Prefetched, g_w8Fast, g_w8Calls);
         Log("[WowOpt] SysMsg: %d/%d | Context: %d/%d | ItemName: %d/%d | AllocBatch: %d/%d",
             g_w9Skipped, g_w9Calls, g_w10Cached, g_w10Calls, g_w11Fast, g_w11Calls, g_w12Batched, g_w12Calls);
         Log("[WowOpt] BufValid: %d/%d | Volume: %d/%d | Channel: %d/%d | MixOpt: %d/%d",

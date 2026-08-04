@@ -72,6 +72,50 @@ static volatile DWORD  g_firstRecvTick = 0;
 // then the socket closes - and three copies of the same story is noise.
 static volatile LONG g_reported = 0;
 
+// Which socket the counters above are describing.
+//
+// Logging in uses two connections: the client talks to the logon server, gets
+// its realm list, and closes that socket to go and talk to the world server.
+// That close is a normal step in starting the game, and because the counters
+// were global and closesocket reported the first close it saw with any receives
+// behind it, every session on every machine opened with a "!!! DISCONNECT !!!"
+// banner a few seconds after launch. One tester's log showed the report at
+// 19:44:31 followed by 593,038 receives over the next twenty-four minutes.
+//
+// Worse than the noise: the report fires once per session, so the login socket
+// consumed it and an actual mid-raid drop later in the same session had nothing
+// left to say.
+//
+// The counters now follow whichever socket is carrying traffic and reset when it
+// changes, and only that socket can produce a report.
+static volatile LONG g_watchedSocket = -1;
+
+// A close the client performs itself, with no error anywhere, is what an orderly
+// logout looks like as well as a realm handoff. Reporting it needs the
+// connection to have been substantial enough that its ending is worth a banner:
+// the logon exchange in the logs above was 5,584 bytes over 2.7 seconds, while a
+// world session is minutes and megabytes. An early drop still gets reported -
+// through recv returning 0 or an error, which is what a server-side drop
+// actually looks like from here.
+static const DWORD    kRealSessionMs    = 30000;
+static const uint64_t kRealSessionBytes = 256 * 1024;
+
+// Point the counters at `s`, restarting them if the traffic has moved to a new
+// socket. Returns nothing; callers are on the receive hot path.
+static void WatchSocket(SOCKET s) {
+    LONG sv = (LONG)s;
+    if (g_watchedSocket == sv) return;
+    if (InterlockedExchange(&g_watchedSocket, sv) == sv) return;
+    g_recvCalls     = 0;
+    g_sendCalls     = 0;
+    g_recvBytes     = 0;
+    g_sendBytes     = 0;
+    g_firstRecvTick = 0;
+    g_lastSendTick  = 0;
+}
+
+static bool IsWatched(SOCKET s) { return g_watchedSocket == (LONG)s; }
+
 static const char* ErrorName(int err) {
     switch (err) {
         case WSAECONNRESET:   return "WSAECONNRESET - the peer reset the connection";
@@ -138,16 +182,17 @@ static int WINAPI Hooked_recv(SOCKET s, char* buf, int len, int flags) {
     int r = orig_recv(s, buf, len, flags);
     DWORD le = GetLastError();
     if (r > 0) {
+        WatchSocket(s);
         DWORD now = GetTickCount();
         g_lastRecvTick = now;
         if (g_firstRecvTick == 0) g_firstRecvTick = now;
         InterlockedIncrement(&g_recvCalls);
         g_recvBytes += (uint64_t)r;
     } else if (r == 0) {
-        ReportDisconnect("the server closed the connection cleanly", 0);
+        if (IsWatched(s)) ReportDisconnect("the server closed the connection cleanly", 0);
     } else {
         int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS && IsWatched(s)) {
             ReportDisconnect("recv failed", err);
         }
     }
@@ -163,17 +208,19 @@ static int WINAPI Hooked_WSARecv(SOCKET s, LPWSABUF bufs, DWORD count,
     DWORD le = GetLastError();
     if (r == 0 && got) {
         if (*got > 0) {
+            WatchSocket(s);
             DWORD now = GetTickCount();
             g_lastRecvTick = now;
             if (g_firstRecvTick == 0) g_firstRecvTick = now;
             InterlockedIncrement(&g_recvCalls);
             g_recvBytes += (uint64_t)*got;
-        } else {
+        } else if (IsWatched(s)) {
             ReportDisconnect("the server closed the connection cleanly", 0);
         }
     } else if (r == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSA_IO_PENDING && err != WSAEINPROGRESS) {
+        if (err != WSAEWOULDBLOCK && err != WSA_IO_PENDING && err != WSAEINPROGRESS
+            && IsWatched(s)) {
             ReportDisconnect("WSARecv failed", err);
         }
     }
@@ -190,7 +237,7 @@ static int WINAPI Hooked_send(SOCKET s, const char* buf, int len, int flags) {
         g_sendBytes += (uint64_t)r;
     } else if (r == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
+        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS && IsWatched(s)) {
             ReportDisconnect("send failed", err);
         }
     }
@@ -199,13 +246,19 @@ static int WINAPI Hooked_send(SOCKET s, const char* buf, int len, int flags) {
 }
 
 static int WINAPI Hooked_closesocket(SOCKET s) {
-    // Only interesting if nothing else has explained the end yet. A socket
-    // closing during an orderly logout is not a disconnect, so this says so
-    // rather than crying wolf.
-    if (g_reported == 0 && g_recvCalls > 0) {
-        DWORD le = GetLastError();
-        ReportDisconnect("the client closed the socket, with no prior error", 0);
-        SetLastError(le);
+    // Only interesting if nothing else has explained the end yet, if this is the
+    // socket the counters describe, and if that connection was a real session
+    // rather than the logon exchange or a handful of packets. See the notes on
+    // g_watchedSocket and kRealSessionMs.
+    if (g_reported == 0 && g_recvCalls > 0 && IsWatched(s)) {
+        DWORD now      = GetTickCount();
+        DWORD lifetime = (g_firstRecvTick != 0) ? (now - g_firstRecvTick) : 0;
+        if (lifetime >= kRealSessionMs || g_recvBytes >= kRealSessionBytes) {
+            DWORD le = GetLastError();
+            ReportDisconnect("the client closed the socket, with no prior error "
+                             "(this is also what an orderly logout looks like)", 0);
+            SetLastError(le);
+        }
     }
     return orig_closesocket(s);
 }
