@@ -395,7 +395,6 @@ static void StopFreezeWatchdog() {
 #include "strstr_fast.h"
 #include "crt_char_fast.h"
 #include "crt_wchar_fast.h"
-#include "stream_cache.h"
 #include "lua_this_cache.h"
 #include "io_cache.h"
 #include "lua_global_cache.h"
@@ -508,7 +507,6 @@ void ClearCombatLogCache();
 #include "sound_mixer_opt.h"
 #include "lua_gc_governor.h"
 #include "async_tex_loader.h"
-#include "saved_vars_pretoken.h"
 #include "mip_bias_governor.h"
 #include "perf_diagnostics.h"
 #include "adaptive_farclip.h"
@@ -2430,11 +2428,6 @@ static BOOL WINAPI hooked_ReadFile_Inner(HANDLE hFile, LPVOID lpBuffer,
     if (AddonPreload_TryServe(hFile, lpBuffer, nBytesToRead, lpBytesRead))
         return TRUE;
 
-    #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-    if (SavedVarsPretoken::TryServe(hFile, lpBuffer, nBytesToRead, lpBytesRead))
-        return TRUE;
-    #endif
-
     if (!g_cacheInitialized || !IsMpqHandle(hFile))
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
@@ -3657,9 +3650,6 @@ static HANDLE WINAPI hooked_CreateFileA(LPCSTR lpFileName, DWORD dwAccess, DWORD
     // Track addon file handles for RAM-disk serving
     if (result != INVALID_HANDLE_VALUE) {
         AddonPreload_OnCreateFile(result, lpFileName);
-        #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-        SavedVarsPretoken::OnCreateFile(result, lpFileName, dwAccess);
-        #endif
         
         // Track SavedVariables files for async writing
         if (lpFileName) {
@@ -3704,9 +3694,6 @@ static HANDLE WINAPI hooked_CreateFileW(LPCWSTR lpFileName, DWORD dwAccess, DWOR
         char buf[512];
         WideCharToMultiByte(CP_UTF8, 0, lpFileName, -1, buf, 512, NULL, NULL);
         AddonPreload_OnCreateFile(result, buf);
-        #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-        SavedVarsPretoken::OnCreateFile(result, buf, dwAccess);
-        #endif
 
         // Track SavedVariables files for async writing
         extern bool ContainsWTF(const char* path);
@@ -3755,9 +3742,6 @@ static BOOL WINAPI hooked_CloseHandle(HANDLE hObject) {
 #endif
     UntrackMpqHandle(hObject);
     AddonPreload_OnCloseHandle(hObject);
-    #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-    SavedVarsPretoken::OnCloseHandle(hObject);
-    #endif
     if (g_cacheInitialized) {
         RemoveCacheForHandle(hObject);
     }
@@ -6897,9 +6881,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool netOk = false;
 #endif
     Log("--- File I/O ---");
-    bool fileOk  = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallFileHooks();
+    bool fileOk  = Config::g_settings.OptDbcLookupCache && InstallFileHooks();
 #if !CRASH_TEST_DISABLE_READFILE
-    bool readOk  = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallReadFileHook();
+    bool readOk  = Config::g_settings.OptDbcLookupCache && InstallReadFileHook();
 #else
     // The cache stays off; the measurement does not have to go with it.
     bool readOk  = InstallReadFileTimingHook();
@@ -6908,17 +6892,17 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // The load report counts time spent in the ReadFile hook. If that hook is not
     // in, the report must say so rather than print a confident zero.
     LoadingState::SetReadHookInstalled(readOk);
-    bool closeOk = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallCloseHandleHook();
-    bool flushOk = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallFlushFileBuffersHook();
+    bool closeOk = Config::g_settings.OptDbcLookupCache && InstallCloseHandleHook();
+    bool flushOk = Config::g_settings.OptDbcLookupCache && InstallFlushFileBuffersHook();
     Log("--- Async MPQ I/O ---");
     // Worker started after init completes to avoid race with hook setup
     bool asyncIoOk = true;
     Log("--- MPQ Scan ---");
     ScanExistingMpqHandles();
     Log("--- File Attributes ---");
-    bool faOk = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallGetFileAttributesHook();
+    bool faOk = Config::g_settings.OptDbcLookupCache && InstallGetFileAttributesHook();
     Log("--- File Pointer ---");
-    bool sfpOk = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallSetFilePointerHook();
+    bool sfpOk = Config::g_settings.OptDbcLookupCache && InstallSetFilePointerHook();
 
     Log("--- Global Alloc ---");
     bool gaOk  = InstallGlobalAllocHooks();    
@@ -6963,7 +6947,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     TryRemoveFPSCap();
 
     Log("--- File Size Cache ---");
-    bool fsizeOk = (Config::g_settings.OptDbcLookupCache || Config::g_settings.OptSavedVarsPretoken) && InstallGetFileSizeCache();
+    bool fsizeOk = Config::g_settings.OptDbcLookupCache && InstallGetFileSizeCache();
     Log("--- WaitForSingleObject Spin ---");
     bool wfsOk = Config::g_settings.OptDefragLf && InstallWaitForSingleObjectHook();
     Log("--- Module Handle Cache ---");
@@ -6992,7 +6976,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool wcharOk = Config::g_settings.OptStrStrSse2 && InstallCrtWcharSSE2();
 
     // Stream Reader/Writer Cache - eliminate bounds checks
-    bool streamCacheOk = Config::g_settings.OptSavedVarsPretoken && InstallStreamCache();
 
     // Lua "this" Object Lookup Cache - cache method dispatcher results
     bool luaThisCacheOk = Config::g_settings.OptUIFrameAccessorFast && InstallLuaThisCache();
@@ -7272,7 +7255,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();
 
     Log("--- CDataStore Batch Read ---");
-    bool cdataBatchOk = Config::g_settings.OptSavedVarsPretoken && InstallCDataStoreBatch();
 
     Log("--- SSE2 Strcpy Optimization ---");
     bool strcpyOk = Config::g_settings.OptStrCatFast && InstallStrcatFast();
@@ -7591,7 +7573,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool rttiCacheOk = false;
 
     Log("--- Stream Buffer Fast Path ---");
-    bool streamBufOk = Config::g_settings.OptSavedVarsPretoken && InstallStreamBufferFastPath();
 
     bool luaOk = false;
     Log("");
@@ -8161,9 +8142,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Unit Aura Update Coalescing ---");
 
     Log("");
-    Log("--- SavedVariables Pretoken Caching ---");
-    if (Config::g_settings.OptSavedVarsPretoken) SavedVarsPretoken::Init();
-
     Log("");
     Log("--- Net Addon message Coalescer ---");
 
@@ -8359,7 +8337,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Lua PushString (intern)",     luaPushStringOk ? " OK " : "SKIP");
     Log("  [%s] Lua RawGetI (int-key)",       luaRawGetIOk ? " OK " : "SKIP");
     Log("  [%s] CombatLog full cache",        combatLogFullCacheOk ? " OK " : "SKIP");
-    Log("  [%s] Stream buffer fast path",     streamBufOk    ? " OK " : "SKIP");
     Log("  [%s] D3D9 State Manager (15 hooks)",   d3d9StateOk ? " OK " : "SKIP");
     Log("  [%s] Render Hooks (anim+backbuffer)",    renderHooksOk ? " OK " : "SKIP");
     Log("  [%s] SIMD Hooks (SSE2 matrix+frustum)", simdHooksOk ? " OK " : "SKIP");
@@ -8517,53 +8494,18 @@ static FSizeEntry g_fsizeCache[FSIZE_CACHE_SIZE] = {};
 // by handle returns stale sizes for recycled handles.
 #define TEST_DISABLE_GETFILESIZE_CACHE  1
 
-typedef BOOL (WINAPI* GetFileSizeEx_fn)(HANDLE, PLARGE_INTEGER);
-static GetFileSizeEx_fn orig_GetFileSizeEx = nullptr;
 
-typedef DWORD (WINAPI* GetFileSize_fn)(HANDLE, LPDWORD);
-static GetFileSize_fn orig_GetFileSize = nullptr;
 
-static BOOL WINAPI hooked_GetFileSizeEx(HANDLE hFile, PLARGE_INTEGER lpFileSize) {
-    #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-    if (SavedVarsPretoken::GetMinifiedFileSize(hFile, lpFileSize)) {
-        return TRUE;
-    }
-    #endif
-    return orig_GetFileSizeEx(hFile, lpFileSize);
-}
-
-static DWORD WINAPI hooked_GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh) {
-    #if !TEST_DISABLE_SAVED_VARS_PRETOKEN
-    LARGE_INTEGER sz;
-    if (SavedVarsPretoken::GetMinifiedFileSize(hFile, &sz)) {
-        if (lpFileSizeHigh) {
-            *lpFileSizeHigh = sz.HighPart;
-        }
-        return sz.LowPart;
-    }
-    #endif
-    return orig_GetFileSize(hFile, lpFileSizeHigh);
-}
-
+// The only thing these two hooks ever did was ask SavedVarsPretoken whether it
+// had a minified copy of the file, and every one of that module's entry points
+// was `return false`. With the module gone they would be detours that call the
+// original and nothing else, on every GetFileSize the client makes. Both the
+// hooks and the installer are removed; the name "GetFileSize cache" described a
+// cache that never held anything.
 static bool InstallGetFileSizeCache() {
-    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-    if (!hK32) return false;
-    
-    void* pEx = (void*)GetProcAddress(hK32, "GetFileSizeEx");
-    if (pEx) {
-        MH_CreateHook(pEx, (void*)hooked_GetFileSizeEx, (void**)&orig_GetFileSizeEx);
-        WO_EnableHook(pEx);
-    }
-    
-    void* pSize = (void*)GetProcAddress(hK32, "GetFileSize");
-    if (pSize) {
-        MH_CreateHook(pSize, (void*)hooked_GetFileSize, (void**)&orig_GetFileSize);
-        WO_EnableHook(pSize);
-    }
-    
-    Log("GetFileSize / GetFileSizeEx hooks: ACTIVE");
-    return true;
+    return false;
 }
+
 
 // ================================================================
 // 18. WaitForSingleObject - Spin-First for Short Waits
@@ -10140,7 +10082,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             RcuObjMgr::Shutdown();
             AsyncTerrainLoader::Shutdown();
             AsyncTexLoader::Shutdown();
-            SavedVarsPretoken::Shutdown();
             MipBiasGovernor::Shutdown();
             PerfDiagnostics::Shutdown();
             CrashDumper::Shutdown();

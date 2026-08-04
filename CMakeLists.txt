@@ -147,8 +147,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/font_glyph_cache.h
     src/hooks_subsystems/async_sound_loader.cpp
     src/hooks_subsystems/async_sound_loader.h
-    src/runtime_vm/saved_vars_pretoken.cpp
-    src/runtime_vm/saved_vars_pretoken.h
     src/hooks_subsystems/mip_bias_governor.cpp
     src/hooks_subsystems/mip_bias_governor.h
     src/diagnostics/perf_diagnostics.cpp
@@ -212,8 +210,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/crt_char_fast.h
     src/hooks_subsystems/crt_wchar_fast.cpp
     src/hooks_subsystems/crt_wchar_fast.h
-    src/hooks_subsystems/stream_cache.cpp
-    src/hooks_subsystems/stream_cache.h
     src/runtime_vm/lua_this_cache.cpp
     src/runtime_vm/lua_this_cache.h
     src/hooks_subsystems/io_cache.cpp

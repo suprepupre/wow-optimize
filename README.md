@@ -180,6 +180,18 @@ anyone will have seen what is in one.
   reach them. Also gone: an `InstallTimingFix()` whose entire body logged
   "Hook skipped. Using console override only" — there was no console override
   either, and it was called unconditionally, ignoring the setting.
+- **A second switch of the same kind, found by looking for one.** "Saved
+  Variables Pretokenize" installed the entire Win32 file-hook suite, a stream
+  cache, a packet batcher and a stream-buffer fast path. Every one of those was
+  dead: the pretokenizer's six entry points were each `return false`, the stream
+  cache logged "Disabled" and returned, the batcher only initialised counters,
+  and the stream-buffer path aimed at the same two addresses as the packet
+  accessors and always lost the race. Two of those dead calls sat on the
+  `ReadFile` and `CreateFile` hot paths, running on every file the client
+  touched. What was actually doing work behind the switch was the six CDataStore
+  packet accessors, about 4,000 call sites, so it is now called **Network Packet
+  Reader Fast Paths** and installs only those. The file hooks it forced on are
+  back to being gated by the cache that uses them.
 - **Two launcher switches did nothing.** Asynchronous Texture Loader and Mipmap
   Bias Governor were written to one section of `wow_opt.ini` and read from
   another, so no setting of either ever reached the DLL. Both now work, both are
