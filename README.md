@@ -114,6 +114,38 @@ the target's own disassembly:
 Removed rather than repaired. The engine's own rule is better than one
 reconstructed from outside it, and it was already running underneath ours.
 
+**The crash where the game executes address zero**
+
+Reported independently by **prince** and by **nobus**, who hit it swapping
+warrior stances; a third tester's alt-tab crashes fit the same path. Both logs
+land on the same instruction:
+
+```
+0xC0000005 (ACCESS_VIOLATION) at 0x00000000
+[ESP+0x00] = 0x006A2B69   (WoW.exe+0x2A2B69)
+[ESP+0x3C] = 0x00690160   (WoW.exe+0x290160)
+```
+
+`sub_690150` is device teardown. It calls `sub_6A2AA0`, which walks a list of
+registered callbacks and tells each one the graphics device is going away. The
+callback lives in the list node itself, at `+0x34`, and the client null-checks
+the neighbouring field at `+0x38` twice while never checking `+0x34` at all. A
+node with an empty callback slot takes the whole process down.
+
+The guard walks that list read-only before the client does, applying the
+client's own two visit conditions. On a healthy client it finds nothing and
+hands straight over — one pointer walk per device teardown, not per frame, and
+no behaviour change whatsoever. Only when it finds a node that is certain to
+crash does it run the loop itself, transcribed instruction by instruction from
+the original, skipping exactly one thing: the call through the null pointer.
+Everything else the client writes, it writes, in the same order.
+
+It does not try to repair the node. Writing a substitute callback in, or zeroing
+a field so the client skips the entry, would both mean writing into a client
+structure on a guess — the mistake that produced the layout-relink crash removed
+below. The node is written to your log in full instead, which is the first time
+anyone will have seen what is in one.
+
 **Two diagnostics that cried wolf**
 
 - **Every log opened with `!!! DISCONNECT !!!`.** Logging in uses two

@@ -402,6 +402,7 @@ static void StopFreezeWatchdog() {
 #include "hot_functions.h"
 #include "fast_strncmp.h"
 #include "render_null_guard.h"
+#include "device_callback_guard.h"
 #include "cvar_watchdog.h"
 #include "lua_precall_cache.h"
 #include "lua_table_fast.h"
@@ -4697,6 +4698,7 @@ static void DumpPeriodicStats() {
     DbcLookupCache_LogStats();
     LuaCompileCensus::LogStats();
     AnimCensus::LogStats();
+    DeviceCallbackGuard::LogStats();
     HorizonOcclusion::LogStats();
     D3D9StateCache::LogStats();
     D3D9StateCache::ReportDrawCensus();
@@ -7507,6 +7509,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     extern bool InstallObjectUnlinkSafety();
     bool objUnlinkSafetyOk = Config::g_settings.OptCvarNullGuard && InstallObjectUnlinkSafety();
     (void)objUnlinkSafetyOk;
+
+    Log("--- Device Callback List Guard (0x6A2B67 null-callback crash fix) ---");
+    DeviceCallbackGuard::Init();
 
     Log("--- luaH_newkey Safety Patch (0x85CB43 crash fix) ---");
 #if !TEST_DISABLE_LUA_NEWKEY_SAFETY

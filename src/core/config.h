@@ -42,6 +42,10 @@ namespace Config {
         bool OptVulkanDXVK = false;
         bool OptTimingFix = false;
         bool OptCvarNullGuard = true; // Safe default: enabled
+        // Null-callback crash in the client's device callback list. On by
+        // default: on a healthy client it is one read-only pointer walk per
+        // device teardown and changes nothing.
+        bool OptDeviceCbGuard = true;
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.

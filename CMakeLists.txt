@@ -98,6 +98,7 @@ add_library(wow_optimize SHARED
     src/diagnostics/anim_census.h
     src/diagnostics/crash_dumper.cpp
     src/hooks_subsystems/render_null_guard.cpp
+    src/hooks_subsystems/device_callback_guard.cpp
     src/diagnostics/cvar_watchdog.cpp
     src/diagnostics/cvar_watchdog.h
     src/runtime_vm/lua_precall_cache.cpp
