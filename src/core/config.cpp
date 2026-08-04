@@ -58,10 +58,15 @@ static const BoolSetting kBoolSettings[] = {
     { "UI_Lua", "LuaOpcache", &Settings::OptLuaOpcache },
     { "UI_Lua", "LuaGcCoalesce", &Settings::OptLuaGcCoalesce },
     { "UI_Lua", "LuaGetTimeFast", &Settings::OptLuaGetTimeFast },
-    { "UI_Lua", "AsyncTexLoader", &Settings::OptAsyncTexLoader },
+    // AsyncTexLoader and MipBiasGovernor are read from Graphics_Sound because
+    // that is the section the launcher writes them to. They used to be read from
+    // UI_Lua, which the launcher never writes for these two keys, so the switch
+    // was inert: whatever you set, the DLL read the absent-key default of off and
+    // neither feature could be turned on by anyone.
+    { "Graphics_Sound", "AsyncTexLoader", &Settings::OptAsyncTexLoader },
     { "UI_Lua", "AsyncTerrainLoader", &Settings::OptAsyncTerrainLoader },
     { "UI_Lua", "RcuObjMgr", &Settings::OptRcuObjMgr },
-    { "UI_Lua", "MipBiasGovernor", &Settings::OptMipBiasGovernor },
+    { "Graphics_Sound", "MipBiasGovernor", &Settings::OptMipBiasGovernor },
     { "Combat_Net", "CombatLogLeakFix", &Settings::OptCombatLogLeakFix },
     { "Combat_Net", "CombatLogParser", &Settings::OptCombatLogParser },
     { "Combat_Net", "CombatLogIncremental", &Settings::OptCombatLogIncremental },
@@ -287,10 +292,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("UI_Lua", "LuaGcCoalesce", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaJIT", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaGetTimeFast", "0", iniPath.c_str());
-            WritePrivateProfileStringA("UI_Lua", "AsyncTexLoader", "0", iniPath.c_str());
+            WritePrivateProfileStringA("Graphics_Sound", "AsyncTexLoader", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "AsyncTerrainLoader", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "RcuObjMgr", "0", iniPath.c_str());
-            WritePrivateProfileStringA("UI_Lua", "MipBiasGovernor", "0", iniPath.c_str());
+            WritePrivateProfileStringA("Graphics_Sound", "MipBiasGovernor", "0", iniPath.c_str());
 
             // Combat & Network
             WritePrivateProfileStringA("Combat_Net", "CombatLogLeakFix", "1", iniPath.c_str());
@@ -371,10 +376,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptLuaOpcache          = GetPrivateProfileIntA("UI_Lua", "LuaOpcache", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaGcCoalesce       = GetPrivateProfileIntA("UI_Lua", "LuaGcCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaGetTimeFast      = GetPrivateProfileIntA("UI_Lua", "LuaGetTimeFast", 0, iniPath.c_str()) != 0;
-        g_settings.OptAsyncTexLoader      = GetPrivateProfileIntA("UI_Lua", "AsyncTexLoader", 0, iniPath.c_str()) != 0;
+        g_settings.OptAsyncTexLoader      = GetPrivateProfileIntA("Graphics_Sound", "AsyncTexLoader", 0, iniPath.c_str()) != 0;
         g_settings.OptAsyncTerrainLoader  = GetPrivateProfileIntA("UI_Lua", "AsyncTerrainLoader", 0, iniPath.c_str()) != 0;
         g_settings.OptRcuObjMgr           = GetPrivateProfileIntA("UI_Lua", "RcuObjMgr", 0, iniPath.c_str()) != 0;
-        g_settings.OptMipBiasGovernor     = GetPrivateProfileIntA("UI_Lua", "MipBiasGovernor", 0, iniPath.c_str()) != 0;
+        g_settings.OptMipBiasGovernor     = GetPrivateProfileIntA("Graphics_Sound", "MipBiasGovernor", 0, iniPath.c_str()) != 0;
 
         // Combat & Network
         g_settings.OptCombatLogLeakFix    = GetPrivateProfileIntA("Combat_Net", "CombatLogLeakFix", 1, iniPath.c_str()) != 0;

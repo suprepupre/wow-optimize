@@ -19,8 +19,8 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
+* [What's New in v3.18.2](#whats-new-in-v3182)
 * [What's New in v3.18.1](#whats-new-in-v3181)
-* [What's New in v3.18.0](#whats-new-in-v3180)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
 * [Current Feature Set](#current-feature-set)
@@ -34,10 +34,119 @@ The current public build is focused on real frametime stability, long-session sm
 
 ---
 
+## What's New in v3.18.2
+
+Mostly the same story as 3.18.1, told again: most of what is below is something
+this project was already shipping that turned out not to be doing what its own
+description said. Thanks to **Doc.James**, [txtsd](https://github.com/txtsd),
+**prince**, **Sicsoo**, **Signalborn Soulweaver** and **Morbent** — every fixed
+item here came out of a log somebody sent in, or out of checking a claim this
+repo was making about itself.
+
+**The loading screen fix**
+
+Doc.James reported his first zone change of a session taking two to three seconds
+longer than normal, with the loading bar never appearing. Three sessions made it
+reproducible, and one switch made it go away.
+
+The lock-free defragmenter was running a full forced heap collection **once a
+second for the entire duration of every loading screen** — which is the worst
+possible moment for it, because that is when the main thread is allocating harder
+than at any other time. From his own logs, same machine, that switch the only
+difference:
+
+```
+DefragLf=1    184 MB loaded in 10171 ms  =  18 MB/s
+DefragLf=0    113 MB loaded in  1222 ms  =  94 MB/s
+```
+
+Disk accounted for 107 ms of those 10171. A module named after making loading
+screens better was making them five times slower. It now waits the loading screen
+out and collects once afterwards, which is when the transient allocations are
+actually free to return.
+
+Not all of what he saw was this. A single ~2.15 second frame at the start of each
+zone change survives with the switch off, in the same place both times, with no
+hook of ours running inside it. That one is the client's own teardown.
+
+**Faster, and now provably identical to the client**
+
+Four routines on the per-bone animation path were replaced. All four verify
+themselves against the client's own function at startup and refuse to install if
+a single bit differs:
+
+- Quaternion to rotation matrix — **1.40x**. Runs once per animated bone per frame.
+- Quaternion normalize — **2.01x**, and now on by default. It was off because the
+  old version sat a float ULP away from the client on 1,535,779 of two million
+  test quaternions.
+- Both vector normalises — **2.25x**.
+- `strncmp` — **3.88x** on long strings, 1.33x on short ones.
+
+The reason those first three were wrong before is worth stating, because it
+invalidated every "sub-ULP" comment in this repo: the client is not doing single-
+precision arithmetic. The CRT leaves x87 at 53-bit, so the engine accumulates in
+double and narrows only when it stores a float. Anything written in packed single
+disagrees with it on most inputs. Rewritten in packed double with the original's
+summation order preserved, all four are bit-identical.
+
+**Things that were not doing their job**
+
+- **Two launcher switches did nothing.** Asynchronous Texture Loader and Mipmap
+  Bias Governor were written to one section of `wow_opt.ini` and read from
+  another, so no setting of either ever reached the DLL. Both now work, both are
+  marked experimental, and both stay off unless you go and turn them on — nobody
+  has ever run them, so there is no log anywhere saying what they do.
+- **Fifteen build flags said "disabled" and disabled nothing.** Each named a
+  module that had already been deleted. One of them carried a HARD-DISABLED
+  notice about a use-after-free in code that no longer existed. A flag that reads
+  1 and decides nothing answers a bisection question falsely, which is worse than
+  having no flag.
+- The DBC lookup cache was **slower than the function it caches**, about half the
+  time — on the client's memcpy path there is nothing for a cache to win. It now
+  steps aside there.
+- The render null guard could silently drop a model's draw parameters.
+- The D3D9 device vtable was left pointing into this DLL after unload.
+- Two of our own modules aimed at the same address, and the loser said nothing.
+  MinHook knows the difference between "somebody else got here first" and "one of
+  ours already owns this"; the log now does too.
+- SimdMathFast installed nothing and reported itself active.
+- Texture Smart Unload Delay now measures its own reuse rate and switches itself
+  off below one percent. Two testers measured 0.4% and 0.2%. It does not pay.
+- The addon profiler raised a dialog box and collected nothing at all.
+- MinHook's trampolines are no longer freed while WoW's threads may still be
+  inside them on the way out.
+
+**Removed**
+
+The UI layout relink shortcut, which corrupted the client's layout list and
+crashed on login — `off_AC101C` and `dword_AC1020` are one link pair, and the
+client writes to the second during an insert. The shadow buffer experiment, which
+a tester confirmed does not stop the flicker in Dalaran. A trig lookup table, two
+dead SSE2 helpers, three features that were never installed, and two empty
+headers.
+
+**New diagnostics**
+
+- **Lua compile census** (on by default, silent on a healthy client). It answers
+  a question nothing could answer before: 88% of everything the client compiles
+  at runtime is source it already compiled this session — 332 MB of it in one
+  measured session. If your log starts naming something with a five-figure count,
+  that is the addon to update or drop.
+- **Per-addon CPU profiler** (opt-in). Switches on the script profiler the client
+  has always had and nothing ever enabled, and writes a ranked table to your log.
+- **Shadow state probe** (opt-in, read-only). For the shadow flicker some people
+  see below the highest quality step. That is not caused by this DLL — a tester
+  reproduced it with every feature here off and without DXVK — but nobody had
+  ever looked at what the game itself is doing when it happens.
+- The sampling profiler was attributing up to 4 KB of code to whichever symbol
+  came before it. It now reports `name+0xNNN`.
+
+---
+
 ## What's New in v3.18.1
 
 A fix release. Thanks to **prince**, [txtsd](https://github.com/txtsd),
-**Signalborn Soulweaver**, **Morbent** and **Doc.James** for the logs.
+**Signalborn Soulweaver**, **Sicsoo**, **Morbent** and **Doc.James** for the logs.
 
 **Fixed**
 
@@ -63,169 +172,6 @@ Both verify themselves against the client at startup and refuse to install if th
 
 - `wow_opt.ini` now lives in the `WTF` folder. An existing file is moved there on first run; nothing is reset.
 - Texture Smart Unload Delay reports how often a held texture is actually reused. One long session measured 0.4%. Check your own log before leaving it on.
-
----
-
-## What's New in v3.18.0
-
-Forty-six modules were removed because they never ran, three optimizations went
-in because the logs said where the time actually goes, and the settings that were
-quietly overwriting your graphics options are gone. The rest of this release is
-the diagnostics catching themselves out — four cases of a log reporting something
-it had not actually measured.
-
-Thanks to [txtsd](https://github.com/txtsd), **Signalborn Soulweaver**, **Morbent**,
-and **prince**, who between them put this build through raids and a good deal of
-open world, and reported what broke. Every measured item below came out of a log
-somebody sent in.
-
-**Forty-six modules that did nothing at all**
-
-They appeared in the log at startup and had settings behind them. None installed
-a hook, patched anything, or was called from anywhere. `Init()` was
-`return true;` and the rest of the module was never entered.
-
-Most had no launcher switch at all and read a default of off, so nobody was
-running them — dead weight rather than active mistakes. Two separate minimap
-throttles existed, neither wired to anything. A JIT compiler sat behind a LuaJIT
-setting on a client that has no JIT. Two files shared a name and a namespace
-differing by one letter's case, and only one of them was ever wired up.
-
-Three of them had callers and still did nothing: a throttle whose enable flag was
-initialised to false and never set, a particle skip that asked a frustum nobody
-filled, and a "font alpha fast path" that turned alpha blending off whenever it
-should have left it alone — which would have painted text as solid rectangles had
-anything reached it.
-
-Two looked alive on inspection and were not. `ItemDataPrefetch::PrefetchItem` was
-an empty body under a comment saying the work was unsafe, called twice per item
-lookup into nothing. `CDataStoreBuffering` read a buffer pointer from an offset
-that actually holds a length, so the first call would have dereferenced a number
-as a pointer — which is presumably why nothing ever called it.
-
-`MpqMmapVfs` and `MpqPrefetch` went too. Both look up StormLib through
-`Storm.dll`, and 3.3.5a links Storm into the executable — there is no such file.
-Every tester log says so outright.
-
-What is left is a much shorter list of things that actually run: eleven settings
-are on unless you turn them off, and every one of them now has a switch.
-
-**Three optimizations that came from measurements, not guesses**
-
-- **The client asks the heap how big every block is, then throws the answer
-  away.** Both the `free` wrapper and the allocation wrapper call `_msize` and
-  discard the result — a walk into the heap on every single allocation and every
-  deallocation, from over a hundred call sites. Two
-  independent profiles measured that call at 8.09% and 10.59% of the time the
-  main thread spent executing. Both are gone; nothing else about either call
-  changes. A three-minute session with the fix in place reports 67,776
-  allocations and 28,393 deallocations served without it.
-
-- **`tostring` on numbers is about 50x cheaper.** It was the single largest
-  target in this project's own domain — 10.74% of execution in a CPU-bound
-  session. There was already a "fast path" hooked onto it, and for numbers it
-  called `sprintf("%.14g")`, which is exactly what Lua does, so it took the call
-  and paid full price. Integral values now convert directly: 841 ns to 16 ns for
-  the formatting step, verified byte-identical against `%.14g` across 200,139
-  values before it was allowed anywhere near a build.
-
-  The formatting is one part of a `tostring` call, so the end-to-end gain is
-  smaller than 50x. Your log now says how many conversions took the fast route.
-
-**Your graphics settings are yours again**
-
-Three "adaptive" features scaled quality down when frame rate dropped. Each one
-started from a number written into the code rather than the number you had set, so
-turning them on could raise your settings instead of lowering them. **Dynamic Shadow
-Scaler** went in 3.17.0; the other two go now:
-
-- **Adaptive Farclip** assumed a draw distance of 1250. If yours was 500 — a common
-  choice on older hardware — it dragged you *up* toward 1250, making the game
-  heavier while claiming to make it lighter. It also moved on thresholds three
-  frames apart (below 55 fps, above 58), so anyone playing near 60 had it adjusting
-  constantly.
-- **Particle Density Scaler** assumed 1.0 and restored to 1.0, so a deliberate 0.5
-  was pushed back to full density.
-
-Neither survives. Nothing in the DLL now overwrites a setting it never read.
-
-**Adaptive Quality Governor** *(experimental, off by default)*
-
-What replaces them is one dial instead of three that argued with each other. It
-learns your ceiling by watching what the game writes when you change a setting, and
-treats that as a limit it will never exceed — the worst it can do is give back what
-it took.
-
-It reads the p95 of recent frames rather than an instant frame rate, so a single
-slow frame moves nothing. It degrades after 5 seconds past 33 ms and restores only
-after 30 seconds back under 20 ms; that asymmetry is deliberate, because quality
-flickering up and down is worse than quality being slightly too low. Order is
-particles, then shadows, then draw distance, on the assumption that you would rather
-see the world at full distance with fewer sparks.
-
-It has not been proven on anyone's machine yet. That is why it is opt-in and on the
-Experimental tab — if you run it, the `[FrameBench]` block in your log says whether
-it helped.
-
-**An Experimental tab in the launcher**
-
-Features that are new or unproven now live on their own tab, and **Enable All no
-longer switches them on**. Previously it did, which meant anyone testing "everything
-on" was also testing code that had never run in a game — and made their results
-impossible to interpret.
-
-**Diagnostics that stop reporting things they did not measure**
-
-Four of these, all found by reading logs testers sent in:
-
-- The CVar watchdog ran at injection, before the client had initialized anything it
-  inspects. Every one of its nine "CORRUPT" findings was a game that had not started
-  yet. It now waits until the client is up.
-- A 41.9-second loading screen was being recorded as a *frame*, which made `p99.9`
-  and `max` meaningless. Gaps over 2 seconds are now counted and reported separately
-  from frame times.
-- The profiler ranked `NtDelayExecution` — a thread doing nothing — as the second
-  hottest function, with a share of "executing" time it was by definition not using.
-- The loading report printed `0 ms inside ReadFile` in sessions where the ReadFile
-  hook was switched off and nothing had been measured at all.
-
-**Loading screens are now measurable**
-
-Logs show loading screens running past 30 seconds on some setups — on one tester's
-machine, 7 of 12 loads. The cause is not known yet. This release adds timing that
-separates disk time from everything else, without turning the MPQ cache back on to
-get it. If your loads are slow, your log now contains the evidence.
-
-### Upgrading
-
-Settings carry over. If you had **Adaptive Farclip** or **Particle Density Scaler**
-on, they are gone, and your `farclip` and `particleDensity` will stay wherever you
-set them from now on. Worth checking them once in the game's own video options —
-these features may have left them somewhere you did not choose, and that value
-persisted in your config after the feature stopped running.
-
-To try the replacement, turn on **Adaptive Quality Governor** on the Experimental
-tab.
-
-Older releases: see the [Releases page](https://github.com/suprepupre/wow-optimize/releases) for the full version history.
-
-![wow_optimize Launcher Dashboard](images/launcher_screenshot.jpg)
-
-## Current Status
-
-### Performance
-
-**`memset` replacement** — 2.3x faster than the client's own `rep stosd` at the
-sizes engine code clears: 5.05 ns/call against 11.76, measured over 4.8M calls per
-variant. The client reaches that one function from 1108 call sites.
-
-Everything else is opt-in, and the frame-time benchmark lets you settle it on your own hardware,
-with your own addons, instead of taking anyone's word for it. Play a session, quit
-the game normally, and read the `[FrameBench]` block at the end of
-`Logs\wow_optimize_<date>_<time>.log`. Compare `p95` and `p99` between runs rather
-than the average, which hides the stutters you actually feel — and the `config`
-fingerprint on that line proves two runs differed only where you meant them to.
-A/B testing a single toggle is two logs on the same route.
 
 ---
 
@@ -302,7 +248,7 @@ Every measured item in these notes came out of a log somebody sent in.
 - **[txtsd](https://github.com/txtsd)** — raids on ChromieCraft; the memory growth
   and freeze reports, and the request for per-addon profiling that turned into the
   addon CPU profiler and the Lua compile census.
-- **Signalborn Soulweaver**, **Morbent** — early 3.18 logs.
+- **Signalborn Soulweaver**, **Morbent**, **Sicsoo** — early 3.18 logs.
 - **Doc.James** — the zone-change stall, with three sessions that made it
   reproducible.
 
@@ -750,7 +696,7 @@ Recent events:
     -110351ms  TID=900   D3D9 device Reset (dev=0x0EB1AA90)
 ```
 
-The startup banner reports the exact build the log came from (`v3.18.1 (build abc1234)`), so please don't trim the first lines.
+The startup banner reports the exact build the log came from (`v3.18.2 (build abc1234)`), so please don't trim the first lines.
 
 If the complaint is stuttering rather than a crash, look for `slow frame` lines — each one names how far past your session's own median that frame ran, and what was happening during it:
 

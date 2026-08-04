@@ -256,7 +256,7 @@ namespace WowOptimizeLauncher {
         // remote version.txt to decide whether to show the update notification,
         // and shown in the version label. Keep in sync with version.txt and
         // src/core/version.h on every release.
-        private const string APP_VERSION = "3.18.1";
+        private const string APP_VERSION = "3.18.2";
 
         private string iniPath;
         private Dictionary<string, SettingItem> settingsMap;
@@ -400,9 +400,9 @@ namespace WowOptimizeLauncher {
                 { "FMOD Sound Mixer Optimization", new SettingItem("Graphics_Sound", "SoundMixerOpt", false, null, "Adjusts audio thread schedules and buffer allocations to prevent sound stutters in raids.") },
                 { "Parallel Sound Wave Decoding", new SettingItem("Graphics_Sound", "AudioDecodeMt", false, null, "Decodes sound assets in background threads to eliminate latency when playing fresh audio clips.") },
                 { "DBC Data Lookup Cache", new SettingItem("Graphics_Sound", "DbcLookupCache", false, null, "Speeds up data reading from internal database files (.dbc) for models, items, and spells.") },
-                { "Asynchronous Texture Loader", new SettingItem("Graphics_Sound", "AsyncTexLoader", false, null, "Asynchronously loads and decompresses BLP textures in background worker threads, hot-swapping them on frame boundaries to prevent stutters.") },
+                { "Asynchronous Texture Loader", new SettingItem("Graphics_Sound", "AsyncTexLoader", false, null, "Asynchronously loads and decompresses BLP textures in background worker threads, hot-swapping them on frame boundaries to prevent stutters. Marked experimental because until this build the switch was inert - it was written to one section of the ini and read from another - so nobody has ever run this, and worker threads are where this project's freezes have come from. Try it if you want to help, not because you expect it to help.", true) },
                 { "Texture Smart Unload Delay", new SettingItem("Graphics_Sound", "TextureUnloadDelay", false, null, "Holds a texture the engine has finished with for five seconds, in case it is wanted again before then. Do not turn this on. Two testers have now measured it: 100,664 held for 380 reuses (0.4%), and 795,117 held for 1,652 (0.2%). Everything else expired and was released anyway. In 3.18.0 a bug stopped it working after the first loading screen, so nobody paid for it; 3.18.1 fixed the bug and it began doing its job for real, which means a lock and a hash insert on every texture the engine releases - 795,117 of them in one session - to save 1,652 reloads. It now measures its own reuse rate and switches off below one percent, but the honest answer is that the idea does not pay.", true) },
-                { "Mipmap Bias Governor", new SettingItem("Graphics_Sound", "MipBiasGovernor", false, null, "Adjusts mipmap texture bias dynamically based on virtual memory pressure to prevent allocation spikes.") },
+                { "Mipmap Bias Governor", new SettingItem("Graphics_Sound", "MipBiasGovernor", false, null, "Adjusts mipmap texture bias dynamically based on virtual memory pressure to prevent allocation spikes. Marked experimental for the same reason as the texture loader above: this switch was inert until this build, so no log anywhere shows what it does.", true) },
                 { "SIMD Matrix Vector Transforms", new SettingItem("Graphics_Sound", "SimdMatrixTransform", false, null, "Vectorizes 3D coordinate and matrix-vector calculations using SSE2 SIMD instructions to accelerate particle updates.") },
                 { "Advanced Sound Channels Coalescer", new SettingItem("Graphics_Sound", "SoundCoalescer", false, null, "Coalesces rapid duplicated sound plays to prevent channel exhaustion under AOE spam.") },
                 { "Overlapping Sound Volume Limiter", new SettingItem("Graphics_Sound", "SoundVolumeLimit", false, null, "Limits and clamps volume for overlapping duplicate sound effects to prevent clipping and audio driver lag.") },

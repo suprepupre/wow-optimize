@@ -10,10 +10,10 @@
 
 #define WOW_OPTIMIZE_VERSION_MAJOR  3
 #define WOW_OPTIMIZE_VERSION_MINOR  18
-#define WOW_OPTIMIZE_VERSION_PATCH  1
+#define WOW_OPTIMIZE_VERSION_PATCH  2
 #define WOW_OPTIMIZE_VERSION_BUILD  0
 
-#define WOW_OPTIMIZE_VERSION_STR    "3.18.1"
+#define WOW_OPTIMIZE_VERSION_STR    "3.18.2"
 #define WOW_OPTIMIZE_AUTHOR         "SUPREMATIST"
 
 #ifndef CRASH_TEST_DISABLE_PHASE2
@@ -28,6 +28,17 @@
 // Every flag is a TEST_DISABLE_* name.
 // Setting a flag to 1 surgically removes one feature for
 // bisection builds - see build_test_variants.sh.
+//
+// Before bisecting with one of these, check that the name actually appears in an
+// #if somewhere under src/. About twenty of the flags left here are referenced
+// by nothing: their feature is gated by its launcher setting instead, or the
+// module was deleted and the flag outlived it. All of those read 0, so they at
+// least do not claim to be disabling something. Fifteen that read 1 and gated
+// nothing were removed in 3.18.2 - every one named a module that no longer
+// exists, and one of them (M2_BONE_MT) carried a HARD-DISABLED notice about a
+// use-after-free in code that had already been deleted. A flag that says 1 and
+// decides nothing is worse than no flag: it answers a bisection question
+// falsely.
 // ================================================================
 
 // ================================================================
@@ -417,27 +428,12 @@
 #define TEST_DISABLE_SAVED_VARS_ASYNC   0
 
 
-// Multithreaded Combat Log Parser - DISABLED.
-// The worker actually parses nothing: the queue (g_queueTail / entry->ready) is
-// never filled, so the worker thread just spins on a 1ms wait forever while the
-// hook on sub_74F910 only calls the original and does a per-dispatch VirtualQuery
-// (IsInRaid). It was gutted to stop a use-after-free (walking freed entries) and
-// left as pure overhead + an idle background thread. Disable it so the combat log
-// runs WoW's native path with no added cost (this is also what ran in raids).
-#define TEST_DISABLE_COMBATLOG_MT       1
-
-// Async Texture/Model Loading - offload texture loading to worker thread pool
-// Hook sub_619330 (texture loader), queue requests, load async with LRU cache
-// Worker thread pool (2 threads), lock-free queue (8192 entries), cache (2048 entries)
-#define TEST_DISABLE_TEXTURE_ASYNC      1
-
-// Async Spell Data Prefetching - DISABLED.
-// The worker never loads anything (PrefetchSpellData just memsets a zeroed
-// SpellData into the cache -- the real WoW loader call is an unfinished TODO),
-// so the "cache" holds only zeros nobody reads. Meanwhile every spell cast pays
-// an SRW-locked map lookup + a worker wakeup on the main thread, plus a 1ms-
-// spinning worker and up to ~2.7MB of useless cached zeros. Pure overhead.
-#define TEST_DISABLE_SPELL_PREFETCH     1
+// Async Texture Loading - worker thread pool, LRU cache, hot-swap on frame
+// boundaries. The gate is the AsyncTexLoader setting, not a flag here; the flag
+// that used to sit at this spot said 1 and was referenced by nothing, so it read
+// as a hard disable while the module was fully compiled in. Its real gate was
+// also broken until 3.18.2 (launcher wrote the key to Graphics_Sound, the DLL
+// read it from UI_Lua), which is the actual reason this has never run anywhere.
 
 // Multithreaded Addon Update Dispatcher - parallelize addon OnUpdate callbacks
 // Reduces main thread CPU by 40-50% in addon-heavy setups
@@ -445,37 +441,17 @@
 // Lock-free queue (8192 entries), batch processing per frame
 #define TEST_DISABLE_ADDON_DISPATCHER   0
 
-// Async Model/M2 Loading - offload model loading to worker thread pool
-// Hook sub_81C390 (model loader), queue requests, load async with LRU cache
-// Worker thread pool (2 threads), lock-free queue (4096 entries), cache (1024 entries)
-// Uses synchronous caching mode (no worker threads) to avoid crashes
-// Provides cache speedup on repeated model loads without async complexity
-#define TEST_DISABLE_MODEL_ASYNC        1
-
 // Predictive MPQ Prefetching - predict next zone and prefetch MPQ files
 // Tracks zone transitions, predicts next zone, prefetches common files
 // Worker thread pool (2 threads), lock-free queue (2048 entries)
 // Loads files into OS cache before zone transition occurs
 #define TEST_DISABLE_MPQ_PREFETCH       0
 
-// Async Sound/Audio Prefetching - DISABLED.
-// Placeholder: the worker loads nothing (TODOs only), so it just spins 2 idle
-// threads. No prefetch ever happens. Pure thread/VA overhead.
-#define TEST_DISABLE_SOUND_PREFETCH     1
-
-// Async Quest/Achievement Data Loading - DISABLED.
-// Placeholder: the worker's request handlers only bump stats (the WoW quest/
-// achievement calls are unfinished TODOs), so it never populates any cache.
-// One idle spinning thread for nothing.
-#define TEST_DISABLE_QUEST_ASYNC        1
-
 // Dormant pure-compute worker pools. Each spins idle worker threads (Sleep(1)/
 // event-wait) but NOTHING ever submits work to them (no external caller feeds the
-// decode/inflate/bone queues). On a 32-bit VA-constrained client each thread also
-// reserves ~1MB of stack address space. Disabled until a real producer wires them.
+// decode queue). On a 32-bit VA-constrained client each thread also reserves
+// ~1MB of stack address space. Disabled until a real producer wires them.
 #define TEST_DISABLE_TEXTURE_DECODE_MT  0   // 2 workers, BLP decode path wired and hot-swapped
-#define TEST_DISABLE_MPQ_DECOMPRESS_MT  1   // 3 workers, inflate path never wired
-#define TEST_DISABLE_ANIM_MT            1   // 2 workers, M2 bone path never wired
 
 // Heap Compactor - proactive VA defragmentation
 // Monitors LargestFreeBlock every 5 seconds, triggers HeapCompact when < 8MB
@@ -507,9 +483,6 @@
 
 // Lock-Free Addon SavedVariables Incremental Serializer
 #define TEST_DISABLE_SAVED_VARS_SERIALIZER 0
-
-// SIMD AVX2 Animated Model Vertex Skinning Accelerator
-#define TEST_DISABLE_SIMD_SKINNING      1
 
 // Parallel Network Packet Deserialization Offloader
 #define TEST_DISABLE_NET_PACKET_OFFLOAD 0
@@ -595,12 +568,10 @@
 // engine on a hit. See CONTEXT lessons 3, 4.
 #define TEST_DISABLE_LUAS_NEWLSTR_SSE2         0  // enabled: string interning lookup optimization
 #define TEST_DISABLE_LUA_GC_COALESCE           0  // enabled: incremental Lua GC coalescing
-#define TEST_DISABLE_FRAMEXML_COALESCE         1  // disabled: coalesced UI layout recalculation
 
 // ================================================================
 // 10 Extended Performance Optimization Features
 // ================================================================
-#define TEST_DISABLE_M2_SIMD_MT                 1
 #define TEST_DISABLE_GUID_MAP_LF                0
 #define TEST_DISABLE_SIMD_MATH_FAST             0
 #define TEST_DISABLE_COMBATLOG_INCREMENTAL      0
@@ -609,7 +580,6 @@
 #define TEST_DISABLE_DBC_LOOKUP_CACHE           0
 #define TEST_DISABLE_SAVEDVARS_ASYNC            0
 #define TEST_DISABLE_WORLD_STATE_COALESCE       1
-#define TEST_DISABLE_HW_SKINNING                1
 #define TEST_DISABLE_SOUND_MIXER_OPT           0  // enabled: sound mixer thread scheduling tuning
 #define TEST_DISABLE_FONT_METRICS_LOCK_FREE    0  // enabled: lock-free font metrics cache
 #define TEST_DISABLE_NET_PACKET_COALESCE       0  // enabled: coalesced network packet dispatch
@@ -622,18 +592,8 @@
 // removed in v3.16.3 for breaking server connections ("unable to connect"). The
 // opt-in large-allocation redirect (OptMimallocLarge) is the safe replacement.
 #define TEST_DISABLE_CRT_MIMALLOC               1  // disabled: CRT Allocator Redirect (connection breaker)
-// HARD-DISABLED: the multithreaded UpdateBones hook is broken by design — it
-// dispatches to a worker then immediately blocks waiting on it (no parallelism,
-// pure overhead), and on the 10ms wait timeout it frees the ring slot while the
-// worker is still running orig_UpdateBones on it (use-after-free), and runs
-// non-thread-safe M2 transform code on a worker thread (game-state race). Address
-// 0x0082F0F0 is correct, but the design provides no benefit and crashes. Needs a
-// full rewrite (in-place SSE bone math, no threads) before it can be re-enabled.
-#define TEST_DISABLE_M2_BONE_MT                 1  // disabled: broken multithreaded UpdateBones
 #define TEST_DISABLE_MPQ_ASYNC_DECOMPRESS       0  // enabled: Asynchronous MPQ File Decompressor
 #define TEST_DISABLE_RCU_OBJ_MGR                0  // enabled: Lock-Free Read-Copy-Update (RCU) Object Manager
-#define TEST_DISABLE_M2_LOD_BIAS                1  // disabled: M2 LOD Bias Control
-#define TEST_DISABLE_UNIT_AURA_COALESCE         1  // enabled: Unit Aura Coalescer
 #define TEST_DISABLE_D3D9_VB_CACHE              1  // disabled: D3D9 VB Shadow Cache
 #define TEST_DISABLE_ADDON_TICK_GOVERNOR        0  // enabled: Addon Tick Governor
 #define TEST_DISABLE_D3D9_VS_CONSTANT_CACHE     1  // disabled: D3D9 VS Constant Cache
