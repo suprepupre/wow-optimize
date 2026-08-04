@@ -449,7 +449,6 @@ static void StopFreezeWatchdog() {
 #include "addon_profiler.h"
 #include "lua_compile_census.h"
 #include "shadow_state_probe.h"
-#include "shadow_buffer_alternate.h"
 #include "event_name_hash.h"
 #include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
@@ -7263,7 +7262,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Shadow State Probe ---");
     ShadowStateProbe::Init();
-    ShadowBufferAlternate::Init();
 
     Log("--- Event Name Hash Cache ---");
     bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();

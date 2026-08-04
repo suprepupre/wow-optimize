@@ -90,10 +90,21 @@ static constexpr DWORD REPORT_INTERVAL_MS = 120000;
 // own pcall, because a bare SetCVar on a client without scriptProfile raises,
 // and a raise from here reaches the player as an error box at the character
 // screen. It did, at every launch, until this was fixed.
+// Ask before telling. A bare SetCVar on a client without scriptProfile raises,
+// and although pcall keeps that away from the player, this project also hooks
+// the Lua error path - so every attempt still landed in the log as
+//
+//     [LuaError] Caught exception: Couldn't find CVar named 'scriptProfile'
+//
+// three times a session, which reads like something is broken. GetCVar returns
+// nil for a name that does not exist instead of raising, so the check costs
+// nothing and the error never happens.
 static const char* kEnableChunk =
     "WOWOPT_PROF_STATE='missing' "
+    "local ok,v = pcall(GetCVar,'scriptProfile') "
+    "if ok and v ~= nil then "
     "if pcall(function() SetCVar('scriptProfile','1') end) then "
-    "WOWOPT_PROF_STATE='on' end";
+    "WOWOPT_PROF_STATE='on' end end";
 
 // Builds the whole report inside Lua and leaves it in one global, so the only
 // thing crossing back into C is a single string.
@@ -212,7 +223,10 @@ void OnFrame(bool luaBusy) {
         // Give the UI a moment to exist before asking it for anything.
         if (now - g_lastReport < 15000) return;
         g_lastReport = now;
-        if (++g_enableTries > 3) {
+        // One attempt. The answer cannot change between tries - either this
+        // client has the CVar or it does not - and retrying only produced three
+        // identical log lines before giving up.
+        if (++g_enableTries > 1) {
             Log("[AddonProfiler] This client has no scriptProfile CVar, so there is "
                 "nothing to account for - stopping. Nothing further will be logged "
                 "and no time is spent.");

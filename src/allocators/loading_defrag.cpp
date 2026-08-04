@@ -84,28 +84,47 @@ static DWORD WINAPI DefragWorkerThread(LPVOID) {
             // Step 1: Pre-warm mimalloc caches for the new zone
             PerformSpeculativePrecommit();
             
-            // Step 2: Aggressively defragment memory while loading is active
-            Log("[LoadingDefrag] Defragmenter loop active (loading screen phase)");
-            int compactionCount = 0;
-            
-            while (g_loadingActive.load(std::memory_order_acquire) && 
-                   !g_shutdown.load(std::memory_order_relaxed)) 
+            // Step 2: wait for the loading screen to end. Nothing else.
+            //
+            // This used to call mi_collect(true) once a second for the whole
+            // duration of the load, and that is the worst possible time for it.
+            // A forced collect walks every heap, hands pages back to the OS and
+            // takes mimalloc's locks - while the main thread is allocating as
+            // hard as it ever does, because it is building a zone.
+            //
+            // A tester measured what that costs. Same machine, same session
+            // shape, the only difference being this switch:
+            //
+            //   DefragLf=1   184 MB loaded in 10171 ms  =  18 MB/s
+            //   DefragLf=0   113 MB loaded in  1222 ms  =  94 MB/s
+            //
+            // and ReadFile accounted for 107 ms of that 10171, so none of it was
+            // disk. A module named after making loading screens better was making
+            // them five times slower.
+            //
+            // The lesson was already written three lines further down, where
+            // HeapCompact is disabled for stalling the main thread. It just was
+            // not carried back up to the loop.
+            //
+            // The collect below still happens, once, after the screen ends -
+            // which is when the zone's transient allocations are actually free to
+            // return and nothing is contending for the allocator.
+            Log("[LoadingDefrag] Waiting out the loading screen (no collection "
+                "while the client is allocating)");
+
+            while (g_loadingActive.load(std::memory_order_acquire) &&
+                   !g_shutdown.load(std::memory_order_relaxed))
             {
-                Sleep(1000); // Check every 1000ms (was 200ms) to reduce CPU/lock overhead
-                
-                // Trigger page release and compaction inside mimalloc
-                mi_collect(true);
-                
-                compactionCount++;
+                Sleep(200);
             }
-            
-            // Step 3: Final sweep when loading screen finishes
+
+            // Step 3: single sweep once the loading screen has finished.
             mi_collect(true);
-            
+
             // Disabled: HeapCompact on GetProcessHeap() locks the default process heap
             // and stalls the main thread for several seconds after loading completes.
-            
-            Log("[LoadingDefrag] Defragmenter loop finished (compactions run: %d)", compactionCount);
+
+            Log("[LoadingDefrag] Loading finished - one collection run");
         }
     }
     
