@@ -661,17 +661,10 @@ static volatile LONG g_priorityWatchdogRestores = 0;
 
 extern "C" void Log(const char* fmt, ...);
 
-// ================================================================
-// Timing Method Fix - Console override only (hook removed for safety)
-// ================================================================
-#if !TEST_DISABLE_TIMING_FIX
-static bool InstallTimingFix() {
-    Log("[TimingFix] Hook skipped. Using console override only (safe for HD builds).");
-    return true;
-}
-#else
-static bool InstallTimingFix() { return false; }
-#endif
+// The "Timing Method Fix" installer used to live here. It hooked nothing: the
+// body was one line logging "Hook skipped. Using console override only", and no
+// console override existed anywhere either. Removed along with its call, which
+// ran unconditionally and had nothing to do with the TimingFix setting.
 
 // ================================================================
 // Hardware Cursor & Raw Input - bypass engine cursor centering
@@ -7071,6 +7064,16 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool mbwcOk = Config::g_settings.OptStrStrSse2 && InstallMBWCHooks();
     Log("--- CRT Memory Fast Paths ---");
     bool crtOk = InstallCrtMemFastPaths();
+    // The TimingFix setting. The name is historical and the launcher now calls it
+    // what it is: these eight are Win32 lookup caches, not timing. The three
+    // hooks the old name described - GetTickCount, timeGetTime and the QPC
+    // coalescing cache - are compiled out above (CRASH_TEST_DISABLE_TICK_COUNT,
+    // CRASH_TEST_DISABLE_QPC_CACHE) and the setting has not reached them in any
+    // shipped build. Say so, so a log makes the split obvious.
+    Log("--- Windows API Caches (setting: TimingFix) ---");
+    Log("[ApiCaches] %s. Timer redirection and QPC coalescing are compiled out "
+        "and this switch does not reach them.",
+        Config::g_settings.OptTimingFix ? "ENABLED" : "disabled");
     bool sysInfoOk = Config::g_settings.OptTimingFix && InstallSysInfoCache();
     bool regCacheOk = Config::g_settings.OptTimingFix && InstallRegCache();
 #if !TEST_DISABLE_SYSTEM_METRICS_CACHE
@@ -7837,8 +7840,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool apiCacheOk = Config::g_settings.OptApiCache && ApiCache::Init();
 #endif
 
-    Log("--- Timing Method Fix ---");
-    InstallTimingFix();
 
     bool fastPathOk = false;
     Log("");

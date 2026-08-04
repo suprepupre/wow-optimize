@@ -39,9 +39,10 @@ The current public build is focused on real frametime stability, long-session sm
 Mostly the same story as 3.18.1, told again: most of what is below is something
 this project was already shipping that turned out not to be doing what its own
 description said. Thanks to **Doc.James**, [txtsd](https://github.com/txtsd),
-**prince**, **Sicsoo**, **Signalborn Soulweaver** and **Morbent** — every fixed
-item here came out of a log somebody sent in, or out of checking a claim this
-repo was making about itself.
+**prince**, **kojekude**, **nobus**, [biship](https://github.com/suprepupre/wow-optimize/issues/50),
+**Sicsoo**, **Signalborn Soulweaver** and **Morbent** — every fixed item here
+came out of a log somebody sent in, or out of checking a claim this repo was
+making about itself.
 
 **The loading screen fix**
 
@@ -89,8 +90,64 @@ double and narrows only when it stores a float. Anything written in packed singl
 disagrees with it on most inputs. Rewritten in packed double with the original's
 summation order preserved, all four are bit-identical.
 
+**Boss voice lines going missing in raids**
+
+Reported by **kojekude**: no boss voice before or during fights, every other sound
+working normally. The Sound Coalescer did it, and it should never have shipped in
+that shape.
+
+It dropped a sound whose id matched the previous one within 16 ms, keeping a
+single global "last id". Three things are wrong with that, all of them visible in
+the target's own disassembly:
+
+- `sub_4C6A40` is `PlaySoundKit` out of `SoundInterface2.cpp`. Its return value
+  is an **error code** — `0` means the sound started. Coalescing returned `0` for
+  a sound that never reached the mixer, so nothing upstream could notice.
+- The engine already suppresses duplicate plays, using information we don't have:
+  sounds flagged `0x20` are registered in a list when they start, and replaying
+  one that is still in it returns `15`. Everything else is *meant* to overlap. We
+  applied one blanket rule to all of them.
+- `GetTickCount` moves in ~15.6 ms steps, so "less than 16 ms apart" was really
+  "zero or one ticks apart" — anywhere between an instant and a frame, depending
+  on where the plays fell against a timer we don't control.
+
+Removed rather than repaired. The engine's own rule is better than one
+reconstructed from outside it, and it was already running underneath ours.
+
+**Two diagnostics that cried wolf**
+
+- **Every log opened with `!!! DISCONNECT !!!`.** Logging in uses two
+  connections — the client talks to the logon server, gets its realm list, and
+  closes that socket to go and talk to the world server. That close was reported
+  as a disconnect on every launch on every machine. One tester's log shows the
+  banner at 19:44:31 followed by 593,038 receives over the next twenty-four
+  minutes. Worse, the report fires once per session, so the login socket used it
+  up and a real mid-raid drop later had nothing left to say. The counters now
+  follow whichever socket is actually carrying traffic, only that socket can
+  report, and a clean client-side close has to have been a real session before it
+  earns a banner.
+- **A 179-second "stutter".** Nothing stalled for three minutes; the window was
+  alt-tabbed, so `Present` was not called and the gap between two of them was
+  measured as one frame. Each of those burned one of the twelve full snapshots
+  this build is allowed to write, on an idle process. Gaps over thirty seconds
+  are now counted separately and named for what they are.
+
 **Things that were not doing their job**
 
+- **"High-Precision Timing Fix" was neither.** Reported by
+  [biship](https://github.com/suprepupre/wow-optimize/issues/50), who read the
+  code and was right about all of it. One checkbox gated twelve unrelated
+  installs, its description promised timer work it did not do, and the three
+  hooks it named — `GetTickCount`, `timeGetTime` and the QPC coalescing cache —
+  are compiled out of the build entirely, after they were found to cause random
+  stutters under DXVK. What actually sat behind the switch was eight Windows API
+  lookup caches. So a player chasing a timing bug turned off eight caches
+  instead, and a player wanting smoothness turned eight caches on. It is now
+  called **Windows API Caches**, the description says what it gates, and the log
+  states plainly that the timer hooks are compiled out and this switch does not
+  reach them. Also gone: an `InstallTimingFix()` whose entire body logged
+  "Hook skipped. Using console override only" — there was no console override
+  either, and it was called unconditionally, ignoring the setting.
 - **Two launcher switches did nothing.** Asynchronous Texture Loader and Mipmap
   Bias Governor were written to one section of `wow_opt.ini` and read from
   another, so no setting of either ever reached the DLL. Both now work, both are
@@ -251,6 +308,15 @@ Every measured item in these notes came out of a log somebody sent in.
 - **Signalborn Soulweaver**, **Morbent**, **Sicsoo** — early 3.18 logs.
 - **Doc.James** — the zone-change stall, with three sessions that made it
   reproducible.
+- **kojekude** — boss voice lines going missing in raids and dungeons while every
+  other sound kept working, which turned out to be the sound coalescer returning
+  "played fine" for sounds it had dropped.
+- **nobus** — three sessions with warrior stance-swap crashes, carrying a second
+  independent reproduction of a null-callback crash in the client's device
+  callback list.
+- **[biship](https://github.com/suprepupre/wow-optimize/issues/50)** — read the
+  timing switch's code and reported that it gated twelve unrelated things and
+  described none of them.
 
 </details>
 
