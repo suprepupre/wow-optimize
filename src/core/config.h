@@ -55,6 +55,17 @@ namespace Config {
         bool OptLuaOpcacheStrings = true;   // string, buffer and pattern paths
         bool OptLuaOpcacheWrites  = true;   // setters and object creation
         bool OptLuaOpcacheReads   = true;   // accessors, arg checks, debug
+
+        // Four batches of hooks into WoW.exe that were installed unconditionally,
+        // ignoring every switch in the launcher. With all switches off a log
+        // still showed "[SUBSYSTEM] 98/100" and "[EXTENDED] 34/40", so "Disable
+        // All (vanilla)" left about 150 detours in the client. They default ON
+        // because they have always been running for everyone; turning them off
+        // is now what makes the vanilla button honest.
+        bool OptWowOptHooks       = true;   // 20 hooks
+        bool OptWowPerfHooks      = true;   // 20 hooks
+        bool OptWowExtendedHooks  = true;   // 40 features
+        bool OptWowSubsystemHooks = true;   // 100 features
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.

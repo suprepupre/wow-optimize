@@ -4,12 +4,15 @@
 > result is a permanent ban on your account.
 
 > [!CAUTION]
-> **WoW Circle disconnects you for having this loaded.** A tester gets kicked
-> roughly every thirty minutes, reliably, and it still happens with every switch
-> in the launcher turned off — so it is the injected DLL being detected, not
-> anything a setting controls. There is no configuration that avoids this and I
-> am not going to add one; working around a server's anti-cheat is not what this
-> project is for.
+> **WoW Circle appears to disconnect you for having this loaded.** A tester gets
+> kicked roughly every thirty minutes, reliably, including with every switch in
+> the launcher turned off. Note that until 3.18.2 "every switch off" still left
+> about 150 hooks in the client (see the release notes below), so that test did
+> not mean what it looked like. It is worth re-running on 3.18.2 with the four
+> **WoW.exe Hooks** groups turned off, which is the first build where the vanilla
+> button is honest. If the kicks continue there, the DLL itself is being
+> detected, and I am not going to add a workaround — evading a server's
+> anti-cheat is not what this project is for.
 
 # wow_optimize
 
@@ -171,6 +174,32 @@ anyone will have seen what is in one.
   measured as one frame. Each of those burned one of the twelve full snapshots
   this build is allowed to write, on an idle process. Gaps over thirty seconds
   are now counted separately and named for what they are.
+
+**"Disable All (vanilla)" did not mean vanilla**
+
+Found by being asked the obvious question about the WoW Circle kicks: *are you
+sure nothing is still running with everything switched off?* No, as it turns out.
+
+A tester's log with **every** boolean setting reading 0 still contained:
+
+```
+[EXTENDED]  34/40  EXTENDED performance features installed
+[SUBSYSTEM] 98/100 SUBSYSTEM performance features installed
+--- WoW.exe Optimization Hooks (20 hooks) ---
+--- WoW.exe Performance Hooks (20 hooks) ---
+```
+
+Four batches — 20, 20, 40 and 100 hooks into WoW's own code — were installed
+unconditionally. Not one of those four source files contains a single reference
+to any setting. So "Disable All (vanilla)" left roughly 150 detours in the
+client, and every report of the form "I turned everything off and it still
+happens" was measuring something other than what the person thought.
+
+All four now have a switch. They **default on**, because they have been running
+for everyone since they were written and silently removing them on upgrade is
+the mistake 3.18.1 already made once. Turning them off is what makes the vanilla
+button honest, and they are the first thing to try when you are working out
+whether this DLL is behind a problem at all.
 
 **The Lua suite can now be bisected**
 

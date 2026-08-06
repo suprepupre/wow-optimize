@@ -7896,16 +7896,16 @@ static DWORD WINAPI MainThread(LPVOID param) {
     if (Config::g_settings.OptDbcLookupCache) HotPatch::InstallAll();
 
     Log("--- WoW.exe Optimization Hooks (20 hooks) ---");
-    bool wowOptOk = WowOptHooks::InstallAll();
+    bool wowOptOk = Config::g_settings.OptWowOptHooks && WowOptHooks::InstallAll();
 
     Log("--- WoW.exe Performance Hooks (20 hooks) ---");
-    bool wowPerfOk = WowPerfHooks::InstallAll();
+    bool wowPerfOk = Config::g_settings.OptWowPerfHooks && WowPerfHooks::InstallAll();
 
     Log("--- WoW.exe Extended Hooks (40 features) ---");
-    bool wowExtendedOk = WowExtendedHooks::InstallAll();
+    bool wowExtendedOk = Config::g_settings.OptWowExtendedHooks && WowExtendedHooks::InstallAll();
 
     Log("--- WoW.exe Subsystem Hooks (100 features) ---");
-    bool wowSubsystemOk = WowSubsystemHooks::InstallAll();
+    bool wowSubsystemOk = Config::g_settings.OptWowSubsystemHooks && WowSubsystemHooks::InstallAll();
 
     Log("--- Memory Optimizations: LAA + Async + MemOpt ---");
     bool memoryOptLAA = WowMemoryOpt::EnableLargeAddressAware();
