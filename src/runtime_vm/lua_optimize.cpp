@@ -5,6 +5,11 @@
 // ============================================================================
 
 #include "lua_optimize.h"
+// config.h is deliberately NOT included here: this file declares a file-scope
+// object called Config, and a variable cannot share a name with a namespace in
+// the same scope. These two accessors are defined in config.cpp instead.
+extern "C" bool WowOpt_LuaVmOptEnabled();
+extern "C" bool WowOpt_LuaGcManualEnabled();
 #include "diagnostics/crash_dumper.h"
 #include "../allocators/loading_defrag.h"
 #include "combatlog_optimize.h"
@@ -621,7 +626,7 @@ static bool OptimizeGC(lua_State* L) {
             State.origGCPause, Config.gcPause,
             State.origGCStepMul, Config.gcStepMul);
 
-        if (Config.manualGCMode) {
+        if (Config.manualGCMode && WowOpt_LuaGcManualEnabled()) {
             Api.lua_gc(L, LUA_GCSTOP, 0);
             Log("[LuaOpt] Auto GC stopped - manual stepping active");
         }
@@ -1741,7 +1746,14 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
 
     if (state == 1) {
         if (InterlockedCompareExchange(&g_luaInitState, 2, 1) == 1) {
-            DoMainThreadInit();
+            // Took no setting until 3.18.2, so a client with every switch
+            // off still had its Lua allocator replaced, its string table
+            // resized and its automatic GC stopped.
+            if (WowOpt_LuaVmOptEnabled()) {
+                DoMainThreadInit();
+            } else {
+                Log("[LuaOpt] disabled via configuration - the VM keeps its own allocator, GC and string table");
+            }
         }
         return;
     }

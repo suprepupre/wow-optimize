@@ -74,6 +74,13 @@ namespace Config {
         bool OptAsyncMpqIo        = true;   // spawns a background I/O worker thread
         bool OptThreadIdCache     = true;   // hooks GetCurrentThreadId
         bool OptPriorityGuard     = true;   // hooks SetPriorityClass to block downgrades
+
+        // The Lua VM optimizer: it replaces the VM's allocator with mimalloc,
+        // pre-sizes the string table and retunes the collector, and it did all
+        // of that with every switch off. Split in two because stopping the
+        // automatic collector is the part worth isolating on its own.
+        bool OptLuaVmOpt          = true;
+        bool OptLuaGcManual       = true;
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.
