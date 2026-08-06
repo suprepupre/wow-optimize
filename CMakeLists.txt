@@ -318,10 +318,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/wow_subsystem_hooks.h
     src/hooks_subsystems/wow_memory_opt.cpp
     src/hooks_subsystems/wow_memory_opt.h
-    src/hooks_subsystems/wow_source_opt.cpp
-    src/hooks_subsystems/wow_source_opt.h
-    src/hooks_subsystems/tls_object_cache.cpp
-    src/hooks_subsystems/tls_object_cache.h
     src/hooks_subsystems/hooks_render.cpp
     src/hooks_subsystems/hooks_render.h
     src/simd_math/horizon_occlusion_sse2.cpp

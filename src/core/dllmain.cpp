@@ -502,8 +502,6 @@ void ClearCombatLogCache();
 #include "lua_addlstring_fast.h"
 #include "wow_subsystem_hooks.h"
 #include "wow_memory_opt.h"
-#include "wow_source_opt.h"
-#include "tls_object_cache.h"
 #include "sound_mixer_opt.h"
 #include "lua_gc_governor.h"
 #include "async_tex_loader.h"
@@ -6826,7 +6824,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CrashDumper::RegisterFeature("HotPatch");
     CrashDumper::RegisterFeature("MemoryOpt");
     CrashDumper::RegisterFeature("SourceOpt");
-    CrashDumper::RegisterFeature("TlsObjectCache");
     Log("[CrashDumper] Registered %d features for tracking (capacity %d)",
         CrashDumper::RegisteredFeatureCount(), MAX_TRACKED_FEATURES);
 
@@ -7925,12 +7922,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool memoryOptAsync = false; // WowMemoryOpt::InitAsyncWorkerPool();
     Log("[MemOpt] Async worker pool DISABLED: unsynchronized writes to WoW game state");
     bool memoryOptMem = WowMemoryOpt::ApplyMemoryOptimizations();
-
-    Log("--- Source-Level Optimizations ---");
-    bool sourceOptOk = WowSourceOpt::InstallAll();
-
-    Log("--- TLS Object Cache ---");
-    bool tlsObjCacheOk = TlsObjectCache::Install();
 
     Log("");
     Log("--- DXVK/Vulkan Translation Layer Detection ---");
