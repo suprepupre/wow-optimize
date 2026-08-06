@@ -231,8 +231,9 @@ bool InitAddonPreload() {
     // This cache is only reachable through the CreateFile and CloseHandle hooks:
     // CreateFile is what maps an opened handle onto a cached file, CloseHandle is
     // what releases that mapping. Both are installed together, and only when
-    // DbcLookupCache or SavedVarsPretoken is on - two switches that have nothing
-    // to do with addons and both default to off.
+    // DbcLookupCache is on - a switch that has nothing to do with addons and
+    // defaults to off. (SavedVarsPretoken used to enable them too, until it
+    // turned out to be a stub whose whole implementation was `return false`.)
     //
     // Without them nothing is ever tracked, so every read misses and the only
     // effect of this feature is reading several thousand files at startup and
@@ -241,8 +242,8 @@ bool InitAddonPreload() {
     // feature that costs a lot to do nothing.
     if (!AddonPreload_FileHooksInstalled()) {
         Log("[AddonPreload] Not started: the CreateFile/CloseHandle hooks it serves "
-            "through are not installed (they need DbcLookupCache or "
-            "SavedVarsPretoken enabled). Nothing would be served from the cache.");
+            "through are not installed (they need DbcLookupCache enabled). "
+            "Nothing would be served from the cache.");
         return true;
     }
 
