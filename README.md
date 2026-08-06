@@ -3,6 +3,14 @@
 > memory optimization tools as illegal software regardless of intent, and the
 > result is a permanent ban on your account.
 
+> [!CAUTION]
+> **WoW Circle disconnects you for having this loaded.** A tester gets kicked
+> roughly every thirty minutes, reliably, and it still happens with every switch
+> in the launcher turned off — so it is the injected DLL being detected, not
+> anything a setting controls. There is no configuration that avoids this and I
+> am not going to add one; working around a server's anti-cheat is not what this
+> project is for.
+
 # wow_optimize
 
 Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)
@@ -163,6 +171,34 @@ anyone will have seen what is in one.
   measured as one frame. Each of those burned one of the twelve full snapshots
   this build is allowed to write, on an idle process. Gaps over thirty seconds
   are now counted separately and named for what they are.
+
+**The Lua suite can now be bisected**
+
+**nobus** reported that the Lua C-API Inline Cache Suite corrupts ElvUI: addon
+names come out wrong in the addon list, the options panel reports itself
+missing, and a `/reload` drops you to the default Blizzard UI. Neither of us
+could narrow it, because that one checkbox gated **fifty-five separate hooks**.
+That is the same fault as #50, several times over.
+
+It is now four groups, all on by default so the master switch behaves exactly as
+it did:
+
+- **Table & index caches** — the global, table, index and `luaH_getstr` caches
+  and the VM table indexing path. First to suspect: these are the hooks that can
+  return a value for the wrong key, which is what a wrong addon name is.
+- **String & buffer paths** — `pushstring`, `pushfstring`, the buffer helpers,
+  `tolstring`, `loadstring`, the pattern cache.
+- **Setters & object creation** — everything that writes into Lua state.
+- **Accessors, arg checks & debug** — mostly read-only, least likely.
+
+Turn the suite on, then turn one group off at a time. Two sessions should find
+it. The suite stays off by default.
+
+While looking for the cause I checked the string interning fast path against the
+client's own `luaS_newlstr` instruction by instruction — bucket index, length
+test, content compare, and the dead-string resurrect — and it is faithful,
+including the `marked ^= 3` on an other-white hit. So that one is not the
+culprit, which is worth writing down so nobody re-checks it.
 
 **Things that were not doing their job**
 

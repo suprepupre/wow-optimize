@@ -46,6 +46,15 @@ namespace Config {
         // default: on a healthy client it is one read-only pointer walk per
         // device teardown and changes nothing.
         bool OptDeviceCbGuard = true;
+
+        // LuaOpcache gated fifty-five separate installs on its own, so a report
+        // that it corrupts an addon could not be narrowed by anyone. These four
+        // subdivide it and all default on, so LuaOpcache=1 behaves exactly as
+        // before; turning one off removes only its group.
+        bool OptLuaOpcacheTables  = true;   // table, index and global caches
+        bool OptLuaOpcacheStrings = true;   // string, buffer and pattern paths
+        bool OptLuaOpcacheWrites  = true;   // setters and object creation
+        bool OptLuaOpcacheReads   = true;   // accessors, arg checks, debug
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.

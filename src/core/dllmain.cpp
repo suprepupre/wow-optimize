@@ -6984,7 +6984,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool ioCacheOk = Config::g_settings.OptDbcLookupCache && InstallIOCache();
 
     // Lua Global Lookup Cache
-    bool luaGlobalCacheOk = Config::g_settings.OptLuaOpcache && InstallLuaGlobalCache();
+    bool luaGlobalCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaGlobalCache();
 
     // memset hook - 1108 callers
     bool hotFuncOk = Config::g_settings.OptFastMemsetOpt && InstallHotFunctionOptimizations();
@@ -7096,11 +7096,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     }
 
     Log("--- Lua Table Rehash ---");
-    bool tableReshapeOk = Config::g_settings.OptLuaOpcache && InstallLuaHResizeHook();
+    bool tableReshapeOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaHResizeHook();
     bool assetPathOk = false; // Disabled - breaks logout/teardown
 
     Log("--- Lua Table Lookup ---");
-    bool luaHGetStrOk = Config::g_settings.OptLuaOpcache && InstallLuaHGetStrCache();
+    bool luaHGetStrOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaHGetStrCache();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST
@@ -7234,10 +7234,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #endif
 
     Log("--- Lua SetTable Cache ---");
-    bool setTableCacheOk = Config::g_settings.OptLuaOpcache && InstallLuaSetTableCache();
+    bool setTableCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaSetTableCache();
 
     Log("--- Regex Pattern Cache ---");
-    bool regexCacheOk = Config::g_settings.OptLuaOpcache && InstallRegexCache();
+    bool regexCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallRegexCache();
 
     Log("--- SSE2 strncmp ---");
     StrncmpSse2::Init();
@@ -7281,12 +7281,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool getStrInlineOk = false;
     Log("[GetStrInline] DISABLED (addon nil-field corruption: WeakAuras aura_env via __index)");
 #else
-    bool getStrInlineOk = Config::g_settings.OptLuaOpcache && InstallLuaGetStrInline();
+    bool getStrInlineOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaGetStrInline();
 #endif
 
     Log("--- lua_toboolean Inline Optimization ---");
 #if !TEST_DISABLE_TOBOOLEAN_INLINE
-    bool tobooleanOk = Config::g_settings.OptLuaOpcache && InstallLuaTobooleanInline();
+    bool tobooleanOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaTobooleanInline();
 #else
     bool tobooleanOk = false;
     Log("[LuaTBool] DISABLED via TEST_DISABLE_TOBOOLEAN_INLINE");
@@ -7296,35 +7296,35 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- lua_objlen Inline Optimization ---");
 #if !TEST_DISABLE_OBJLEN_INLINE
-    bool objlenOk = Config::g_settings.OptLuaOpcache && InstallLuaObjLenInline();
+    bool objlenOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaObjLenInline();
 #else
     bool objlenOk = false;
     Log("[LuaObjLen] DISABLED via TEST_DISABLE_OBJLEN_INLINE");
 #endif
 
     Log("--- luaH_getn Table Length Optimization ---");
-    bool getnOk = Config::g_settings.OptLuaOpcache && InstallLuaGetnFast();
+    bool getnOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaGetnFast();
 
     Log("--- luaD_precall Dispatch Cache ---");
 #if !TEST_DISABLE_LUA_INLINE_BATCH
     // --- DG1: allocation / complex ---
 #if !TEST_DISABLE_LUA_BATCH_DG1
-    bool precallCacheOk = Config::g_settings.OptLuaOpcache && InstallLuaPrecallCache();
-    bool tableFastOk = Config::g_settings.OptLuaOpcache && InstallLuaTableFast();
-    bool hgetFastOk = Config::g_settings.OptLuaOpcache && InstallLuaHgetFast();
-    bool pushCClosureFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPushCClosureFast();
-    bool createTableFastOk = Config::g_settings.OptLuaOpcache && InstallLuaCreateTableFast();
+    bool precallCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaPrecallCache();
+    bool tableFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaTableFast();
+    bool hgetFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaHgetFast();
+    bool pushCClosureFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaPushCClosureFast();
+    bool createTableFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaCreateTableFast();
 #else
     bool precallCacheOk = false, tableFastOk = false, hgetFastOk = false;
     bool pushCClosureFastOk = false, createTableFastOk = false;
 #endif
     // --- DG2: table writes ---
 #if !TEST_DISABLE_LUA_BATCH_DG2
-    bool pushStringFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPushStringFast();
-    bool rawSetFastOk = Config::g_settings.OptLuaOpcache && InstallLuaRawSetFast();
-    bool rawSetIFastOk = Config::g_settings.OptLuaOpcache && InstallLuaRawSetIFast();
-    bool setTableFastOk = Config::g_settings.OptLuaOpcache && InstallLuaSetTableFast();
-    bool setFieldFastOk = Config::g_settings.OptLuaOpcache && InstallLuaSetFieldFast();
+    bool pushStringFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaPushStringFast();
+    bool rawSetFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaRawSetFast();
+    bool rawSetIFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaRawSetIFast();
+    bool setTableFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaSetTableFast();
+    bool setFieldFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaSetFieldFast();
 #else
     bool pushStringFastOk = false, rawSetFastOk = false, rawSetIFastOk = false;
     bool setTableFastOk = false, setFieldFastOk = false;
@@ -7333,10 +7333,10 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #if !TEST_DISABLE_LUA_BATCH_DG3
     // Disable table.concat fast path completely due to 0xC0000005 crashes
     bool concatFastOk = false;
-    bool luaRegisterFastOk = Config::g_settings.OptLuaOpcache && InstallLuaRegisterFast();
-    bool luaRefFastOk = Config::g_settings.OptLuaOpcache && InstallLuaRefFast();
-    bool luaUnrefFastOk = Config::g_settings.OptLuaOpcache && InstallLuaUnrefFast();
-    bool luaCallMetaFastOk = Config::g_settings.OptLuaOpcache && InstallLuaCallMetaFast();
+    bool luaRegisterFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaRegisterFast();
+    bool luaRefFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaRefFast();
+    bool luaUnrefFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaUnrefFast();
+    bool luaCallMetaFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheWrites && InstallLuaCallMetaFast();
 #else
     bool concatFastOk = false, luaRegisterFastOk = false, luaRefFastOk = false;
     bool luaUnrefFastOk = false, luaCallMetaFastOk = false;
@@ -7344,18 +7344,18 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // --- DG4: misc / yield / load ---
 #if !TEST_DISABLE_LUA_BATCH_DG4
 #if !TEST_DISABLE_LUA_BATCH_DG4A
-    bool pushResultFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPushresultFast();
-    bool addLStringFastOk = Config::g_settings.OptLuaOpcache && InstallLuaAddlstringFast();
-    bool pushfstrFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPushfstringFast();
-    bool getTableFastOk = Config::g_settings.OptLuaOpcache && InstallLuaGetTableFast();
+    bool pushResultFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaPushresultFast();
+    bool addLStringFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaAddlstringFast();
+    bool pushfstrFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaPushfstringFast();
+    bool getTableFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaGetTableFast();
 #else
     bool pushResultFastOk = false, addLStringFastOk = false;
     bool pushfstrFastOk = false, getTableFastOk = false;
 #endif
 #if !TEST_DISABLE_LUA_BATCH_DG4B
-    bool loadstrFastOk = Config::g_settings.OptLuaOpcache && InstallLuaLoadStringFast();
-    bool yieldFastOk = Config::g_settings.OptLuaOpcache && InstallLuaYieldFast();
-    bool pushThreadFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPushThreadFast();
+    bool loadstrFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaLoadStringFast();
+    bool yieldFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaYieldFast();
+    bool pushThreadFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaPushThreadFast();
 #else
     bool loadstrFastOk = false, yieldFastOk = false, pushThreadFastOk = false;
 #endif
@@ -7378,13 +7378,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     // --- Safe group 1: string/number validation ---
 #if !TEST_DISABLE_LUA_SAFE_G1
-    bool checknumOk = Config::g_settings.OptLuaOpcache && InstallLuaCheckNumberFast();
-    bool checkstrOk = Config::g_settings.OptLuaOpcache && InstallLuaCheckStringFast();
-    bool optnumOk = Config::g_settings.OptLuaOpcache && InstallLuaOptnumberFast();
-    bool optstrOk = Config::g_settings.OptLuaOpcache && InstallLuaOptstringFast();
-    bool tolstrOk = Config::g_settings.OptLuaOpcache && InstallLuaTolstringFast();
-    bool argchkOk = Config::g_settings.OptLuaOpcache && InstallLuaArgcheckFast();
-    bool tnameOk = Config::g_settings.OptLuaOpcache && InstallLuaTypeNameFast();
+    bool checknumOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaCheckNumberFast();
+    bool checkstrOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaCheckStringFast();
+    bool optnumOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaOptnumberFast();
+    bool optstrOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaOptstringFast();
+    bool tolstrOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaTolstringFast();
+    bool argchkOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaArgcheckFast();
+    bool tnameOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaTypeNameFast();
 #else
     bool checknumOk = false, checkstrOk = false, optnumOk = false, optstrOk = false;
     bool tolstrOk = false, argchkOk = false, tnameOk = false;
@@ -7394,18 +7394,18 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #if !TEST_DISABLE_LUA_SAFE_G2
 #if !TEST_DISABLE_LUA_SAFE_G2A
 #if !TEST_DISABLE_LUA_SAFE_G2AL
-    bool getlocalOk = Config::g_settings.OptLuaOpcache && InstallLuaGetLocalFast();
+    bool getlocalOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaGetLocalFast();
 #else
     bool getlocalOk = false;
 #endif
 #if !TEST_DISABLE_LUA_SETLOCAL_FAST
-    bool setlocalOk = Config::g_settings.OptLuaOpcache && InstallLuaSetLocalFast();
+    bool setlocalOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaSetLocalFast();
 #else
     bool setlocalOk = false;
     Log("[LuaInline] SetLocal DISABLED: confirmed ntdll heap corruption on login");
 #endif
 #if !TEST_DISABLE_LUA_SAFE_G2AI
-    bool getinfoOk = Config::g_settings.OptLuaOpcache && InstallLuaGetInfoFast();
+    bool getinfoOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaGetInfoFast();
 #else
     bool getinfoOk = false;
 #endif
@@ -7413,8 +7413,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool getlocalOk = false, setlocalOk = false, getinfoOk = false;
 #endif
 #if !TEST_DISABLE_LUA_SAFE_G2B
-    bool errorfastOk = Config::g_settings.OptLuaOpcache && InstallLuaErrorFast();
-    bool lessthanOk = Config::g_settings.OptLuaOpcache && InstallLuaLessThanFast();
+    bool errorfastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaErrorFast();
+    bool lessthanOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaLessThanFast();
 #else
     bool errorfastOk = false, lessthanOk = false;
 #endif
@@ -7432,15 +7432,15 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     // --- Safe group 3: metatable / type checks / buffers ---
 #if !TEST_DISABLE_LUA_SAFE_G3
-    bool metaFieldFastOk = Config::g_settings.OptLuaOpcache && InstallLuaGetMetaFieldFast();
-    bool whereFastOk = Config::g_settings.OptLuaOpcache && InstallLuaWhereFast();
-    bool luaCheckTypeFastOk = Config::g_settings.OptLuaOpcache && InstallLuaCheckTypeFast();
-    bool getUpvalueFastOk = Config::g_settings.OptLuaOpcache && InstallLuaGetUpvalueFast();
-    bool buffInitFastOk = Config::g_settings.OptLuaOpcache && InstallLuaBuffinitFast();
-    bool prepBufferFastOk = Config::g_settings.OptLuaOpcache && InstallLuaPrepbufferFast();
-    bool iscfuncFastOk = Config::g_settings.OptLuaOpcache && InstallLuaIsCFuncFast();
-    bool isnumFastOk = Config::g_settings.OptLuaOpcache && InstallLuaIsNumberFast();
-    bool raweqFastOk = Config::g_settings.OptLuaOpcache && InstallLuaRawEqualFast();
+    bool metaFieldFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaGetMetaFieldFast();
+    bool whereFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaWhereFast();
+    bool luaCheckTypeFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaCheckTypeFast();
+    bool getUpvalueFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaGetUpvalueFast();
+    bool buffInitFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaBuffinitFast();
+    bool prepBufferFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && InstallLuaPrepbufferFast();
+    bool iscfuncFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaIsCFuncFast();
+    bool isnumFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaIsNumberFast();
+    bool raweqFastOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheReads && InstallLuaRawEqualFast();
 #else
     bool metaFieldFastOk = false, whereFastOk = false, luaCheckTypeFastOk = false;
     bool getUpvalueFastOk = false, buffInitFastOk = false, prepBufferFastOk = false;
@@ -7541,7 +7541,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool tableConcatOk = false;
 
     Log("--- Lua RawGetI ---");
-    bool luaRawGetIOk = Config::g_settings.OptLuaOpcache && InstallLuaRawGetICache();
+    bool luaRawGetIOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaRawGetICache();
 
     Log("--- CombatLog Full Cache ---");
     bool combatLogFullCacheOk = Config::g_settings.OptCombatLogParser && InstallCombatLogFullCache();
@@ -7834,7 +7834,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("[FastPath] DISABLED (baseline test)");
 #else
     __try {
-        fastPathOk = Config::g_settings.OptLuaOpcache && LuaFastPath::Init();
+        fastPathOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && LuaFastPath::Init();
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log("[FastPath] EXCEPTION 0x%08X - SKIPPED", GetExceptionCode());
     }
@@ -7854,7 +7854,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // Lua bytecode cache (skips script parsing on reload & addon load)
 #if !TEST_DISABLE_LUA_BYTECODE_CACHE
     // LuaOpcache gates about fifty other installs but had never gated this one.
-    bool bytecodeOk = Config::g_settings.OptLuaOpcache && LuaBytecodeCache::Init();
+    bool bytecodeOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheStrings && LuaBytecodeCache::Init();
 #else
     bool bytecodeOk = false;
 #endif
@@ -7866,7 +7866,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     // Lua VM table lookup cache (luaV_gettable hook)
     Log("--- Lua VM Table Cache ---");
-    bool vmCacheOk = Config::g_settings.OptLuaOpcache && InstallLuaVMCache();
+    bool vmCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaVMCache();
 
     Log("--- luaV_gettable Cache ---");
     bool getTableCacheOk = false; // InstallLuaGetTableCache(); // DISABLED: completely broken cache that never invalidates on table mutations

@@ -57,6 +57,10 @@ static const BoolSetting kBoolSettings[] = {
     { "UI_Lua", "FrameScriptDispatch", &Settings::OptFrameScriptDispatch },
     { "UI_Lua", "LuaNumConvFast", &Settings::OptLuaNumConvFast },
     { "UI_Lua", "LuaOpcache", &Settings::OptLuaOpcache },
+    { "UI_Lua", "LuaOpcacheTables", &Settings::OptLuaOpcacheTables },
+    { "UI_Lua", "LuaOpcacheStrings", &Settings::OptLuaOpcacheStrings },
+    { "UI_Lua", "LuaOpcacheWrites", &Settings::OptLuaOpcacheWrites },
+    { "UI_Lua", "LuaOpcacheReads", &Settings::OptLuaOpcacheReads },
     { "UI_Lua", "LuaGcCoalesce", &Settings::OptLuaGcCoalesce },
     { "UI_Lua", "LuaGetTimeFast", &Settings::OptLuaGetTimeFast },
     // AsyncTexLoader and MipBiasGovernor are read from Graphics_Sound because
@@ -290,7 +294,11 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("UI_Lua", "ModuleHandleCache", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "FrameScriptDispatch", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaNumConvFast", "0", iniPath.c_str());
-            WritePrivateProfileStringA("UI_Lua", "LuaOpcache", "0", iniPath.c_str());  // #37: slow loads + Lua errors — off by default
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcache", "0", iniPath.c_str());  // #37: slow loads + Lua errors — off by default
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcacheTables", "1", iniPath.c_str());
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcacheStrings", "1", iniPath.c_str());
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcacheWrites", "1", iniPath.c_str());
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcacheReads", "1", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaGcCoalesce", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaJIT", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaGetTimeFast", "0", iniPath.c_str());
@@ -376,7 +384,11 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptModuleHandleCache   = GetPrivateProfileIntA("UI_Lua", "ModuleHandleCache", 0, iniPath.c_str()) != 0;
         g_settings.OptFrameScriptDispatch = GetPrivateProfileIntA("UI_Lua", "FrameScriptDispatch", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaNumConvFast      = GetPrivateProfileIntA("UI_Lua", "LuaNumConvFast", 0, iniPath.c_str()) != 0;
-        g_settings.OptLuaOpcache          = GetPrivateProfileIntA("UI_Lua", "LuaOpcache", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcache          = GetPrivateProfileIntA("UI_Lua", "LuaOpcache", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcacheTables   = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheTables", 1, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcacheStrings  = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheStrings", 1, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcacheWrites   = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheWrites", 1, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcacheReads    = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheReads", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaGcCoalesce       = GetPrivateProfileIntA("UI_Lua", "LuaGcCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaGetTimeFast      = GetPrivateProfileIntA("UI_Lua", "LuaGetTimeFast", 0, iniPath.c_str()) != 0;
         g_settings.OptAsyncTexLoader      = GetPrivateProfileIntA("Graphics_Sound", "AsyncTexLoader", 0, iniPath.c_str()) != 0;
