@@ -86,6 +86,12 @@ namespace Config {
         // render-state calls. Also took no setting: it patched the vtable on
         // every install regardless of the launcher.
         bool OptD3d9StateManager  = true;
+
+        // The UI layout dependency relink, sub_489710: 9.06% of main-thread
+        // executing time, the largest single entry in the profile. New, and it
+        // rewrites pointer surgery in the client's layout list, so it is
+        // opt-in until testers have run it.
+        bool OptLayoutRelinkFast  = false;
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.
