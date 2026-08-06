@@ -6785,7 +6785,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     InitCvarWatchdog();
     InstallRenderNullGuard();
 #if !TEST_DISABLE_CVAR_NULL_GUARD
-    InstallCvarNullGuard();
+    // Was installed unconditionally, so a log could read CvarNullGuard=0 and
+    // still show "[CvarGuard] ACTIVE". The setting has existed all along.
+    if (Config::g_settings.OptCvarNullGuard) InstallCvarNullGuard();
 #endif
     if (Config::g_settings.OptVulkanDXVK) {
         InstallD3DEvictPatch();
@@ -6852,13 +6854,15 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #else
     Log("[HeapRedirect] DISABLED via TEST_DISABLE_HEAP_REDIRECT");
 #endif
-    InstallLockTuning();   // self-logs; spin counts are best-effort
+    // Retrofits spin counts onto fifteen of the client's critical sections and
+    // hooks InitializeCriticalSection. Took no setting until 3.18.2.
+    if (Config::g_settings.OptLockTuning) InstallLockTuning();   // self-logs
     Log("--- Texture Cache Budget ---");
     if (Config::g_settings.OptMemoryPressure) {
         InitTexCacheTuning();  // self-logs; single-client only
     }
     Log("--- Thread ID Cache ---");
-    bool tidOk = InstallThreadIdCacheHook();
+    bool tidOk = Config::g_settings.OptThreadIdCache && InstallThreadIdCacheHook();
     Log("--- QPC Cache ---");
 #if !CRASH_TEST_DISABLE_QPC_CACHE
     bool qpcOk = Config::g_settings.OptTimingFix && InstallQPCHook();
@@ -6927,7 +6931,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
         Log("--- Process ---");
 
         // Install SetPriorityClass hook BEFORE setting priority to block downgrade attempts
-        HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+        HMODULE hKernel32 = Config::g_settings.OptPriorityGuard
+                                ? GetModuleHandleA("kernel32.dll") : nullptr;
         if (hKernel32) {
             void* pSetPriorityClass = (void*)GetProcAddress(hKernel32, "SetPriorityClass");
             if (pSetPriorityClass &&
@@ -7455,7 +7460,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool rawGetIInlineOk = false;
     Log("[RawGetIInline] DISABLED (suspected loading screen crash at 0x84E9DE)");
 #else
-    bool rawGetIInlineOk = InstallLuaRawGetIInline();
+    bool rawGetIInlineOk = Config::g_settings.OptLuaOpcache &&
+                           Config::g_settings.OptLuaOpcacheTables &&
+                           InstallLuaRawGetIInline();
 #endif
 
     Log("--- lua_rawget Inline Optimization ---");
@@ -7463,7 +7470,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool rawGetInlineOk = false;
     Log("[RawGetInline] DISABLED");
 #else
-    bool rawGetInlineOk = InstallLuaRawGetInline();
+    // Same defect: a table-read cache that ignored LuaOpcache entirely, so it
+    // ran on clients that had the whole Lua suite switched off.
+    bool rawGetInlineOk = Config::g_settings.OptLuaOpcache &&
+                          Config::g_settings.OptLuaOpcacheTables &&
+                          InstallLuaRawGetInline();
 #endif
 
     Log("--- strtod Fast Path ---");
@@ -8246,7 +8257,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("========================================");
 
     // Start async I/O worker after all hooks/workers are ready - avoids init race
-    InstallAsyncIoWorker();
+    // Spawns a background worker thread. Took no setting until 3.18.2, so a
+    // client with every switch off still started it.
+    if (Config::g_settings.OptAsyncMpqIo) InstallAsyncIoWorker();
 
 #if !TEST_DISABLE_SAMPLING_PROFILER
     // Start lightweight sampling profiler. A background thread samples the

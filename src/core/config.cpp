@@ -44,6 +44,10 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "WowPerfHooks", &Settings::OptWowPerfHooks },
     { "General", "WowExtendedHooks", &Settings::OptWowExtendedHooks },
     { "General", "WowSubsystemHooks", &Settings::OptWowSubsystemHooks },
+    { "General", "LockTuning", &Settings::OptLockTuning },
+    { "General", "AsyncMpqIo", &Settings::OptAsyncMpqIo },
+    { "General", "ThreadIdCache", &Settings::OptThreadIdCache },
+    { "General", "PriorityGuard", &Settings::OptPriorityGuard },
     { "General", "TimingCvarPin", &Settings::OptTimingCvarPin },
     { "General", "FrameLimiter", &Settings::OptFrameLimiter },
     { "General", "ObjVisCache", &Settings::OptObjVisCache },
@@ -283,6 +287,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("General", "WowPerfHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowExtendedHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowSubsystemHooks", "1", iniPath.c_str());
+            WritePrivateProfileStringA("General", "LockTuning", "1", iniPath.c_str());
+            WritePrivateProfileStringA("General", "AsyncMpqIo", "1", iniPath.c_str());
+            WritePrivateProfileStringA("General", "ThreadIdCache", "1", iniPath.c_str());
+            WritePrivateProfileStringA("General", "PriorityGuard", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "FrameLimiter", "0", iniPath.c_str());
             WritePrivateProfileStringA("General", "ObjVisCache", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "DbcPreload", "0", iniPath.c_str());
@@ -369,6 +377,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptWowPerfHooks       = GetPrivateProfileIntA("General", "WowPerfHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowExtendedHooks   = GetPrivateProfileIntA("General", "WowExtendedHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowSubsystemHooks  = GetPrivateProfileIntA("General", "WowSubsystemHooks", 1, iniPath.c_str()) != 0;
+        g_settings.OptLockTuning         = GetPrivateProfileIntA("General", "LockTuning", 1, iniPath.c_str()) != 0;
+        g_settings.OptAsyncMpqIo         = GetPrivateProfileIntA("General", "AsyncMpqIo", 1, iniPath.c_str()) != 0;
+        g_settings.OptThreadIdCache      = GetPrivateProfileIntA("General", "ThreadIdCache", 1, iniPath.c_str()) != 0;
+        g_settings.OptPriorityGuard      = GetPrivateProfileIntA("General", "PriorityGuard", 1, iniPath.c_str()) != 0;
         g_settings.OptTimingCvarPin       = GetPrivateProfileIntA("General", "TimingCvarPin", 1, iniPath.c_str()) != 0;
         g_settings.OptFrameLimiter        = GetPrivateProfileIntA("General", "FrameLimiter", 0, iniPath.c_str()) != 0;
         g_settings.OptObjVisCache         = GetPrivateProfileIntA("General", "ObjVisCache", 1, iniPath.c_str()) != 0;

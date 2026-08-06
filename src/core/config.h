@@ -66,6 +66,14 @@ namespace Config {
         bool OptWowPerfHooks      = true;   // 20 hooks
         bool OptWowExtendedHooks  = true;   // 40 features
         bool OptWowSubsystemHooks = true;   // 100 features
+
+        // Four more that took no setting at all. Same rule: they have always
+        // run, so they default on, and turning them off is what the vanilla
+        // button needs in order to mean anything.
+        bool OptLockTuning        = true;   // retrofits spin counts onto 15 client locks
+        bool OptAsyncMpqIo        = true;   // spawns a background I/O worker thread
+        bool OptThreadIdCache     = true;   // hooks GetCurrentThreadId
+        bool OptPriorityGuard     = true;   // hooks SetPriorityClass to block downgrades
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.
