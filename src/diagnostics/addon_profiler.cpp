@@ -74,6 +74,7 @@ static bool  g_profileOn    = false;
 static DWORD g_lastReport   = 0;
 static int   g_reports      = 0;
 static int   g_enableTries  = 0;
+static bool  g_saidWaiting  = false;
 static int   g_badReports   = 0;
 
 // Long enough that the numbers mean something, short enough to catch a session
@@ -99,8 +100,18 @@ static constexpr DWORD REPORT_INTERVAL_MS = 120000;
 // three times a session, which reads like something is broken. GetCVar returns
 // nil for a name that does not exist instead of raising, so the check costs
 // nothing and the error never happens.
+// It also reports whether the player is actually in the world, because "this
+// client has no scriptProfile CVar" and "you are still on the character screen"
+// look identical from out here and are not the same thing at all. scriptProfile
+// is registered by GameUI.cpp's init (sub_52A980, the call at 0x0052A9CB), which
+// runs when the world interface loads - so at the glue screen the name genuinely
+// does not resolve, and asking then and believing the answer is what broke this.
+// See the note on OnFrame.
 static const char* kEnableChunk =
     "WOWOPT_PROF_STATE='missing' "
+    "local li = false "
+    "local okl,r = pcall(IsLoggedIn) if okl and r then li = true end "
+    "if not li then WOWOPT_PROF_STATE='notyet' return end "
     "local ok,v = pcall(GetCVar,'scriptProfile') "
     "if ok and v ~= nil then "
     "if pcall(function() SetCVar('scriptProfile','1') end) then "
@@ -179,18 +190,26 @@ static bool ReadGlobalString(const char* name, char* out, size_t outSize) {
 // poking the CVar, because SetCVar is what tells the script system to start
 // accounting; writing the variable behind its back sets a value nothing reads.
 //
-// Returns false when this client has no scriptProfile CVar, in which case there
-// is nothing to collect and the module stops rather than asking every minute
-// forever. ChromieCraft's client is one of those.
-static bool EnableScriptProfile() {
+// Three outcomes, and the caller needs all three. Collapsing the last two into
+// "false" is the bug this used to have.
+enum EnableResult {
+    kProfileOn,       // the CVar exists and is now set
+    kNotInWorldYet,   // still at the character screen; ask again later
+    kNoSuchCVar       // logged in and the name still does not resolve
+};
+
+static EnableResult EnableScriptProfile() {
     char state[64];
     __try {
         FrameScript_Execute_(kEnableChunk, "wow_optimize:addon_profiler", 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return kNotInWorldYet;   // an unusable VM is not evidence about the CVar
     }
-    if (!ReadGlobalString("WOWOPT_PROF_STATE", state, sizeof(state))) return false;
-    return strcmp(state, "on") == 0;
+    if (!ReadGlobalString("WOWOPT_PROF_STATE", state, sizeof(state)))
+        return kNotInWorldYet;
+    if (strcmp(state, "on") == 0)     return kProfileOn;
+    if (strcmp(state, "notyet") == 0) return kNotInWorldYet;
+    return kNoSuchCVar;
 }
 
 bool Init() {
@@ -206,8 +225,12 @@ bool Init() {
     // arms it. SetCVar persists to Config.wtf, so the session after that
     // profiles from the start. A /reload does the same thing sooner.
     Log("[AddonProfiler] Numbers will read zero until the interface is loaded with "
-        "profiling already on. Either type /reload once now, or just play this "
-        "session and the next one will have real numbers - the setting persists.");
+        "profiling already on. Log in first - the CVar does not exist at the "
+        "character screen - then type /reload once, or just play this session and "
+        "the next one will have real numbers, because the setting persists. "
+        "Adding scriptProfile to Config.wtf by hand does nothing: the client "
+        "registers it with its save flag clear, so it is neither read from nor "
+        "written to that file.");
     return true;
 }
 
@@ -223,21 +246,42 @@ void OnFrame(bool luaBusy) {
         // Give the UI a moment to exist before asking it for anything.
         if (now - g_lastReport < 15000) return;
         g_lastReport = now;
-        // One attempt. The answer cannot change between tries - either this
-        // client has the CVar or it does not - and retrying only produced three
-        // identical log lines before giving up.
-        if (++g_enableTries > 1) {
-            Log("[AddonProfiler] This client has no scriptProfile CVar, so there is "
-                "nothing to account for - stopping. Nothing further will be logged "
-                "and no time is spent.");
-            g_active = false;
-            return;
-        }
-        if (EnableScriptProfile()) {
+        // "One attempt. The answer cannot change between tries - either this
+        // client has the CVar or it does not." That comment was here, and it was
+        // wrong, and it cost a tester an evening.
+        //
+        // scriptProfile is registered by GameUI.cpp's init, which runs when the
+        // world interface loads. At the character screen the name does not
+        // resolve yet. This asked once, 17 seconds in, got "missing", and shut
+        // itself off permanently - four and a half minutes before that player
+        // first entered the world. He then set the CVar in Config.wtf and
+        // /reloaded, exactly as instructed, against a module that had already
+        // stopped. Nothing he did could have worked.
+        //
+        // The chunk now reports the two cases apart, and only an answer given
+        // while logged in counts against the tries.
+        EnableResult r = EnableScriptProfile();
+        if (r == kProfileOn) {
             g_profileOn = true;
             Log("[AddonProfiler] Script profiling is on. First report in %lu seconds; "
                 "if every addon reads zero, /reload once.",
                 (unsigned long)(REPORT_INTERVAL_MS / 1000));
+            return;
+        }
+        if (r == kNotInWorldYet) {
+            // Say it once, so a log that stops here explains itself.
+            if (!g_saidWaiting) {
+                g_saidWaiting = true;
+                Log("[AddonProfiler] Waiting for the world to load - the CVar this "
+                    "needs does not exist until the interface does.");
+            }
+            return;
+        }
+        if (++g_enableTries > 3) {
+            Log("[AddonProfiler] Logged in, and this client still has no "
+                "scriptProfile CVar, so there is nothing to account for - "
+                "stopping. Nothing further will be logged and no time is spent.");
+            g_active = false;
         }
         return;
     }
