@@ -81,6 +81,11 @@ namespace Config {
         // automatic collector is the part worth isolating on its own.
         bool OptLuaVmOpt          = true;
         bool OptLuaGcManual       = true;
+
+        // Sixteen hooks into the D3D9 device vtable, deduplicating redundant
+        // render-state calls. Also took no setting: it patched the vtable on
+        // every install regardless of the launcher.
+        bool OptD3d9StateManager  = true;
         // Pins timingMethod to 2 and timingTestError to 0 whatever the client
         // asks. On by default because it has shipped that way for a long time;
         // it used to have no switch at all and lived inside CvarNullGuard.

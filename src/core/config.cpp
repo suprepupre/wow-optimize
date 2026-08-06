@@ -50,6 +50,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "PriorityGuard", &Settings::OptPriorityGuard },
     { "UI_Lua", "LuaVmOpt", &Settings::OptLuaVmOpt },
     { "UI_Lua", "LuaGcManual", &Settings::OptLuaGcManual },
+    { "Graphics_Sound", "D3d9StateManager", &Settings::OptD3d9StateManager },
     { "General", "TimingCvarPin", &Settings::OptTimingCvarPin },
     { "General", "FrameLimiter", &Settings::OptFrameLimiter },
     { "General", "ObjVisCache", &Settings::OptObjVisCache },
@@ -295,6 +296,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("General", "PriorityGuard", "1", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaVmOpt", "1", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaGcManual", "1", iniPath.c_str());
+            WritePrivateProfileStringA("Graphics_Sound", "D3d9StateManager", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "FrameLimiter", "0", iniPath.c_str());
             WritePrivateProfileStringA("General", "ObjVisCache", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "DbcPreload", "0", iniPath.c_str());
@@ -387,6 +389,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptPriorityGuard      = GetPrivateProfileIntA("General", "PriorityGuard", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaVmOpt           = GetPrivateProfileIntA("UI_Lua", "LuaVmOpt", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaGcManual        = GetPrivateProfileIntA("UI_Lua", "LuaGcManual", 1, iniPath.c_str()) != 0;
+        g_settings.OptD3d9StateManager    = GetPrivateProfileIntA("Graphics_Sound", "D3d9StateManager", 1, iniPath.c_str()) != 0;
         g_settings.OptTimingCvarPin       = GetPrivateProfileIntA("General", "TimingCvarPin", 1, iniPath.c_str()) != 0;
         g_settings.OptFrameLimiter        = GetPrivateProfileIntA("General", "FrameLimiter", 0, iniPath.c_str()) != 0;
         g_settings.OptObjVisCache         = GetPrivateProfileIntA("General", "ObjVisCache", 1, iniPath.c_str()) != 0;

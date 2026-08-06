@@ -7947,7 +7947,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- D3D9 State Manager ---");
-    bool d3d9StateOk = InstallD3D9StateManager();
+    // Patches sixteen entries of the D3D9 device vtable. Took no setting
+    // until 3.18.2, so it ran with every switch in the launcher off.
+    bool d3d9StateOk = Config::g_settings.OptD3d9StateManager && InstallD3D9StateManager();
 
     Log("");
     Log("--- Render Hooks (anim throttle, backbuffer) ---");
