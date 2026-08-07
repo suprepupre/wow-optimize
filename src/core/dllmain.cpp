@@ -6627,6 +6627,66 @@ static bool InstallBatchOpt38() {
     return ok > 0;
 }
 
+// One line describing the host, written next to the version banner.
+//
+// Every crash report we receive has to be read without knowing what it ran on,
+// and the OS is not a neutral detail: the desktop compositor from Windows 8
+// onward owns the present path even in "fullscreen exclusive", and Windows 11
+// is free to ignore timeBeginPeriod, so a timer or present-path report means
+// different things on build 7601 and on build 22631.
+//
+// GetVersionEx lies without an application manifest (it caps at 6.2 for us),
+// so ask ntdll directly - RtlGetVersion is not subject to the shim. The UBR
+// (the ".xxx" after the build) only exists in the registry.
+static void LogHostEnvironment() {
+    typedef LONG (WINAPI* RtlGetVersion_fn)(PRTL_OSVERSIONINFOW);
+    RTL_OSVERSIONINFOW vi = {};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    RtlGetVersion_fn pRtlGetVersion = ntdll
+        ? (RtlGetVersion_fn)GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
+    if (!pRtlGetVersion || pRtlGetVersion(&vi) != 0) {
+        Log("  OS: unknown (RtlGetVersion unavailable)");
+        return;
+    }
+
+    // Windows 11 kept the 10.0 major.minor and is only distinguishable by build.
+    const char* name = "Windows";
+    if (vi.dwMajorVersion == 10) name = (vi.dwBuildNumber >= 22000) ? "Windows 11" : "Windows 10";
+    else if (vi.dwMajorVersion == 6) {
+        switch (vi.dwMinorVersion) {
+            case 1: name = "Windows 7";   break;
+            case 2: name = "Windows 8";   break;
+            case 3: name = "Windows 8.1"; break;
+        }
+    }
+
+    DWORD ubr = 0, cb = sizeof(ubr), type = REG_DWORD;
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(hKey, "UBR", nullptr, &type, (LPBYTE)&ubr, &cb) != ERROR_SUCCESS)
+            ubr = 0;
+        RegCloseKey(hKey);
+    }
+
+    MEMORYSTATUSEX ms = {};
+    ms.dwLength = sizeof(ms);
+    GlobalMemoryStatusEx(&ms);
+
+    if (ubr) {
+        Log("  OS: %s build %lu.%lu  |  %lu logical CPUs  |  %llu MB RAM",
+            name, vi.dwBuildNumber, ubr, g_cachedSysInfo.dwNumberOfProcessors,
+            (unsigned long long)(ms.ullTotalPhys / (1024 * 1024)));
+    } else {
+        Log("  OS: %s build %lu  |  %lu logical CPUs  |  %llu MB RAM",
+            name, vi.dwBuildNumber, g_cachedSysInfo.dwNumberOfProcessors,
+            (unsigned long long)(ms.ullTotalPhys / (1024 * 1024)));
+    }
+}
+
 // Main initialization thread.
 static DWORD WINAPI MainThread(LPVOID param) {
     // One-time caches initialized before hooks
@@ -6650,6 +6710,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  wow_optimize.dll v%s (build %s) BY %s",
         WOW_OPTIMIZE_VERSION_STR, WOW_OPTIMIZE_GIT_HASH, WOW_OPTIMIZE_AUTHOR);
     Log("  PID: %lu", GetCurrentProcessId());
+    LogHostEnvironment();
     Log("========================================");
     
     if (IsRosetta()) {
