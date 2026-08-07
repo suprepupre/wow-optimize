@@ -63,8 +63,33 @@
 // `off_AC101C = result`, so afterwards off_AC101C == result iff the not-found
 // path ran, which is a one-word test. Only after a run of agreements does the
 // fast path switch on, and one in every 1024 calls stays in shadow mode
-// afterwards so a late divergence still gets caught. A single disagreement
-// disables the module for the session and says so.
+// afterwards so a late divergence still gets caught.
+//
+// ---------------------------------------------------------------------------
+// The check is deliberately one-sided, and the first version of it was not.
+//
+// Only one of the two ways the prediction can miss is dangerous:
+//
+//   predicted not-found, client found one   -> we would have run the not-found
+//                                              tail on a frame that needed the
+//                                              other one. Wrong. Retire.
+//   predicted found, client found nothing   -> we defer to the original on a
+//                                              non-empty +0x38 (see the
+//                                              `if (!predictNotFound)` guard
+//                                              below), so the client's own
+//                                              routine ran and the result is
+//                                              correct. We merely paid for a
+//                                              scan we could have skipped.
+//
+// The original check was `actualNotFound != predictNotFound`, which retired on
+// both. A tester's log (nobus, v3.18.2) shows the cost: the module disabled
+// itself three seconds into the session on the *second* kind, having taken zero
+// shortcuts, and the client's 9%-of-profile scan ran unaided for the rest of the
+// session. A divergence that cannot produce a wrong answer must not be able to
+// switch the module off. It is counted instead, because a high count means the
+// dependants list holds entries the scan rejects and there is more win available
+// than we are taking.
+// ---------------------------------------------------------------------------
 // ============================================================================
 
 #include <windows.h>
@@ -99,6 +124,7 @@ volatile LONG g_agreements   = 0;
 volatile LONG g_fastTaken    = 0;
 volatile LONG g_deferred     = 0;
 volatile LONG g_disagreed    = 0;
+volatile LONG g_pessimistic  = 0;   // predicted found, client found nothing
 volatile LONG g_armed        = 0;   // 1 once the fast path is trusted
 volatile LONG g_dead         = 0;   // 1 after a disagreement
 
@@ -199,15 +225,30 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
             return r;
         }
 
-        if (actualNotFound != predictNotFound) {
+        // The unsafe direction: we would have run the not-found tail on a frame
+        // the client found a match for. This is the only one that invalidates
+        // the optimisation.
+        if (predictNotFound && !actualNotFound) {
             InterlockedIncrement(&g_disagreed);
-            Log("[LayoutRelink] Prediction was wrong: frame 0x%08X had %s at +0x38 "
-                "but the client took the %s path. The dependants index is not the "
-                "whole story, so this optimisation is not valid.",
-                (unsigned)This,
-                predictNotFound ? "nothing" : "something",
-                actualNotFound ? "not-found" : "found");
-            Retire("a prediction disagreed with what the client actually did");
+            Log("[LayoutRelink] Prediction was wrong: frame 0x%08X had nothing at "
+                "+0x38 but the client took the found path. An empty dependants "
+                "list does not imply the scan finds nothing, so this optimisation "
+                "is not valid.", (unsigned)This);
+            Retire("a prediction would have produced the wrong result");
+            return r;
+        }
+
+        // The safe direction: a non-empty +0x38 where the client still found
+        // nothing. We defer on non-empty, so the original ran and the answer is
+        // correct - this is a skipped shortcut, not an error. Log the first one
+        // so the asymmetry is visible in a session log, then just count them.
+        if (!predictNotFound && actualNotFound) {
+            if (InterlockedIncrement(&g_pessimistic) == 1) {
+                Log("[LayoutRelink] Frame 0x%08X had something at +0x38 but the "
+                    "client found nothing. Correct either way - we defer on "
+                    "non-empty - so this is a missed shortcut, not a divergence. "
+                    "Counting the rest.", (unsigned)This);
+            }
             return r;
         }
 
@@ -275,6 +316,13 @@ void LogStats() {
         (long)g_calls, (long)g_fastTaken, (long)g_deferred,
         (long)g_agreements, (long)g_disagreed,
         g_dead ? " - DISABLED" : "");
+    if (g_pessimistic > 0) {
+        Log("[LayoutRelink] %ld of the deferred calls had a non-empty +0x38 but "
+            "the client found nothing anyway - shortcuts we could have taken and "
+            "did not. A large share here means the dependants list holds entries "
+            "the scan rejects, and there is more win available than we take.",
+            (long)g_pessimistic);
+    }
 }
 
 } // namespace LayoutRelinkFast
