@@ -4385,7 +4385,11 @@ static void DumpPeriodicStats() {
                 addr += 0x10000;
             }
         }
-        Log("[Stats] VA Space: Free=%.0fMB LargestBlock=%.0fMB%s",
+        // Naming the range matters: this walk stops at 2GB, while the heap
+        // compactor measures all of user address space and reports gigabytes on
+        // the same client in the same second. Without the range on each line the
+        // two read as a contradiction.
+        Log("[Stats] VA Space (below 2GB): Free=%.0fMB LargestBlock=%.0fMB%s",
             totalFree / (1024.0 * 1024.0),
             largestFree / (1024.0 * 1024.0),
            (largestFree < 64 * 1024 * 1024) ? " WARNING: fragmented" : "");

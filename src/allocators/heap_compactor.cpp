@@ -46,30 +46,68 @@ extern "C" void mi_collect(bool force);
 #include <mimalloc.h>
 #include "crash_dumper.h"
 
-// Get largest free virtual memory block
-static SIZE_T GetLargestFreeBlock() {
+// Largest free virtual address range, measured twice.
+//
+// This scanned to wherever VirtualQuery stops, which on a large-address-aware
+// client means the whole 3 or 4 GB. The region above 2 GB is barely touched, so
+// the answer is dominated by it and stays in the gigabytes while the low half -
+// where the client's own allocations live, and where anything that cannot hold
+// a pointer with the top bit set must go - is down to a megabyte.
+//
+// A tester session shows both numbers side by side for three and a half hours:
+// this function reporting 2046 MB falling to 1361 MB and never approaching its
+// 16 MB trigger, while the periodic statistics line, which scans only the low
+// half, reported a 1 MB largest block and "fragmented" from the first report
+// onwards. Neither line said which range it had measured, so they read as a
+// contradiction rather than as two different questions.
+//
+// `lowHalfOut` receives the figure for the low 2 GB when it is wanted.
+static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
+    static const uintptr_t LOW_HALF_END = 0x80000000u;
+
     MEMORY_BASIC_INFORMATION mbi;
     SIZE_T largestFree = 0;
     SIZE_T currentFree = 0;
+    SIZE_T largestLow  = 0;
+    SIZE_T currentLow  = 0;
     uintptr_t addr = 0;
-    
+
     while (VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) {
+        uintptr_t base = (uintptr_t)mbi.BaseAddress;
+
         if (mbi.State == MEM_FREE) {
             currentFree += mbi.RegionSize;
-        } else {
-            if (currentFree > largestFree) {
-                largestFree = currentFree;
+
+            // Only the part of this region that lies below the boundary counts
+            // towards the low-half figure, and a run that crosses it stops
+            // there rather than carrying the high side back down.
+            if (base < LOW_HALF_END) {
+                SIZE_T lowPart = (base + mbi.RegionSize > LOW_HALF_END)
+                               ? (SIZE_T)(LOW_HALF_END - base)
+                               : mbi.RegionSize;
+                currentLow += lowPart;
+                if (lowPart != mbi.RegionSize) {
+                    if (currentLow > largestLow) largestLow = currentLow;
+                    currentLow = 0;
+                }
             }
+        } else {
+            if (currentFree > largestFree) largestFree = currentFree;
             currentFree = 0;
+            if (base < LOW_HALF_END) {
+                if (currentLow > largestLow) largestLow = currentLow;
+                currentLow = 0;
+            }
         }
-        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-        if (addr < (uintptr_t)mbi.BaseAddress) break; // Overflow
+
+        addr = base + mbi.RegionSize;
+        if (addr < base) break; // Overflow
     }
-    
-    if (currentFree > largestFree) {
-        largestFree = currentFree;
-    }
-    
+
+    if (currentFree > largestFree) largestFree = currentFree;
+    if (currentLow  > largestLow)  largestLow  = currentLow;
+
+    if (lowHalfOut) *lowHalfOut = largestLow;
     return largestFree;
 }
 
@@ -106,8 +144,31 @@ static DWORD WINAPI MonitorThread(LPVOID) {
         DWORD interval = LuaOpt::IsLoadingMode() ? LOADING_INTERVAL_MS : MONITOR_INTERVAL_MS;
         Sleep(interval);
         
-        SIZE_T largestFree = GetLargestFreeBlock();
+        SIZE_T largestLow = 0;
+        SIZE_T largestFree = GetLargestFreeBlock(&largestLow);
         g_checksPerformed++;
+
+        // Say what the low half looks like whenever it is under the threshold
+        // this module acts on but the full-range figure is not, because that is
+        // precisely the state in which this module does nothing and a player is
+        // watching their frame rate decay. Whether the trigger should move to
+        // the low half is not decided here: compaction is a full mi_collect plus
+        // a HeapCompact of every process heap, and on a client that sits at a
+        // megabyte for hours it would run on every tick. That needs one session
+        // of evidence first, and this line is what produces it.
+        if (largestLow < CRITICAL_THRESHOLD && largestFree >= CRITICAL_THRESHOLD) {
+            static DWORD lastSplitTick = 0;
+            DWORD splitNow = GetTickCount();
+            if (lastSplitTick == 0 || splitNow - lastSplitTick > 60000) {
+                Log("[HeapCompactor] Largest free block is %uMB across all user "
+                    "address space but only %uMB below 2GB. Compaction triggers on "
+                    "the first, so it is not running; allocations that cannot live "
+                    "above 2GB are working from the second.",
+                    (unsigned)(largestFree / (1024*1024)),
+                    (unsigned)(largestLow / (1024*1024)));
+                lastSplitTick = splitNow;
+            }
+        }
         
         // Update statistics
         g_lastLargestBlock = largestFree;
