@@ -125,6 +125,16 @@ volatile LONG g_fastTaken    = 0;
 volatile LONG g_deferred     = 0;
 volatile LONG g_disagreed    = 0;
 volatile LONG g_pessimistic  = 0;   // predicted found, client found nothing
+// Every entry into the hook. g_calls below counts only those that get past the
+// client's own early-out and reach the scan - the ones that cost anything - and
+// it stops entirely once the module retires. This one never stops, so a log can
+// say how often the function actually runs.
+unsigned long g_invocations  = 0;
+// Reached the hook while it was still live and stopped at the client's own
+// early-out. Kept apart from the invocation count so that "retired early, so
+// most invocations were never examined" cannot be misread as "most invocations
+// take the early-out".
+unsigned long g_earlyOut     = 0;
 volatile LONG g_armed        = 0;   // 1 once the fast path is trusted
 volatile LONG g_dead         = 0;   // 1 after a disagreement
 
@@ -186,6 +196,22 @@ void Retire(const char* why) {
 
 uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     (void)edx;
+    // Counted before anything can return, including after this module has
+    // retired, because every other counter here stops the moment it does.
+    //
+    // A session log read "5 calls" and it was taken - by me - as the call rate
+    // of the hottest function in the client's profile, which made no sense and
+    // led to the conclusion that the shortcut could never arm. The module had
+    // retired three seconds in; from then on the first line returned without
+    // counting, and the function went on being called for the rest of the
+    // session with nothing recording it. The number was not a rate, it was
+    // where the counting stopped.
+    //
+    // Plain increment, not interlocked: this is the client's layout relink and
+    // it runs on the main thread, and a lock-prefixed read-modify-write on a
+    // function that owns nine percent of executing time costs more than the
+    // diagnostic is worth.
+    g_invocations++;
     if (g_dead || !self) return orig_Relink(self, edx);
 
     uintptr_t This = (uintptr_t)self;
@@ -197,7 +223,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         // The whole body of the original is inside `if (!result[1])`. When that
         // is false it does nothing at all, so there is nothing to be clever
         // about and the original is the cheapest correct answer.
-        if (result[1] != 0) return orig_Relink(self, edx);
+        if (result[1] != 0) { g_earlyOut++; return orig_Relink(self, edx); }
         predictNotFound = IsEmptyLink(Rd(This + kDependentsOff));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return orig_Relink(self, edx);
@@ -311,11 +337,25 @@ bool Init() {
 void LogStats() {
     if (!Config::g_settings.OptLayoutRelinkFast) return;
     if (g_calls == 0) return;
-    Log("[LayoutRelink] %ld calls: %ld took the shortcut, %ld deferred (a "
-        "dependant existed), %ld verified against the client, %ld disagreed%s",
-        (long)g_calls, (long)g_fastTaken, (long)g_deferred,
+    Log("[LayoutRelink] %lu invocations, %ld of them reached the scan: %ld took "
+        "the shortcut, %ld deferred (a dependant existed), %ld verified against "
+        "the client, %ld disagreed%s",
+        g_invocations, (long)g_calls, (long)g_fastTaken, (long)g_deferred,
         (long)g_agreements, (long)g_disagreed,
         g_dead ? " - DISABLED" : "");
+    // The gap between the two is the client's own early-out, which this module
+    // deliberately leaves alone. If almost every invocation stops there, the
+    // nine percent measured in the profile is not where this module is looking
+    // and the whole approach needs rechecking.
+    unsigned long examined = g_earlyOut + (unsigned long)g_calls;
+    if (examined > 0) {
+        Log("[LayoutRelink] of %lu invocations seen while live, %.1f%% stopped at the "
+            "client's own early-out before any scan - those cost nothing and are not "
+            "this module's target%s",
+            examined, 100.0 * (double)g_earlyOut / (double)examined,
+            g_dead ? "; the remaining invocations came after this module retired"
+                   : "");
+    }
     if (g_pessimistic > 0) {
         Log("[LayoutRelink] %ld of the deferred calls had a non-empty +0x38 but "
             "the client found nothing anyway - shortcuts we could have taken and "
