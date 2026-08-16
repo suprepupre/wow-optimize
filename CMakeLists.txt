@@ -227,6 +227,7 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/fast_strncmp.h
     src/allocators/crt_free_hook.cpp
     src/threading/lock_tuning.cpp
+    src/threading/cpu_topology.cpp
     src/allocators/texcache_tuning.cpp
     src/allocators/crt_free_hook.h
     src/allocators/aligned_alloc_cache.cpp

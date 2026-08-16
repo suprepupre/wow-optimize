@@ -28,6 +28,7 @@
 #include "crash_dumper.h"
 #include "memory_pressure_governor.h"
 #include "sampling_profiler.h"
+#include "cpu_topology.h"
 #include "anim_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
@@ -4048,6 +4049,13 @@ static void OptimizeThreads() {
     DWORD core = (si.dwNumberOfProcessors > 2) ? 1 : 0;
     SetThreadIdealProcessor(hMain, core);
     SetThreadPriority(hMain, THREAD_PRIORITY_ABOVE_NORMAL);
+
+    // The ideal-core call above is a preference the scheduler may ignore, and it
+    // picks an index without knowing what kind of core sits behind it. Read the
+    // core classes, and keep this thread off the slow ones if asked to.
+    CpuTopology::Init();
+    CpuTopology::PinMainThread(hMain);
+
     CloseHandle(hMain);
     Log("Main thread %lu: ideal core %lu, priority ABOVE_NORMAL (of %lu cores)", mainTid, core, si.dwNumberOfProcessors);
 }
@@ -4665,6 +4673,7 @@ static void DumpPeriodicStats() {
         SamplingProfiler::DumpNow();
     }
 #endif
+    CpuTopology::Report();
     FrameBench::Report("periodic");
     CrashDumper::ReportFeatureActivity();
     CrashDumper::ReportFirstChanceSummary();
@@ -4935,6 +4944,10 @@ extern "C" void WowOpt_OnFrameBoundary() {
     //
     // Calling from both present paths costs an empty-queue check per frame: each
     // of these takes its lock, sees head == tail, and returns.
+    // Which core the frame loop is on, sampled here because this is the one
+    // place that runs exactly once per presented frame on both render paths.
+    CpuTopology::NoteFrame();
+
     FlushFieldUpdates();
     WorldStateCoalesce::OnFrame();
 

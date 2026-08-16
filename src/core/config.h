@@ -221,6 +221,15 @@ namespace Config {
         // client's own script profiler, which a reporter measured at 1-4 fps in
         // a dungeon. Inherits SamplingProfiler: no sampler, nothing to charge.
         bool OptLuaAddonProfile = false;
+        // Reads the CPU's core classes and samples which one the frame loop is
+        // running on. Measurement only, and cheap: one GetCurrentProcessorNumber
+        // per frame. On by default because the answer is worth having in every
+        // log and nothing acts on it.
+        bool OptCpuTopology = true;
+        // Keeps the main thread off the efficiency cores of a hybrid CPU. Off by
+        // default: it overrides the scheduler, and the residency figure from
+        // OptCpuTopology should say it is needed before anyone turns it on.
+        bool OptPinMainThread = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
