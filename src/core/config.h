@@ -179,6 +179,22 @@ namespace Config {
         bool OptSoundMixerOpt = false;
         bool OptAudioDecodeMt = false;
         bool OptDbcLookupCache = false;
+        // The Win32 file hooks: CreateFile sequential-scan hinting, the adaptive
+        // MPQ ReadFile cache, CloseHandle cleanup, the FlushFileBuffers skip,
+        // and the GetFileAttributes / SetFilePointer / GetFileSize caches.
+        //
+        // These used to hang off OptDbcLookupCache, which is described to the
+        // player as speeding up .dbc reads and says nothing about file I/O.
+        // Anyone who cleared that switch to test the DBC cache silently removed
+        // the whole file layer; anyone who set it got seven hooks they never
+        // asked for. Defaults to whatever DbcLookupCache resolved to, so no
+        // install changes behaviour until its owner sets it deliberately.
+        bool OptFileIoHooks = false;
+        // The lua_type fast path in hot_patch.cpp, which resolves a positive
+        // stack index inline instead of calling the engine's index2adr. It was
+        // gated on OptDbcLookupCache as well and has nothing to do with .dbc
+        // reads. Same inheritance rule, same reason.
+        bool OptLuaTypeFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

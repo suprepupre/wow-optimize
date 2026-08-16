@@ -6953,9 +6953,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool netOk = false;
 #endif
     Log("--- File I/O ---");
-    bool fileOk  = Config::g_settings.OptDbcLookupCache && InstallFileHooks();
+    bool fileOk  = Config::g_settings.OptFileIoHooks && InstallFileHooks();
 #if !CRASH_TEST_DISABLE_READFILE
-    bool readOk  = Config::g_settings.OptDbcLookupCache && InstallReadFileHook();
+    bool readOk  = Config::g_settings.OptFileIoHooks && InstallReadFileHook();
 #else
     // The cache stays off; the measurement does not have to go with it.
     bool readOk  = InstallReadFileTimingHook();
@@ -6964,17 +6964,17 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // The load report counts time spent in the ReadFile hook. If that hook is not
     // in, the report must say so rather than print a confident zero.
     LoadingState::SetReadHookInstalled(readOk);
-    bool closeOk = Config::g_settings.OptDbcLookupCache && InstallCloseHandleHook();
-    bool flushOk = Config::g_settings.OptDbcLookupCache && InstallFlushFileBuffersHook();
+    bool closeOk = Config::g_settings.OptFileIoHooks && InstallCloseHandleHook();
+    bool flushOk = Config::g_settings.OptFileIoHooks && InstallFlushFileBuffersHook();
     Log("--- Async MPQ I/O ---");
     // Worker started after init completes to avoid race with hook setup
     bool asyncIoOk = true;
     Log("--- MPQ Scan ---");
     ScanExistingMpqHandles();
     Log("--- File Attributes ---");
-    bool faOk = Config::g_settings.OptDbcLookupCache && InstallGetFileAttributesHook();
+    bool faOk = Config::g_settings.OptFileIoHooks && InstallGetFileAttributesHook();
     Log("--- File Pointer ---");
-    bool sfpOk = Config::g_settings.OptDbcLookupCache && InstallSetFilePointerHook();
+    bool sfpOk = Config::g_settings.OptFileIoHooks && InstallSetFilePointerHook();
 
     Log("--- Global Alloc ---");
     bool gaOk  = InstallGlobalAllocHooks();    
@@ -7020,7 +7020,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     TryRemoveFPSCap();
 
     Log("--- File Size Cache ---");
-    bool fsizeOk = Config::g_settings.OptDbcLookupCache && InstallGetFileSizeCache();
+    bool fsizeOk = Config::g_settings.OptFileIoHooks && InstallGetFileSizeCache();
     Log("--- WaitForSingleObject Spin ---");
     bool wfsOk = Config::g_settings.OptDefragLf && InstallWaitForSingleObjectHook();
     Log("--- Module Handle Cache ---");
@@ -7054,7 +7054,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool luaThisCacheOk = Config::g_settings.OptUIFrameAccessorFast && InstallLuaThisCache();
 
     // I/O Dispatcher Cache - 4050 callers
-    bool ioCacheOk = Config::g_settings.OptDbcLookupCache && InstallIOCache();
+    bool ioCacheOk = Config::g_settings.OptFileIoHooks && InstallIOCache();
 
     // Lua Global Lookup Cache
     bool luaGlobalCacheOk = Config::g_settings.OptLuaOpcache && Config::g_settings.OptLuaOpcacheTables && InstallLuaGlobalCache();
@@ -7992,7 +7992,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #endif
 
     Log("--- Hot Patch ---");
-    if (Config::g_settings.OptDbcLookupCache) HotPatch::InstallAll();
+    if (Config::g_settings.OptLuaTypeFast) HotPatch::InstallAll();
 
     Log("--- WoW.exe Optimization Hooks (20 hooks) ---");
     bool wowOptOk = Config::g_settings.OptWowOptHooks && WowOptHooks::InstallAll();
@@ -8124,7 +8124,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("");
     Log("--- Velocity-Based Predictive Asset Prefetcher ---");
 #if !TEST_DISABLE_PREDICTIVE_PREFETCH
-    bool predictivePrefetchOk = Config::g_settings.OptDbcLookupCache && PredictivePrefetch::Init();
+    bool predictivePrefetchOk = Config::g_settings.OptFileIoHooks && PredictivePrefetch::Init();
 #else
     bool predictivePrefetchOk = false;
     Log("[PredictivePrefetch] DISABLED via TEST_DISABLE_PREDICTIVE_PREFETCH");
