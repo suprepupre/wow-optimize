@@ -6939,13 +6939,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("QPC hook: DISABLED (crash isolation)");
 #endif     
     Log("--- Bad Pointer Checks ---");
-    bool bpOk  = Config::g_settings.OptCvarNullGuard && InstallBadPtrHooks();    
+    bool bpOk  = Config::g_settings.OptDebugApiHooks && InstallBadPtrHooks();    
     Log("--- String Comparison ---");
     bool cmpOk = Config::g_settings.OptStrStrSse2 && InstallCompareStringHook();
     Log("--- Debug Strings ---");
-    bool debugOk = Config::g_settings.OptCvarNullGuard && InstallOutputDebugStringHook();
+    bool debugOk = Config::g_settings.OptDebugApiHooks && InstallOutputDebugStringHook();
     Log("--- Critical Sections ---");
-    bool csOk = Config::g_settings.OptDefragLf && InstallCriticalSectionHook();
+    bool csOk = Config::g_settings.OptLockSpinHooks && InstallCriticalSectionHook();
     Log("--- Network ---");
 #if !TEST_DISABLE_NETWORK_HOOKS
     bool netOk = Config::g_settings.OptPacketOffload && InstallNetworkHooks();
@@ -7022,7 +7022,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- File Size Cache ---");
     bool fsizeOk = Config::g_settings.OptFileIoHooks && InstallGetFileSizeCache();
     Log("--- WaitForSingleObject Spin ---");
-    bool wfsOk = Config::g_settings.OptDefragLf && InstallWaitForSingleObjectHook();
+    bool wfsOk = Config::g_settings.OptLockSpinHooks && InstallWaitForSingleObjectHook();
     Log("--- Module Handle Cache ---");
     bool modOk = Config::g_settings.OptModuleHandleCache && InstallGetModuleHandleCache();
     Log("--- String Compare (lstrcmp) ---");
@@ -7132,28 +7132,28 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("[ApiCaches] %s. Timer redirection and QPC coalescing are compiled out "
         "and this switch does not reach them.",
         Config::g_settings.OptTimingFix ? "ENABLED" : "disabled");
-    bool sysInfoOk = Config::g_settings.OptTimingFix && InstallSysInfoCache();
-    bool regCacheOk = Config::g_settings.OptTimingFix && InstallRegCache();
+    bool sysInfoOk = Config::g_settings.OptWin32ApiCaches && InstallSysInfoCache();
+    bool regCacheOk = Config::g_settings.OptWin32ApiCaches && InstallRegCache();
 #if !TEST_DISABLE_SYSTEM_METRICS_CACHE
-    bool smCacheOk = Config::g_settings.OptTimingFix && InstallSysMetricsCache();
+    bool smCacheOk = Config::g_settings.OptWin32ApiCaches && InstallSysMetricsCache();
 #else
     bool smCacheOk = false;
 #endif
-    bool noDebugOk = Config::g_settings.OptCvarNullGuard && InstallNoDebuggerPresent();
-    bool verCacheOk = Config::g_settings.OptTimingFix && InstallVerCache();
+    bool noDebugOk = Config::g_settings.OptDebugApiHooks && InstallNoDebuggerPresent();
+    bool verCacheOk = Config::g_settings.OptWin32ApiCaches && InstallVerCache();
     bool batch10Ok = Config::g_settings.OptStrStrSse2 && InstallBatchOpt10();
     bool batch20Ok = Config::g_settings.OptStrStrSse2 && InstallBatchOpt20();
     bool batch30Ok = Config::g_settings.OptStrStrSse2 && InstallBatchOpt30();
     bool batch35Ok = Config::g_settings.OptStrStrSse2 && InstallBatchOpt35();
     bool batch38Ok = false;
     Log("--- GetProcAddress Cache ---");
-    bool gpaOk = Config::g_settings.OptTimingFix && InstallGetProcAddressCache();
+    bool gpaOk = Config::g_settings.OptWin32ApiCaches && InstallGetProcAddressCache();
     Log("--- GetModuleFileName Cache ---");
-    bool gmfOk = Config::g_settings.OptTimingFix && InstallGetModuleFileNameCache();
+    bool gmfOk = Config::g_settings.OptWin32ApiCaches && InstallGetModuleFileNameCache();
     Log("--- Environment Variable Cache ---");
-    bool envOk = Config::g_settings.OptTimingFix && InstallEnvironmentVariableCache();
+    bool envOk = Config::g_settings.OptWin32ApiCaches && InstallEnvironmentVariableCache();
     Log("--- Profile String Cache ---");
-    bool profOk = Config::g_settings.OptTimingFix && InstallGetPrivateProfileCache();
+    bool profOk = Config::g_settings.OptWin32ApiCaches && InstallGetPrivateProfileCache();
 
     Log("--- Message Pump ---");
     bool msgPumpOk = Config::g_settings.OptUIFrameBatch && InstallMsgPumpHook();

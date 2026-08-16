@@ -195,6 +195,25 @@ namespace Config {
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc
         // reads. Same inheritance rule, same reason.
         bool OptLuaTypeFast = false;
+        // Caches over Win32 calls that answer the same thing every time:
+        // GetSystemInfo, GetSystemMetrics, GetVersionEx, RegQueryValueEx,
+        // GetProcAddress, GetModuleFileName, GetEnvironmentVariable and
+        // GetPrivateProfile. They hung off OptTimingFix, which is described as
+        // a timing fix and should own the clock hooks, not eight lookups that
+        // have nothing to do with time.
+        bool OptWin32ApiCaches = false;
+        // The debug-family Win32 hooks: IsBadReadPtr / IsBadWritePtr answered
+        // from VirtualQuery, OutputDebugString turned into a no-op, and
+        // IsDebuggerPresent forced to false. They hung off OptCvarNullGuard,
+        // which declines CVar writes through uninitialised objects and is
+        // unrelated to any of them.
+        bool OptDebugApiHooks = false;
+        // Spin counts retrofitted onto CriticalSection and WaitForSingleObject.
+        // They hung off OptDefragLf, the lock-free heap defragmenter, which is
+        // a different subsystem; OptLockTuning is the neighbouring switch and
+        // does the same kind of work, but it defaults on while DefragLf defaults
+        // off, so folding them in would silently start them everywhere.
+        bool OptLockSpinHooks = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
