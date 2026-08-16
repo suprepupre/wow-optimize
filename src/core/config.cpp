@@ -288,7 +288,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("General", "VulkanDXVK", "0", iniPath.c_str());
             WritePrivateProfileStringA("General", "TimingFix", "0", iniPath.c_str());
             WritePrivateProfileStringA("General", "CvarNullGuard", "1", iniPath.c_str());
-            WritePrivateProfileStringA("General", "DeviceCbGuard", "1", iniPath.c_str());
+            WritePrivateProfileStringA("General", "DeviceCbGuard", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowOptHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowPerfHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowExtendedHooks", "1", iniPath.c_str());
@@ -320,7 +320,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("UI_Lua", "ModuleHandleCache", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "FrameScriptDispatch", "0", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaNumConvFast", "0", iniPath.c_str());
-            WritePrivateProfileStringA("UI_Lua", "LuaOpcache", "0", iniPath.c_str());  // #37: slow loads + Lua errors — off by default
+            WritePrivateProfileStringA("UI_Lua", "LuaOpcache", "0", iniPath.c_str());  // #37: slow loads + Lua errors — off by default
             WritePrivateProfileStringA("UI_Lua", "LuaOpcacheTables", "1", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaOpcacheStrings", "1", iniPath.c_str());
             WritePrivateProfileStringA("UI_Lua", "LuaOpcacheWrites", "1", iniPath.c_str());
@@ -382,7 +382,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptVulkanDXVK          = GetPrivateProfileIntA("General", "VulkanDXVK", 0, iniPath.c_str()) != 0;
         g_settings.OptTimingFix           = GetPrivateProfileIntA("General", "TimingFix", 0, iniPath.c_str()) != 0;
         g_settings.OptCvarNullGuard       = GetPrivateProfileIntA("General", "CvarNullGuard", 1, iniPath.c_str()) != 0;
-        g_settings.OptDeviceCbGuard       = GetPrivateProfileIntA("General", "DeviceCbGuard", 1, iniPath.c_str()) != 0;
+        g_settings.OptDeviceCbGuard       = GetPrivateProfileIntA("General", "DeviceCbGuard", 1, iniPath.c_str()) != 0;
         g_settings.OptWowOptHooks        = GetPrivateProfileIntA("General", "WowOptHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowPerfHooks       = GetPrivateProfileIntA("General", "WowPerfHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowExtendedHooks   = GetPrivateProfileIntA("General", "WowExtendedHooks", 1, iniPath.c_str()) != 0;
@@ -422,7 +422,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptModuleHandleCache   = GetPrivateProfileIntA("UI_Lua", "ModuleHandleCache", 0, iniPath.c_str()) != 0;
         g_settings.OptFrameScriptDispatch = GetPrivateProfileIntA("UI_Lua", "FrameScriptDispatch", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaNumConvFast      = GetPrivateProfileIntA("UI_Lua", "LuaNumConvFast", 0, iniPath.c_str()) != 0;
-        g_settings.OptLuaOpcache          = GetPrivateProfileIntA("UI_Lua", "LuaOpcache", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaOpcache          = GetPrivateProfileIntA("UI_Lua", "LuaOpcache", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaOpcacheTables   = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheTables", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaOpcacheStrings  = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheStrings", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaOpcacheWrites   = GetPrivateProfileIntA("UI_Lua", "LuaOpcacheWrites", 1, iniPath.c_str()) != 0;
