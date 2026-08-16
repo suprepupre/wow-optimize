@@ -46,6 +46,26 @@ static double    g_over33      = 0.0;   // counters kept as double to avoid cast
 static double    g_over50      = 0.0;
 static double    g_over100     = 0.0;
 
+// Everything above accumulates for the whole session and never forgets, which
+// makes the periodic report unable to answer the question people actually ask
+// of it. A player reporting that the frame rate degrades over a raid gets a p99
+// that has not moved in an hour, because the frames that set it are still in the
+// sample; the same is true in reverse, so a fix cannot be seen either. Two
+// reporters have now read those percentiles as simply wrong.
+//
+// So each report also describes the interval since the previous one. That is a
+// snapshot-and-subtract at report time rather than a second set of counters, to
+// keep the per-frame path exactly as it was. The window maximum is the one
+// figure a subtraction cannot recover, so it is tracked directly.
+static uint32_t  g_prevBuckets[BUCKET_COUNT];
+static uint64_t  g_prevFrames   = 0;
+static double    g_prevSumMs    = 0.0;
+static double    g_prevOver33   = 0.0;
+static double    g_prevOver50   = 0.0;
+static double    g_prevOver100  = 0.0;
+static double    g_windowMaxMs  = 0.0;
+static bool      g_haveWindow   = false;
+
 // A smoothed frame time, updated in constant time.
 //
 // RecentP95Ms is the honest measure but it copies the window and sorts it, which
@@ -89,7 +109,9 @@ static uint64_t g_medianAtFrame = 0;
 static DWORD  g_lastSlowReport = 0;
 static uint64_t g_slowFrames  = 0;
 
-static void ComputePercentiles(const double* wanted, double* out, int n);
+static void ComputePercentiles(const uint32_t* buckets, uint64_t frames,
+                               double maxMs, const double* wanted,
+                               double* out, int n);
 
 // Recomputing the median every frame would walk 1000 buckets per frame. Every 512
 // frames is often enough for a threshold and costs nothing measurable.
@@ -98,7 +120,7 @@ static void RefreshMedian() {
     g_medianAtFrame = g_frames;
     static const double half[] = { 0.50 };
     double p[1] = {};
-    ComputePercentiles(half, p, 1);
+    ComputePercentiles(g_buckets, g_frames, g_maxMs, half, p, 1);
     g_medianMs = p[0];
 }
 
@@ -131,6 +153,12 @@ void Init() {
     g_sumMs    = 0.0;
     g_maxMs    = 0.0;
     g_over33 = g_over50 = g_over100 = 0.0;
+    memset(g_prevBuckets, 0, sizeof(g_prevBuckets));
+    g_prevFrames = 0;
+    g_prevSumMs = 0.0;
+    g_prevOver33 = g_prevOver50 = g_prevOver100 = 0.0;
+    g_windowMaxMs = 0.0;
+    g_haveWindow = false;
     g_last.QuadPart = 0;
     g_source = Source::None;
     g_medianMs = 0.0;
@@ -184,6 +212,7 @@ static void Accumulate(double ms) {
     g_frames++;
     g_sumMs += ms;
     if (ms > g_maxMs) g_maxMs = ms;
+    if (ms > g_windowMaxMs) g_windowMaxMs = ms;
     if (ms > 33.0)  g_over33  += 1.0;
     if (ms > 50.0)  g_over50  += 1.0;
     if (ms > 100.0) g_over100 += 1.0;
@@ -253,21 +282,25 @@ void OnPresent(Source src) {
     Accumulate(ms);
 }
 
-// Walks the histogram once, filling in every requested percentile in order.
-static void ComputePercentiles(const double* wanted, double* out, int n) {
+// Walks a histogram once, filling in every requested percentile in order.
+// Takes the histogram rather than reading the session one, so the same walk
+// serves both the cumulative figures and the per-window ones.
+static void ComputePercentiles(const uint32_t* buckets, uint64_t frames,
+                               double maxMs, const double* wanted,
+                               double* out, int n) {
     uint64_t seen = 0;
     int next = 0;
     for (int i = 0; i < BUCKET_COUNT && next < n; i++) {
-        seen += g_buckets[i];
-        while (next < n && (double)seen >= wanted[next] * (double)g_frames) {
+        seen += buckets[i];
+        while (next < n && (double)seen >= wanted[next] * (double)frames) {
             out[next] = (i + 1) * BUCKET_MS;
             next++;
         }
     }
     // Anything not reached inside the histogram lives in the overflow tail.
     while (next < n) {
-        out[next] = (g_maxMs > BUCKET_COUNT * BUCKET_MS) ? g_maxMs
-                                                        : BUCKET_COUNT * BUCKET_MS;
+        out[next] = (maxMs > BUCKET_COUNT * BUCKET_MS) ? maxMs
+                                                       : BUCKET_COUNT * BUCKET_MS;
         next++;
     }
 }
@@ -290,7 +323,7 @@ void Report(const char* reason) {
 
     static const double wanted[] = { 0.50, 0.95, 0.99, 0.999 };
     double pct[4] = {};
-    ComputePercentiles(wanted, pct, 4);
+    ComputePercentiles(g_buckets, g_frames, g_maxMs, wanted, pct, 4);
 
     double avg = g_sumMs / (double)g_frames;
     double seconds = g_sumMs / 1000.0;
@@ -299,12 +332,55 @@ void Report(const char* reason) {
     Log("[FrameBench]   %llu frames over %.1fs, source: %s, config %08X, build %s",
         (unsigned long long)g_frames, seconds, SourceName(g_source),
         ConfigFingerprint(), WOW_OPTIMIZE_VERSION_STR);
-    Log("[FrameBench]   avg %.2f ms (%.1f fps)   p50 %.2f   p95 %.2f   p99 %.2f   p99.9 %.2f   max %.2f",
+    Log("[FrameBench]   session:  avg %.2f ms (%.1f fps)   p50 %.2f   p95 %.2f   p99 %.2f   p99.9 %.2f   max %.2f",
         avg, avg > 0.0 ? 1000.0 / avg : 0.0, pct[0], pct[1], pct[2], pct[3], g_maxMs);
     Log("[FrameBench]   janky frames: >33ms %.0f (%.2f%%)  >50ms %.0f (%.2f%%)  >100ms %.0f (%.2f%%)",
         g_over33,  100.0 * g_over33  / (double)g_frames,
         g_over50,  100.0 * g_over50  / (double)g_frames,
         g_over100, 100.0 * g_over100 / (double)g_frames);
+
+    // The interval since the previous report. Everything above is cumulative and
+    // cannot move once a session has run for a while; this is the line that shows
+    // a frame rate degrading, or recovering.
+    {
+        uint64_t winFrames = g_frames - g_prevFrames;
+        if (!g_haveWindow) {
+            Log("[FrameBench]   since last report: this is the first report of the session");
+        } else if (winFrames == 0) {
+            Log("[FrameBench]   since last report: no frames presented");
+        } else {
+            uint32_t winBuckets[BUCKET_COUNT];
+            for (int i = 0; i < BUCKET_COUNT; i++)
+                winBuckets[i] = g_buckets[i] - g_prevBuckets[i];
+
+            double winPct[4] = {};
+            ComputePercentiles(winBuckets, winFrames, g_windowMaxMs, wanted, winPct, 4);
+
+            double winSum = g_sumMs - g_prevSumMs;
+            double winAvg = winSum / (double)winFrames;
+            double w33 = g_over33  - g_prevOver33;
+            double w50 = g_over50  - g_prevOver50;
+            double w100 = g_over100 - g_prevOver100;
+
+            Log("[FrameBench]   window:   avg %.2f ms (%.1f fps)   p50 %.2f   p95 %.2f   p99 %.2f   p99.9 %.2f   max %.2f",
+                winAvg, winAvg > 0.0 ? 1000.0 / winAvg : 0.0,
+                winPct[0], winPct[1], winPct[2], winPct[3], g_windowMaxMs);
+            Log("[FrameBench]   window:   %llu frames over %.1fs, >33ms %.0f (%.2f%%)  >50ms %.0f (%.2f%%)  >100ms %.0f (%.2f%%)",
+                (unsigned long long)winFrames, winSum / 1000.0,
+                w33,  100.0 * w33  / (double)winFrames,
+                w50,  100.0 * w50  / (double)winFrames,
+                w100, 100.0 * w100 / (double)winFrames);
+        }
+
+        for (int i = 0; i < BUCKET_COUNT; i++) g_prevBuckets[i] = g_buckets[i];
+        g_prevFrames   = g_frames;
+        g_prevSumMs    = g_sumMs;
+        g_prevOver33   = g_over33;
+        g_prevOver50   = g_over50;
+        g_prevOver100  = g_over100;
+        g_windowMaxMs  = 0.0;
+        g_haveWindow   = true;
+    }
     if (g_gaps > 0) {
         // Named, not hidden. These are excluded from every number above, and the
         // longest of them is usually a loading screen that outlived the 30 s
