@@ -31,6 +31,28 @@
 // Therefore `this+0x38` empty implies the scan cannot find a match, and that is
 // exactly the case that costs the most.
 //
+// Why 0x38 and not 0x34 (checked against the disassembly, 2026-08-16). The
+// dependants list has a root made of two adjacent dwords at this+0x34 and
+// this+0x38, the same shape as the global list's off_AC101C / dword_AC1020.
+// sub_489C30 inserts through the first of them - `*(this+13) = v5` in its
+// decompilation, which is this+0x34 - and begins its own walk from the second,
+// `result = *(this+14)`, which is this+0x38. sub_489710 does the same thing on
+// the global root: its walk starts at `mov eax, dword_AC1020`, the second dword
+// of that pair, not at off_AC101C. So 0x38 is the head of traversal and 0x34 is
+// the insertion point, and reading 0x38 is reading what a walk would read.
+//
+// Where the profile's nine percent sits, also from the disassembly: 0x00489763
+// is `test eax, eax` at the top of the inner anchor loop, right after
+// `mov eax, [edx-4]`. That is inside the scan, not in the early-out at 0x489726
+// that this module leaves to the client. The target is the right one.
+//
+// The scan skips any anchor whose word at +0x0C has 0x800 set, while sub_489C30
+// registers a dependant regardless of it - the point mask it ORs into that same
+// word occupies the low bits. A dependants list holding only entries the scan
+// would reject is therefore a real state, and it is the state behind every
+// "something at +0x38 but the client found nothing" counted below. Extending the
+// shortcut to cover it is the obvious next step and is not attempted here.
+//
 // ---------------------------------------------------------------------------
 // This is the second attempt. The first one crashed the game on login and is
 // worth writing down.
