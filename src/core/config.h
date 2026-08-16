@@ -207,7 +207,8 @@ namespace Config {
         // IsDebuggerPresent forced to false. They hung off OptCvarNullGuard,
         // which declines CVar writes through uninitialised objects and is
         // unrelated to any of them.
-        bool OptDebugApiHooks = false;
+        // Defaults on, matching CvarNullGuard, which is what it used to run under.
+        bool OptDebugApiHooks = true;
         // Spin counts retrofitted onto CriticalSection and WaitForSingleObject.
         // They hung off OptDefragLf, the lock-free heap defragmenter, which is
         // a different subsystem; OptLockTuning is the neighbouring switch and

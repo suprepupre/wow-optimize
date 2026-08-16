@@ -420,7 +420,7 @@ namespace WowOptimizeLauncher {
                 { "File I/O Hooks", new SettingItem("General", "FileIoHooks", false, null, "Everything this tool does to Windows file calls: sequential-scan hints on open, the adaptive read cache for MPQ archives, handle cleanup, a skipped buffer flush, and caches for file attributes, seeks and sizes. These used to be switched by the DBC cache above, which meant clearing that one to test it also removed the whole file layer, silently. Turn this off if loading, streaming or disk behaviour looks wrong.") },
                 { "Lua Type Fast Path", new SettingItem("UI_Lua", "LuaTypeFast", false, null, "Resolves a Lua stack index inline in lua_type instead of calling the engine's index2adr. Also used to be switched by the DBC cache, which it has nothing to do with.") },
                 { "Win32 API Caches", new SettingItem("General", "Win32ApiCaches", false, null, "Caches Windows calls that return the same answer every time: system info, screen metrics, OS version, registry reads, GetProcAddress, module file names, environment variables and ini reads. These used to be switched by the timing fix, which should own the clock hooks and nothing else.") },
-                { "Debug API Hooks", new SettingItem("General", "DebugApiHooks", false, null, "Answers IsBadReadPtr and IsBadWritePtr from a memory query instead of the slow path, turns OutputDebugString into a no-op, and reports no debugger attached. These used to be switched by the CVar safeguard, which is unrelated.") },
+                { "Debug API Hooks", new SettingItem("General", "DebugApiHooks", true, null, "Answers IsBadReadPtr and IsBadWritePtr from a memory query instead of the slow path, turns OutputDebugString into a no-op, and reports no debugger attached. These used to be switched by the CVar safeguard, which is unrelated and defaults on, so this defaults on too and keeps doing what it already did.") },
                 { "Lock Spin Counts", new SettingItem("General", "LockSpinHooks", false, null, "Adds spin counts to CriticalSection and WaitForSingleObject so a short wait does not go straight to the kernel. These used to be switched by the heap defragmenter, a different subsystem.") },
                 { "Asynchronous Texture Loader", new SettingItem("Graphics_Sound", "AsyncTexLoader", false, null, "Asynchronously loads and decompresses BLP textures in background worker threads, hot-swapping them on frame boundaries to prevent stutters. Marked experimental because until this build the switch was inert - it was written to one section of the ini and read from another - so nobody has ever run this, and worker threads are where this project's freezes have come from. Try it if you want to help, not because you expect it to help.", true) },
                 { "Texture Smart Unload Delay", new SettingItem("Graphics_Sound", "TextureUnloadDelay", false, null, "Holds a texture the engine has finished with for five seconds, in case it is wanted again before then. Do not turn this on. Two testers have now measured it: 100,664 held for 380 reuses (0.4%), and 795,117 held for 1,652 (0.2%). Everything else expired and was released anyway. In 3.18.0 a bug stopped it working after the first loading screen, so nobody paid for it; 3.18.1 fixed the bug and it began doing its job for real, which means a lock and a hash insert on every texture the engine releases - 795,117 of them in one session - to save 1,652 reloads. It now measures its own reuse rate and switches off below one percent, but the honest answer is that the idea does not pay.", true) },
@@ -1164,6 +1164,7 @@ namespace WowOptimizeLauncher {
                         data.Ctrl.Checked = data.DefaultVal;
                     }
                 }
+                ApplyInheritedDefaults(currentSettings);
                 UpdateActiveModulesCount();
             } catch (Exception ex) {
                 MessageBox.Show("Error loading config profile: " + ex.Message, "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -1174,6 +1175,37 @@ namespace WowOptimizeLauncher {
         private void SaveSettings() {
             iniPath = ResolveIniPath();
             SaveSettingsToPath(iniPath);
+        }
+
+        // Switches split out of larger ones read their old parent as their default
+        // while their own key is absent, so that an existing wow_opt.ini keeps the
+        // behaviour it had. The DLL does this in Config::Load. The launcher has to
+        // resolve it the same way, because it writes every key on save: a config
+        // that had DbcLookupCache=1 and no FileIoHooks line would otherwise get
+        // FileIoHooks=0 written into it the first time anyone pressed Save, and the
+        // file layer would go off without anyone asking for that.
+        private SettingItem FindByKey(string key) {
+            foreach (SettingItem item in settingsMap.Values) {
+                if (item.Key == key) return item;
+            }
+            return null;
+        }
+
+        private void InheritIfAbsent(Dictionary<string, string> present, string key, string parentKey) {
+            if (present.ContainsKey(key)) return;
+            SettingItem child = FindByKey(key);
+            SettingItem parent = FindByKey(parentKey);
+            if (child == null || parent == null) return;
+            if (child.Ctrl == null || parent.Ctrl == null) return;
+            child.Ctrl.Checked = parent.Ctrl.Checked;
+        }
+
+        private void ApplyInheritedDefaults(Dictionary<string, string> present) {
+            InheritIfAbsent(present, "FileIoHooks", "DbcLookupCache");
+            InheritIfAbsent(present, "LuaTypeFast", "DbcLookupCache");
+            InheritIfAbsent(present, "Win32ApiCaches", "TimingFix");
+            InheritIfAbsent(present, "DebugApiHooks", "CvarNullGuard");
+            InheritIfAbsent(present, "LockSpinHooks", "DefragLf");
         }
 
         private void SaveSettingsToPath(string path) {
