@@ -1,6 +1,7 @@
 #include "config.h"
 #include <windows.h>
 #include <string>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 
@@ -142,6 +143,8 @@ static const BoolSetting kBoolSettings[] = {
 
 static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolSettings[0]));
 
+    static void ReportDuplicateKeys(const char* path);
+
     void DumpToLog() {
         Log("[Config] Read from: %s", g_loadedFrom.empty() ? "(none)" : g_loadedFrom.c_str());
         if (g_migrationNote) Log("[Config]   (%s)", g_migrationNote);
@@ -189,6 +192,69 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         Log("[Config]   [General] SleepPrecisionValue=%d", g_settings.SleepPrecisionValue);
         Log("[Config]   [General] SessionLogsToKeep=%d", g_settings.SessionLogsToKeep);
         Log("[Config] %d set in the file, %d left at defaults.", fromFile, defaulted);
+
+        if (haveFile) ReportDuplicateKeys(path);
+    }
+
+    // A key written twice in one section is not a hypothetical. A tester's ini
+    // carried LuaGcManual=1 near the top of [UI_Lua] and LuaGcManual=0 at the
+    // bottom, and spent a session believing the collector was on manual when
+    // GetPrivateProfileInt had answered from the first one. Everything above
+    // reports the resolved value correctly and still cannot show that, because
+    // the losing line never reaches this code.
+    //
+    // Reads the file directly rather than through the profile API, which is what
+    // hides the duplicate in the first place.
+    static void ReportDuplicateKeys(const char* path) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, path, "rb") != 0 || !f) return;
+
+        struct Seen { std::string section; std::string key; int line; };
+        std::vector<Seen> seen;
+        std::string section;
+        char buf[512];
+        int lineNo = 0, reported = 0;
+
+        while (fgets(buf, sizeof(buf), f)) {
+            lineNo++;
+            char* s = buf;
+            while (*s == ' ' || *s == '\t') s++;
+            if (*s == ';' || *s == '#' || *s == '\r' || *s == '\n' || *s == 0) continue;
+
+            if (*s == '[') {
+                char* end = strchr(s, ']');
+                if (end) section.assign(s + 1, end - s - 1);
+                continue;
+            }
+
+            char* eq = strchr(s, '=');
+            if (!eq) continue;
+            std::string key(s, eq - s);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key.empty()) continue;
+
+            bool dup = false;
+            for (size_t i = 0; i < seen.size(); i++) {
+                if (seen[i].section == section && _stricmp(seen[i].key.c_str(), key.c_str()) == 0) {
+                    if (reported == 0) {
+                        Log("[Config] This file sets the same key more than once. Windows "
+                            "answers with the first one it finds, so the later line does "
+                            "nothing and a setting you believe you changed has not "
+                            "changed:");
+                    }
+                    Log("[Config]   [%s] %s - line %d wins, line %d is ignored",
+                        section.c_str(), key.c_str(), seen[i].line, lineNo);
+                    reported++;
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                Seen e; e.section = section; e.key = key; e.line = lineNo;
+                seen.push_back(e);
+            }
+        }
+        fclose(f);
     }
 
     static bool FileExists(const std::string& p) {
