@@ -7598,7 +7598,24 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CrashDumper::FeatureSetActive("LuaVMEngine", vmEngineOk);
 
     Log("--- Hardware Cursor ---");
-    bool cursorOk = Config::g_settings.OptCvarNullGuard && InstallHardwareCursorHooks();
+    // Gated on its own switch. This read OptCvarNullGuard, which is on by
+    // default and unrelated, so the cursor work ran on installs that had
+    // HardwareCursor=0 - a tester log shows the switch off and the feature
+    // reporting itself ACTIVE in the same session. The launcher, the settings
+    // struct and the ini default all declare this feature off unless asked for,
+    // so running it was never the intent.
+    //
+    // What it does is not free: it raises the cursor display count until the
+    // cursor is visible and drops any clip region. A client that wants the
+    // cursor hidden then has to put it back, which is a candidate for the mouse
+    // flicker reported against recent builds - unconfirmed, but the feature had
+    // no business running there at all.
+    bool cursorOk = false;
+    if (Config::g_settings.OptHardwareCursor) {
+        cursorOk = InstallHardwareCursorHooks();
+    } else {
+        Log("Hardware cursor: off (HardwareCursor=0)");
+    }
 
     Log("--- Frame Script Throttling ---");
     bool frameThrottleOk = Config::g_settings.OptUIFrameBatch && InstallFrameThrottling();
