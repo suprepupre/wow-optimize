@@ -76,6 +76,11 @@ static int   g_reports      = 0;
 static int   g_enableTries  = 0;
 static bool  g_saidWaiting  = false;
 static int   g_badReports   = 0;
+// Set when the client may be left profiling with nothing driving it: the switch
+// is off this run, or this module retired after having turned profiling on.
+static bool  g_disarmPending  = false;
+static DWORD g_disarmLastTry  = 0;
+static int   g_disarmTries    = 0;
 
 // Long enough that the numbers mean something, short enough to catch a session
 // that only goes bad in a raid.
@@ -212,8 +217,53 @@ static EnableResult EnableScriptProfile() {
     return kNoSuchCVar;
 }
 
+// Turning it off again, which nothing did.
+//
+// SetCVar('scriptProfile','1') outlives the switch that asked for it: on clients
+// that keep this variable it is still set on the next launch, and on all of them
+// it stays set for the rest of the session. Nothing here ever wrote a zero, so
+// turning the launcher switch off left the client accounting for every script
+// call forever, at the cost the switch description warns about. A reporter ran
+// several sessions at single-digit frame rates and had no way to get out of it
+// from the interface, because the only thing that had turned it on was gone.
+//
+// Same shape as the enable: only an answer given while logged in means anything,
+// and a client without the CVar has nothing to undo.
+static const char* kDisableChunk =
+    "WOWOPT_PROF_STATE='missing' "
+    "local li = false "
+    "local okl,r = pcall(IsLoggedIn) if okl and r then li = true end "
+    "if not li then WOWOPT_PROF_STATE='notyet' return end "
+    "local ok,v = pcall(GetCVar,'scriptProfile') "
+    "if ok and v ~= nil then "
+    "if tostring(v) == '0' then WOWOPT_PROF_STATE='off' return end "
+    "if pcall(function() SetCVar('scriptProfile','0') end) then "
+    "WOWOPT_PROF_STATE='off' end end";
+
+// kProfileOn here means "still on and could not be cleared"; kNoSuchCVar means
+// there was nothing to clear. Both end the attempt.
+static EnableResult DisableScriptProfile() {
+    char state[64];
+    __try {
+        FrameScript_Execute_(kDisableChunk, "wow_optimize:addon_profiler", 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kNotInWorldYet;
+    }
+    if (!ReadGlobalString("WOWOPT_PROF_STATE", state, sizeof(state)))
+        return kNotInWorldYet;
+    if (strcmp(state, "off") == 0)    return kNoSuchCVar;
+    if (strcmp(state, "notyet") == 0) return kNotInWorldYet;
+    return kNoSuchCVar;
+}
+
 bool Init() {
-    if (!Config::g_settings.OptAddonProfiler) return true;
+    if (!Config::g_settings.OptAddonProfiler) {
+        // The switch may have been on last time, and what it set persists. Clear
+        // it once the interface exists, or the player keeps paying for a feature
+        // they turned off.
+        g_disarmPending = true;
+        return true;
+    }
 
     g_active = true;
     g_lastReport = GetTickCount();
@@ -236,10 +286,43 @@ bool Init() {
 
 // Called from the main-thread pump. Everything here runs Lua, so it must not
 // run from anywhere else, and not while the interface is being torn down.
+// Stopping for any reason other than "this client never had the CVar". If
+// profiling was switched on, it has to be switched back off: nothing else does
+// it, and it outlives this module.
+static void Retire() {
+    g_active = false;
+    if (g_profileOn) {
+        g_disarmPending = true;
+        g_disarmLastTry = 0;
+        g_disarmTries   = 0;
+    }
+}
+
 void OnFrame(bool luaBusy) {
-    if (!g_active) return;
+    if (!g_active && !g_disarmPending) return;
     if (GetCurrentThreadId() != g_mainThreadId) return;
     if (luaBusy) return;
+
+    // Clearing a leftover scriptProfile from a previous session, or from this
+    // module giving up after it had already switched profiling on.
+    if (g_disarmPending) {
+        DWORD nowOff = GetTickCount();
+        if (g_disarmLastTry != 0 && nowOff - g_disarmLastTry < 15000) return;
+        g_disarmLastTry = nowOff;
+        EnableResult r = DisableScriptProfile();
+        if (r == kNotInWorldYet) {
+            // Not logged in yet, or no usable VM. Keep trying for a while; a
+            // client that never logs in has nothing to clear anyway.
+            if (++g_disarmTries >= 20) {
+                g_disarmPending = false;
+            }
+            return;
+        }
+        g_disarmPending = false;
+        Log("[AddonProfiler] off - the client's script profiler was set back to 0 "
+            "in case a previous session left it on (it outlives this switch)");
+        return;
+    }
 
     DWORD now = GetTickCount();
     if (!g_profileOn) {
@@ -293,7 +376,7 @@ void OnFrame(bool luaBusy) {
         FrameScript_Execute_(kGatherChunk, "wow_optimize:addon_profiler", 0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("[AddonProfiler] The gather chunk faulted - stopping");
-        g_active = false;
+        Retire();
         return;
     }
 
@@ -315,14 +398,14 @@ void OnFrame(bool luaBusy) {
             if (++g_badReports >= 2) {
                 Log("[AddonProfiler] Two reports in a row came back with nothing usable "
                     "- stopping rather than paying for the collection every minute.");
-                g_active = false;
+                Retire();
             }
         } else {
             g_badReports = 0;
         }
     } else {
         Log("[AddonProfiler] Could not read the result back this time");
-        if (++g_badReports >= 2) g_active = false;
+        if (++g_badReports >= 2) Retire();
     }
 }
 
