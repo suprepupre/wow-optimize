@@ -6752,7 +6752,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
             Log("[MimallocLarge] install failed — staying on stock CRT allocator");
         }
     } else {
-        Log("[MimallocLarge] disabled via configuration (opt-in; enable in launcher to route large allocations to mimalloc)");
+        // Says the ini, not the launcher: this key has no launcher entry, so the
+        // old wording sent anyone who wanted it looking for a checkbox that is
+        // not there.
+        Log("[MimallocLarge] disabled via configuration (opt-in; set MimallocLarge=1 "
+            "under [General] in wow_opt.ini to route large allocations to mimalloc - "
+            "there is no launcher switch for this one)");
     }
     (void)mimallocLargeOk;
     Sleep(100);
