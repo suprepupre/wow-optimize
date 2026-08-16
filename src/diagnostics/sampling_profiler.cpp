@@ -35,6 +35,9 @@ static const DWORD PROFILER_WARMUP_MS = 15000;
 
 // ---- configuration ------------------------------------------------
 static constexpr DWORD SAMPLE_INTERVAL_MS = 1;      // target interval
+// Cadence while nothing is being recorded (warmup, loading screens). Only needs
+// to notice the state changing back, so it costs one wake-up per frame at most.
+static constexpr DWORD IDLE_INTERVAL_MS   = 16;
 static constexpr int   MAX_KNOWN_FUNCS    = 256;     // address table size
 static constexpr int   TOP_N              = 50;      // functions to dump
 static constexpr uintptr_t WOW_BASE       = 0x00400000;
@@ -456,6 +459,30 @@ static DWORD WINAPI SamplerThreadProc(LPVOID) {
     if (g_samplerStartTick == 0) g_samplerStartTick = GetTickCount();
 
     while (g_running) {
+        // Only steady-state, in-world samples are kept: the warmup window and
+        // any loading transition are excluded, so that startup one-shots (hook
+        // install, MPQ/DBC load) and load-screen page-fault spikes stay out of
+        // the "what costs frame time in play" picture.
+        //
+        // That decision used to be made *after* the sample was taken. The
+        // discarded ones cost exactly as much as the kept ones: a suspend, a
+        // context read and a resume of the main thread, a thousand times a
+        // second, throughout every loading screen - against a thread that is
+        // decompressing and page-faulting its way through a zone load, and
+        // holding the allocator and archive locks while it does. A reporter
+        // traced their excessive loading screen times to this profiler being
+        // enabled, and turning it off shortened them.
+        //
+        // Decide first. The main thread is now touched only when the sample is
+        // going to be kept, and the loop idles instead of spinning at the
+        // sampling rate while there is nothing to record.
+        const bool warmedUp = (GetTickCount() - g_samplerStartTick) >= PROFILER_WARMUP_MS;
+        if (!warmedUp || LuaOpt::IsLoadingMode()) {
+            g_skippedSamples++;
+            Sleep(IDLE_INTERVAL_MS);
+            continue;
+        }
+
         // Suspend → read → resume. The window is ~microseconds;
         // WoW won't notice. Same technique crash dumpers use.
         if (SuspendThread(g_mainThread) != (DWORD)-1) {
@@ -464,30 +491,21 @@ static DWORD WINAPI SamplerThreadProc(LPVOID) {
             ResumeThread(g_mainThread);  // resume ASAP, then decide off-thread
 
             if (eip) {
-                // Only record steady-state, in-world samples: skip the warmup
-                // window and any loading/transition. This keeps startup one-shots
-                // (hook install, MPQ/DBC load) and load-screen page-fault spikes
-                // out of the "what costs frame time in play" picture.
-                bool warmedUp = (GetTickCount() - g_samplerStartTick) >= PROFILER_WARMUP_MS;
-                if (warmedUp && !LuaOpt::IsLoadingMode()) {
-                    uint64_t idx = g_writeIdx % RING_SIZE;
-                    g_ring[idx] = eip;
-                    g_writeIdx++;
-                    g_totalSamples++;
-                } else {
-                    g_skippedSamples++;
-                }
+                uint64_t idx = g_writeIdx % RING_SIZE;
+                g_ring[idx] = eip;
+                g_writeIdx++;
+                g_totalSamples++;
             }
         }
 
         // One background sample per WORKER_EVERY_N main ones. Enumeration is done
         // once, after the warmup window, by which point the client has created
-        // the threads it is going to use.
+        // the threads it is going to use. Reaching here already means warmed up
+        // and not loading.
         static uint64_t tick = 0;
-        if (++tick % WORKER_EVERY_N == 0 &&
-            (GetTickCount() - g_samplerStartTick) >= PROFILER_WARMUP_MS) {
+        if (++tick % WORKER_EVERY_N == 0) {
             if (g_workerCount == 0) EnumerateWorkerThreads();
-            if (!LuaOpt::IsLoadingMode()) SampleOneWorker();
+            SampleOneWorker();
         }
 
         Sleep(SAMPLE_INTERVAL_MS);
@@ -972,7 +990,8 @@ static void DumpResults() {
     // Two percentages: of everything, and of the time the thread was running -
     // the second is the one that says how much of a real optimization target
     // something is, and it is the one that was missing.
-    Log("[SamplingProfiler] === TOP %d HOT FUNCTIONS/REGIONS (%llu steady-state samples, %llu skipped: loading/warmup) ===",
+    Log("[SamplingProfiler] === TOP %d HOT FUNCTIONS/REGIONS (%llu steady-state samples, "
+        "%llu idle ticks during loading/warmup where the main thread was left alone) ===",
         TOP_N, (unsigned long long)total, (unsigned long long)g_skippedSamples);
 
     int printed = 0;
