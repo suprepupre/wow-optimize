@@ -215,6 +215,12 @@ namespace Config {
         // does the same kind of work, but it defaults on while DefragLf defaults
         // off, so folding them in would silently start them everywhere.
         bool OptLockSpinHooks = false;
+        // Charges the sampling profiler's main-thread samples to the addon whose
+        // Lua is on the call stack. Rides on the sampler, which already stops
+        // the thread, so it adds nothing to the paths it measures - unlike the
+        // client's own script profiler, which a reporter measured at 1-4 fps in
+        // a dungeon. Inherits SamplingProfiler: no sampler, nothing to charge.
+        bool OptLuaAddonProfile = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

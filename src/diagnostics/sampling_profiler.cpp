@@ -14,6 +14,7 @@
 #include <cstring>
 #include <algorithm>
 #include "sampling_profiler.h"
+#include "lua_addon_sampler.h"
 #include "version.h"
 #pragma comment(lib, "psapi.lib")
 
@@ -488,6 +489,13 @@ static DWORD WINAPI SamplerThreadProc(LPVOID) {
         if (SuspendThread(g_mainThread) != (DWORD)-1) {
             uintptr_t eip = 0;
             if (GetThreadContext(g_mainThread, &ctx)) eip = (uintptr_t)ctx.Eip;
+
+            // Which addon's Lua is on the stack, read while the thread is still
+            // stopped. The suspend is already paid for; this is a few loads on
+            // top of it and nothing at all on the paths being measured, which
+            // is the whole reason to do it here instead of instrumenting calls.
+            LuaAddonSampler::NoteSample();
+
             ResumeThread(g_mainThread);  // resume ASAP, then decide off-thread
 
             if (eip) {
@@ -1072,6 +1080,10 @@ static void DumpResults() {
                       "wow.exe HOT SPOTS (512-byte resolution)", "0x%08X", WOW_BASE);
 
     DumpWorkerThreads(total);
+
+    // Which addon the Lua time belonged to. Same samples, read a second way:
+    // the list above says which code ran, this says whose code it was.
+    LuaAddonSampler::Report();
 
     Log("[SamplingProfiler] === END PROFILE ===");
 }

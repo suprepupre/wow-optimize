@@ -391,6 +391,7 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/font_metrics_fast.cpp
     src/hooks_subsystems/font_metrics_fast.h
     src/diagnostics/sampling_profiler.cpp
+    src/diagnostics/lua_addon_sampler.cpp
     src/hooks_subsystems/sound_driver_guard.cpp
     src/hooks_subsystems/sound_emitter_guard.cpp
     src/hooks_subsystems/sound_buffer_guard.cpp

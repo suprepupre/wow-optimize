@@ -110,6 +110,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "Win32ApiCaches", &Settings::OptWin32ApiCaches },
     { "General", "DebugApiHooks", &Settings::OptDebugApiHooks },
     { "General", "LockSpinHooks", &Settings::OptLockSpinHooks },
+    { "UI_Lua", "LuaAddonProfile", &Settings::OptLuaAddonProfile },
     { "Graphics_Sound", "WorldStateCoalesce", &Settings::OptWorldStateCoalesce },
     { "Graphics_Sound", "D3d9RenderThread", &Settings::OptD3d9RenderThread },
     { "Combat_Net", "CombatLogFilter", &Settings::OptCombatLogFilter },
@@ -539,6 +540,8 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptWin32ApiCaches      = GetPrivateProfileIntA("General", "Win32ApiCaches", g_settings.OptTimingFix ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptDebugApiHooks       = GetPrivateProfileIntA("General", "DebugApiHooks", g_settings.OptCvarNullGuard ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptLockSpinHooks       = GetPrivateProfileIntA("General", "LockSpinHooks", g_settings.OptDefragLf ? 1 : 0, iniPath.c_str()) != 0;
+        // There is nothing to charge samples to without the sampler running.
+        g_settings.OptLuaAddonProfile     = GetPrivateProfileIntA("UI_Lua", "LuaAddonProfile", g_settings.OptSamplingProfiler ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptWorldStateCoalesce  = GetPrivateProfileIntA("Graphics_Sound", "WorldStateCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptD3d9RenderThread    = GetPrivateProfileIntA("Graphics_Sound", "D3d9RenderThread", 0, iniPath.c_str()) != 0;
         // HARD-DISABLED regardless of ini: this offloads D3D9 draw/Present/Reset
