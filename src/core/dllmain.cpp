@@ -607,6 +607,10 @@ void ClearCombatLogCache();
 // routed through WO_EnableHook are queued and applied in one MH_ApplyQueued.
 volatile long g_hookBatchMode = 0;
 
+// Set once the init sequence has committed its queue, so later installs know
+// the shared MinHook queue is theirs to batch into. See WO_LateBatchAllowed.
+volatile long g_hookBatchSettled = 0;
+
 // Forward declaration for CRT fast paths (defined in crt_mem_fastpath.cpp)
 extern bool InstallCrtMemFastPaths();
 extern void ShutdownCrtMemFastPaths();
@@ -8308,6 +8312,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
             Log("[HookBatch] Applied queued hook enables in one freeze");
         }
     }
+    // The queue is now empty and no other install is using it. Anything
+    // installing from here on may batch for itself.
+    g_hookBatchSettled = 1;
 #endif
 
     Log("");

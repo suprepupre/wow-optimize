@@ -3537,6 +3537,16 @@ bool InitPhase2(lua_State* L) {
     int hookedNow = 0;
     int hookedTotal = 0;
 
+    // Phase 2 runs on the main thread, after init has closed its batch window,
+    // every time the lua_State changes. Enabling each inline hook on its own
+    // costs a process-wide thread freeze, and this loop installs dozens of them
+    // in a row - that is the multi-second unresponsive window reported just
+    // after the login screen. Queue them and pay one freeze at the end instead.
+    // Only when init has settled: the MinHook queue is shared, and committing it
+    // mid-init would enable a partially built set.
+    const bool lateBatch = WO_LateBatchAllowed();
+    int queuedEnables = 0;
+
     for (int i = 0; i < NUM_FUNC_HOOKS; i++) {
         FuncHookEntry& e = g_funcHooks[i];
 
@@ -3704,12 +3714,15 @@ bool InitPhase2(lua_State* L) {
                         e.table ? e.table : "_G", e.name ? e.name : "ipairsaux", (int)s);
                     continue;
                 }
-                s = WO_EnableHook((void*)e.address);
+                s = lateBatch ? MH_QueueEnableHook((void*)e.address)
+                              : WO_EnableHook((void*)e.address);
                 if (s != MH_OK && s != MH_ERROR_ENABLED) {
-                    Log("[FastPath]   %-8s.%-8s  WO_EnableHook failed (%d)",
-                        e.table ? e.table : "_G", e.name ? e.name : "ipairsaux", (int)s);
+                    Log("[FastPath]   %-8s.%-8s  %s failed (%d)",
+                        e.table ? e.table : "_G", e.name ? e.name : "ipairsaux",
+                        lateBatch ? "MH_QueueEnableHook" : "WO_EnableHook", (int)s);
                     continue;
                 }
+                if (lateBatch && s == MH_OK) queuedEnables++;
 
                 e.hooked = true;
                 // Name it in the profile. Without this our own hot code shows
@@ -3727,6 +3740,19 @@ bool InitPhase2(lua_State* L) {
         __except(EXCEPTION_EXECUTE_HANDLER) {
             Log("[FastPath]   %-8s.%-8s  EXCEPTION during hook",
                 e.table ? e.table : "_G", e.name ? e.name : "ipairsaux");
+        }
+    }
+
+    if (queuedEnables > 0) {
+        MH_STATUS aq = MH_ApplyQueued();
+        if (aq != MH_OK) {
+            // The entries were marked hooked on the assumption this would
+            // commit. It did not, so say so rather than let the counts below
+            // report hooks that are not redirecting anything.
+            Log("[FastPath] Phase 2: MH_ApplyQueued FAILED (%d) - the enables queued "
+                "in this pass are not active", (int)aq);
+        } else {
+            Log("[FastPath] Phase 2: applied queued hook enables in one freeze");
         }
     }
 

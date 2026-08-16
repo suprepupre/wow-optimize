@@ -920,6 +920,27 @@ static inline MH_STATUS WO_EnableHook(void* target) {
     return MH_EnableHook(target);
 #endif
 }
+
+// Set once MainThread has run its MH_ApplyQueued. Installs that happen after
+// that point — the Lua fast path rediscovers and hooks its functions on the
+// main thread every time the lua_State changes — find g_hookBatchMode back at
+// zero, so WO_EnableHook takes the immediate path and every single enable pays
+// a full process-wide thread freeze. Doing that in a loop is what a client
+// reported as a multi-second unresponsive window just after the login screen.
+//
+// Such a caller has to batch for itself, and MinHook's enable queue is
+// process-wide: applying it while the init sequence is mid-queue would commit a
+// half-built set, which is exactly what the allocator hooks must never suffer
+// (malloc redirected while free is not). So a late batch is only allowed once
+// init has settled and nothing else is queueing.
+extern volatile long g_hookBatchSettled;
+static inline bool WO_LateBatchAllowed() {
+#if defined(TEST_DISABLE_HOOK_BATCHING) && TEST_DISABLE_HOOK_BATCHING
+    return false;
+#else
+    return g_hookBatchSettled != 0 && g_hookBatchMode == 0;
+#endif
+}
 #endif
 #endif
 
