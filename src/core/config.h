@@ -230,6 +230,12 @@ namespace Config {
         // default: it overrides the scheduler, and the residency figure from
         // OptCpuTopology should say it is needed before anyone turns it on.
         bool OptPinMainThread = false;
+        // The Lua pool block allocator (lmemPool.cpp, sub_855820) restarts its
+        // free-chunk search at chunk zero on every allocation. Second in a
+        // CPU-bound profile at 4.29% of executing time, with 2.3 million
+        // allocations in six minutes. Opt-in until a log shows the search is
+        // really where that time goes - the counters it adds answer that.
+        bool OptLuaMemPoolFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

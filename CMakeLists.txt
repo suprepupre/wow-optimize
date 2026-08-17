@@ -56,6 +56,7 @@ add_library(wow_optimize SHARED
     # unnoticed through several releases.
     src/core/version.rc
     src/hooks_subsystems/crt_mem_fastpath.cpp
+    src/runtime_vm/lua_mempool_fast.cpp
     src/runtime_vm/lua_optimize.cpp
     src/runtime_vm/lua_optimize.h
     src/hooks_subsystems/combatlog_optimize.cpp

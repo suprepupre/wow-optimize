@@ -113,6 +113,7 @@ static const BoolSetting kBoolSettings[] = {
     { "UI_Lua", "LuaAddonProfile", &Settings::OptLuaAddonProfile },
     { "General", "CpuTopology", &Settings::OptCpuTopology },
     { "General", "PinMainThread", &Settings::OptPinMainThread },
+    { "UI_Lua", "LuaMemPoolFast", &Settings::OptLuaMemPoolFast },
     { "Graphics_Sound", "WorldStateCoalesce", &Settings::OptWorldStateCoalesce },
     { "Graphics_Sound", "D3d9RenderThread", &Settings::OptD3d9RenderThread },
     { "Combat_Net", "CombatLogFilter", &Settings::OptCombatLogFilter },
@@ -546,6 +547,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptLuaAddonProfile     = GetPrivateProfileIntA("UI_Lua", "LuaAddonProfile", g_settings.OptSamplingProfiler ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptCpuTopology         = GetPrivateProfileIntA("General", "CpuTopology", 1, iniPath.c_str()) != 0;
         g_settings.OptPinMainThread       = GetPrivateProfileIntA("General", "PinMainThread", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaMemPoolFast      = GetPrivateProfileIntA("UI_Lua", "LuaMemPoolFast", 0, iniPath.c_str()) != 0;
         g_settings.OptWorldStateCoalesce  = GetPrivateProfileIntA("Graphics_Sound", "WorldStateCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptD3d9RenderThread    = GetPrivateProfileIntA("Graphics_Sound", "D3d9RenderThread", 0, iniPath.c_str()) != 0;
         // HARD-DISABLED regardless of ini: this offloads D3D9 draw/Present/Reset

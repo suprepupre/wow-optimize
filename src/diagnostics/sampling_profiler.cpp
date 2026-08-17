@@ -164,7 +164,21 @@ static void BuildKnownFuncTable() {
         { 0x0084F9F0, "luaL_checklstring" },
 
         // --- Lua internals ---
+        // Named from a CPU-bound tester profile where each of these showed as a
+        // raw address, or worse as a neighbour's name. Identified in the
+        // disassembly, not guessed:
+        //   sub_855820 loops over the pool's chunk array looking for one with a
+        //   free block; its file string is ".\src\lmemPool.cpp", a Blizzard
+        //   addition that stock Lua does not have.
+        //   sub_85A960 and sub_85B200 are the collector's table traversal and
+        //   sweep; separately they look small and together they were larger than
+        //   anything else in that profile.
+        { 0x00855570, "LuaMemPool_NewChunk" },
+        { 0x00855820, "LuaMemPool_Alloc" },
         { 0x00856C80, "luaS_newlstr" },
+        { 0x00859160, "luaV_execute" },
+        { 0x0085A960, "luaC_traversetable" },
+        { 0x0085B200, "luaC_sweeplist" },
         { 0x00856E50, "luaV_tonumber" },
         { 0x00857900, "luaV_concat" },
         { 0x0085BC10, "luaV_gettable" },
@@ -297,10 +311,26 @@ static const FuncEntry* FindNearestFunc(uintptr_t eip) {
 
     if (best < 0) return nullptr;
 
-    // Only match if within 4KB of the function start (reasonable
-    // upper bound for a single WoW function body).
+    // How far past a symbol its name is still allowed to reach.
+    //
+    // This was 4KB, and 4KB is enough room to hold several functions. The
+    // report then names the wrong one with complete confidence. A tester
+    // profile put "tostring+0xE00" second overall at 4.29% of executing time,
+    // and tostring (sub_854A20) is 229 bytes long: the samples were 3.5KB past
+    // its end, in sub_855820, which is the Lua memory pool's block allocator and
+    // has nothing to do with tostring. Acting on that line would have meant
+    // optimizing a function that was not running.
+    //
+    // Printing the offset was supposed to fix this and does not, because a
+    // reader has no way to know the function ended long before the offset did.
+    //
+    // 512 bytes covers the body of most functions in this table. Past that the
+    // name is dropped and the sample is reported by address, which is honest and
+    // still actionable: an address can be looked up, a wrong name cannot be
+    // un-believed. Genuinely large functions lose their name on the tail; that
+    // is the right trade against naming a neighbour.
     uintptr_t delta = eip - g_knownFuncs[best].addr;
-    if (delta > 4096) return nullptr;
+    if (delta > 512) return nullptr;
 
     return &g_knownFuncs[best];
 }
