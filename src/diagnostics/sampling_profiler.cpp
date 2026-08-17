@@ -175,7 +175,45 @@ static void BuildKnownFuncTable() {
         //   sweep; separately they look small and together they were larger than
         //   anything else in that profile.
         { 0x00855570,    97, "LuaMemPool_NewChunk" },
+
+        // Identified by disassembly while hunting for optimisable shapes, and
+        // named here so the next profile does not report them as raw addresses.
+        // The StormHash_* set are eleven instantiations of one template
+        // (Storm\h\stpl.h): the same chain walk, differing only in what they
+        // compare. Three of them are hooked; the rest are named so a log can say
+        // whether any of the others ever gets hot.
+        { 0x00505480,   110, "StormHash_Find_505480" },
+        { 0x005B2350,    41, "AchievementCriteria_Find" },
+        { 0x005B58B0,  1449, "Lua_GetAchievementCriteriaInfo" },
+        { 0x005EEB70,     1, "StrippedNoOp" },
+        { 0x006792E0,   110, "StormHash_FindKeyPair" },
+        { 0x006BBD40,   102, "StormHash_Find_6BBD40" },
+        { 0x006C2A50,   108, "StormHash_FindKeyPtr" },
+        { 0x006F6020,    91, "StormHash_FindKey" },
+        { 0x00734790,   111, "StormHash_Find_734790" },
+        { 0x007B0690,    92, "StormHash_Find_7B0690" },
+        { 0x007BDD80,   109, "StormHash_Find_7BDD80" },
+        { 0x007BDDF0,    92, "StormHash_Find_7BDDF0" },
+        { 0x00810970,   118, "StormHash_Find_810970" },
+        // The two vertex loops the colour-format call was removed from, the
+        // accessor it called, and the wrappers behind the CriticalSection time
+        // that shows up as ntdll in every profile.
+        { 0x00484B00,  1597, "UI_BatchDraw" },
+        { 0x00490770,   193, "UIFrame_OnUpdateTree" },
+        { 0x00532AF0,     7, "Renderer_GetColorFmtBlock" },
+        { 0x006C4440,   877, "Particle_FillVertices" },
+        { 0x00774640,     8, "EnterCriticalSection_wrap" },
+        { 0x00774650,     8, "LeaveCriticalSection_wrap" },
+        { 0x00817DB0,     6, "GetLuaState" },
+        { 0x008B7DA0,     3, "ReturnThis" },
         { 0x00855670,   102, "LuaMemPool_Free" },
+        // Hot in a CPU-bound profile but not yet understood. Named by address so
+        // a repeat appearance is recognisable rather than looking like noise.
+        { 0x00494A10,   214, "Hot_494A10" },
+        { 0x007A50C0,   384, "Hot_7A50C0" },
+        { 0x007C6D50,  1166, "Hot_7C6D50" },
+        { 0x008203B0,   872, "Hot_8203B0" },
+        { 0x00857CA0,  5151, "Hot_857CA0" },
         { 0x00855820,   187, "LuaMemPool_Alloc" },
         // The pool's lua_Alloc: takes (pool, ptr, oldSize, newSize), finds the
         // size class for each by walking a nine-entry table, and dispatches.
