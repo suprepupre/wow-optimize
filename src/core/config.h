@@ -242,6 +242,11 @@ namespace Config {
         // functions were 5.06% of executing time. Patches machine code in place
         // after verifying it byte for byte, so it is opt-in.
         bool OptVertexFmtInline = false;
+        // The object manager's find-by-GUID re-derived the bucket link offset
+        // from the table header on every node of the chain. 2.22% of executing
+        // time in a CPU-bound profile. Verifies against the client and retires
+        // on one disagreement, so it is opt-in until a log shows it agreeing.
+        bool OptObjMgrFindFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
