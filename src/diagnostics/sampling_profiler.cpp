@@ -49,6 +49,7 @@ static constexpr uintptr_t WOW_END        = 0x00BFFFFF;  // wow.exe image range
 // Populated at Init() from the verified address list.
 struct FuncEntry {
     uintptr_t   addr;
+    uint32_t    size;   // exact byte length, read from the binary
     const char* name;
 };
 
@@ -111,57 +112,57 @@ static void BuildKnownFuncTable() {
     // Using absolute VAs (base 0x400000).
     static const FuncEntry table[] = {
         // --- CRT / memory ---
-        { 0x0040BB80, "memset" },
-        { 0x0040CB10, "memcpy" },
-        { 0x004112F8, "_msize" },
-        { 0x00412FC7, "free" },
-        { 0x00415074, "malloc" },
-        { 0x00416A56, "calloc" },
-        { 0x00416A95, "realloc" },
-        { 0x00416CB0, "_recalloc" },
+        { 0x0040BB80,   122, "memset" },
+        { 0x0040CB10,   869, "memcpy" },
+        { 0x004112F8,   163, "_msize" },
+        { 0x00412FC7,   142, "free" },
+        { 0x00415074,   195, "malloc" },
+        { 0x00416A56,    63, "calloc" },
+        { 0x00416A95,   539, "realloc" },
+        { 0x00416CB0,   121, "_recalloc" },
 
         // --- Math / transform library ---
-        { 0x004C1B30, "CMatrix::TranslateLocal" },
-        { 0x004C1C40, "CMatrix::FromQuaternion" },
-        { 0x004C1F00, "CMatrix::Multiply" },
-        { 0x004C2120, "CMatrix::ScalarMul" },
-        { 0x004C21B0, "sub_4C21B0_pt_x_mat4" },
-        { 0x004C2210, "RowAffinePoint" },
-        { 0x004C2270, "sub_4C2270_vec4_x_mat4" },
-        { 0x004C2300, "InPlacePointXform" },
-        { 0x004C23D0, "CMatrix::Transpose" },
-        { 0x004C2440, "CMatrix_AdjugateDet" },
-        { 0x004C2FC0, "CMatrix::InvertRigid" },
-        { 0x004C3420, "C3Vector::Normalize" },
-        { 0x004C3600, "C3Vector::NormalizeGuarded" },
+        { 0x004C1B30,    90, "CMatrix::TranslateLocal" },
+        { 0x004C1C40,   170, "CMatrix::FromQuaternion" },
+        { 0x004C1F00,   533, "CMatrix::Multiply" },
+        { 0x004C2120,   140, "CMatrix::ScalarMul" },
+        { 0x004C21B0,    93, "sub_4C21B0_pt_x_mat4" },
+        { 0x004C2210,    93, "RowAffinePoint" },
+        { 0x004C2270,   140, "sub_4C2270_vec4_x_mat4" },
+        { 0x004C2300,   111, "InPlacePointXform" },
+        { 0x004C23D0,   104, "CMatrix::Transpose" },
+        { 0x004C2440,  2892, "CMatrix_AdjugateDet" },
+        { 0x004C2FC0,   212, "CMatrix::InvertRigid" },
+        { 0x004C3420,    53, "C3Vector::Normalize" },
+        { 0x004C3600,    67, "C3Vector::NormalizeGuarded" },
 
         // --- Object manager ---
-        { 0x004D3790, "TLS_Accessor" },
-        { 0x004D4DB0, "ClntObjMgrObjectPtr" },
+        { 0x004D3790,    43, "TLS_Accessor" },
+        { 0x004D4DB0,    82, "ClntObjMgrObjectPtr" },
 
         // --- Network / serialization ---
-        { 0x00468D00, "NetPacketSend" },
-        { 0x0047B340, "CDataStore_GetBytes" },
-        { 0x0076DC20, "CDataStore_GetWowGUID" },
+        { 0x00468D00,    28, "NetPacketSend" },
+        { 0x0047B340,    49, "CDataStore_GetBytes" },
+        { 0x0076DC20,    96, "CDataStore_GetWowGUID" },
 
         // --- World / cleanup ---
-        { 0x00528C30, "WorldExitCleanup" },
-        { 0x005D9D90, "ObjMgrTeardownWalk" },
+        { 0x00528C30,   712, "WorldExitCleanup" },
+        { 0x005D9D90,   363, "ObjMgrTeardownWalk" },
 
         // --- FrameScript / events ---
-        { 0x0048E680, "FrameScript_Dispatch" },
-        { 0x0081AC90, "FrameScript_SignalEvent" },
+        { 0x0048E680,   737, "FrameScript_Dispatch" },
+        { 0x0081AC90,   447, "FrameScript_SignalEvent" },
 
         // --- Lua VM core ---
-        { 0x0084D9C0, "index2adr" },
-        { 0x0084E030, "lua_tonumber" },
-        { 0x0084E0B0, "lua_toboolean" },
-        { 0x0084E1C0, "lua_touserdata" },
-        { 0x0084E2A0, "lua_pushnumber" },
-        { 0x0084E670, "lua_rawgeti" },
-        { 0x0084E8D0, "lua_settable" },
-        { 0x0084EBF0, "lua_pcall" },
-        { 0x0084F9F0, "luaL_checklstring" },
+        { 0x0084D9C0,   136, "index2adr" },
+        { 0x0084E030,    52, "lua_tonumber" },
+        { 0x0084E0B0,    42, "lua_toboolean" },
+        { 0x0084E1C0,    42, "lua_touserdata" },
+        { 0x0084E2A0,    36, "lua_pushnumber" },
+        { 0x0084E670,   109, "lua_rawgeti" },
+        { 0x0084E8D0,    45, "lua_settable" },
+        { 0x0084EBF0,    59, "lua_pcall" },
+        { 0x0084F9F0,    94, "luaL_checklstring" },
 
         // --- Lua internals ---
         // Named from a CPU-bound tester profile where each of these showed as a
@@ -173,18 +174,23 @@ static void BuildKnownFuncTable() {
         //   sub_85A960 and sub_85B200 are the collector's table traversal and
         //   sweep; separately they look small and together they were larger than
         //   anything else in that profile.
-        { 0x00855570, "LuaMemPool_NewChunk" },
-        { 0x00855820, "LuaMemPool_Alloc" },
-        { 0x00856C80, "luaS_newlstr" },
-        { 0x00859160, "luaV_execute" },
-        { 0x0085A960, "luaC_traversetable" },
-        { 0x0085B200, "luaC_sweeplist" },
-        { 0x00856E50, "luaV_tonumber" },
-        { 0x00857900, "luaV_concat" },
-        { 0x0085BC10, "luaV_gettable" },
-        { 0x0085C430, "luaH_getstr" },
-        { 0x0085C6F0, "LuaH_resize" },
-        { 0x0085CAB0, "luaH_newkey" },
+        { 0x00855570,    97, "LuaMemPool_NewChunk" },
+        { 0x00855670,   102, "LuaMemPool_Free" },
+        { 0x00855820,   187, "LuaMemPool_Alloc" },
+        // The pool's lua_Alloc: takes (pool, ptr, oldSize, newSize), finds the
+        // size class for each by walking a nine-entry table, and dispatches.
+        // Showed up as "LuaMemPool_NewChunk+0x100" before sizes were exact.
+        { 0x008558E0,   305, "LuaMemPool_Realloc" },
+        { 0x00856C80,   326, "luaS_newlstr" },
+        { 0x00859160,  5583, "luaV_execute" },
+        { 0x0085A960,   432, "luaC_traversetable" },
+        { 0x0085B200,   143, "luaC_sweeplist" },
+        { 0x00856E50,    78, "luaV_tonumber" },
+        { 0x00857900,   455, "luaV_concat" },
+        { 0x0085BC10,    87, "luaV_gettable" },
+        { 0x0085C430,    63, "luaH_getstr" },
+        { 0x0085C6F0,   618, "LuaH_resize" },
+        { 0x0085CAB0,   260, "luaH_newkey" },
 
         // --- Rendering / culling ---
         //
@@ -193,90 +199,89 @@ static void BuildKnownFuncTable() {
         // the next profile reads as a list of functions rather than addresses - the
         // percentages were never the hard part, working out what they belonged to
         // was.
-        { 0x0082F0F0, "M2_AnimateModel" },        // bone tracks + matrix per bone
-        { 0x00828680, "M2_AnimTrackVec3" },
-        { 0x0082B0A0, "M2_AnimTrackInterp" },
-        { 0x0082AF40, "M2_AnimTrackScalar" },
-        { 0x0082B340, "M2_AnimTrackColor" },
-        { 0x007BCC00, "World_VisibilityTraverse" },  // 64x64 tiles, 16x16 cells
-        { 0x0078F6A0, "Terrain_HorizonOcclusionBuild" },
-        { 0x00861D90, "luaK_patchlistaux" },      // Lua code generator jump patching
-        { 0x00685F50, "Unit_SetDisplaySlot" },    // equipment slots 21..36
-        { 0x00516C60, "Script_GetItemInfo" },
-        { 0x00540A30, "Script_GetSpellInfo" },
-        { 0x0081AC90, "FrameScript_SignalEvent" },
+        { 0x0082F0F0,  6267, "M2_AnimateModel" },        // bone tracks + matrix per bone
+        { 0x00828680,   885, "M2_AnimTrackVec3" },
+        { 0x0082B0A0,   450, "M2_AnimTrackInterp" },
+        { 0x0082AF40,   345, "M2_AnimTrackScalar" },
+        { 0x0082B340,   273, "M2_AnimTrackColor" },
+        { 0x007BCC00,   796, "World_VisibilityTraverse" },  // 64x64 tiles, 16x16 cells
+        { 0x0078F6A0,   601, "Terrain_HorizonOcclusionBuild" },
+        { 0x00861D90,   235, "luaK_patchlistaux" },      // Lua code generator jump patching
+        { 0x00685F50,    96, "Unit_SetDisplaySlot" },    // equipment slots 21..36
+        { 0x00516C60,   616, "Script_GetItemInfo" },
+        { 0x00540A30,   822, "Script_GetSpellInfo" },
         // Linear walk of an intrusive list, nine pointer tests per node, until
         // the node owning `this` is found - then relinked. 2.44% of main-thread
         // execution. A candidate for an index rather than a search, but it is
         // pointer surgery with side effects and wants a careful sitting.
-        { 0x00489710, "Node_FindOwnerAndRelink" },
-        { 0x00821A20, "M2_DrawBatchBuilder" },
-        { 0x00960D20, "Lua_Model_SetLight" },
-        { 0x00979110, "CQuaternion::Normalize" },
-        { 0x00981D40, "ParticleSpawn_Init" },
-        { 0x00983490, "RayTriIntersect16" },
-        { 0x009836B0, "RayTriIntersect32" },
-        { 0x009839E0, "CFrustum::IsAABBVisible" },
-        { 0x00983D70, "CFrustum::IsPointVisible" },
+        { 0x00489710,   408, "Node_FindOwnerAndRelink" },
+        { 0x00821A20,  5658, "M2_DrawBatchBuilder" },
+        { 0x00960D20,   154, "Lua_Model_SetLight" },
+        { 0x00979110,    84, "CQuaternion::Normalize" },
+        { 0x00981D40,   936, "ParticleSpawn_Init" },
+        { 0x00983490,   537, "RayTriIntersect16" },
+        { 0x009836B0,   535, "RayTriIntersect32" },
+        { 0x009839E0,   124, "CFrustum::IsAABBVisible" },
+        { 0x00983D70,   241, "CFrustum::IsPointVisible" },
 
         // --- CRT string/memory (static) ---
-        { 0x0076E5A0, "free_wrapper" },
-        { 0x0076E780, "_strnicmp" },
-        { 0x0076ED20, "strncpy" },
-        { 0x0076EE30, "strlen" },
+        { 0x0076E5A0,    36, "free_wrapper" },
+        { 0x0076E780,    27, "_strnicmp" },
+        { 0x0076ED20,   120, "strncpy" },
+        { 0x0076EE30,    46, "strlen" },
 
         // --- Combat text ---
-        { 0x00608880, "CombatText_EventInit" },
+        { 0x00608880,  6290, "CombatText_EventInit" },
 
         // --- Misc ---
-        { 0x0081B510, "EventNameWrapper" },
+        { 0x0081B510,    30, "EventNameWrapper" },
 
         // --- Lua pattern matcher (verified this session, 0x852A10-0x853D9C) ---
-        { 0x00852A10, "lua_classend" },
-        { 0x00852C30, "lua_matchbalance" },
-        { 0x00852F60, "lua_match" },
-        { 0x00853240, "lua_lmemfind" },
-        { 0x008535B0, "string.find" },
-        { 0x008535D0, "string.match" },
-        { 0x00853980, "string.gsub" },
-        { 0x00853C50, "string.format" },
+        { 0x00852A10,   109, "lua_classend" },
+        { 0x00852C30,   112, "lua_matchbalance" },
+        { 0x00852F60,   611, "lua_match" },
+        { 0x00853240,   251, "lua_lmemfind" },
+        { 0x008535B0,    20, "string.find" },
+        { 0x008535D0,    20, "string.match" },
+        { 0x00853980,   357, "string.gsub" },
+        { 0x00853C50,   969, "string.format" },
 
         // --- Lua string library ---
-        { 0x00852400, "string.len" },
-        { 0x00852430, "string.sub" },
-        { 0x008524E0, "string.reverse" },
-        { 0x00852580, "string.lower" },
-        { 0x00852680, "string.upper" },
-        { 0x00852780, "string.rep" },
-        { 0x00852800, "string.byte" },
-        { 0x008528D0, "string.char" },
+        { 0x00852400,    43, "string.len" },
+        { 0x00852430,   162, "string.sub" },
+        { 0x008524E0,   146, "string.reverse" },
+        { 0x00852580,   250, "string.lower" },
+        { 0x00852680,   250, "string.upper" },
+        { 0x00852780,   118, "string.rep" },
+        { 0x00852800,   196, "string.byte" },
+        { 0x008528D0,   161, "string.char" },
 
         // --- Lua API (stack / push / query) ---
-        { 0x0084DBD0, "lua_gettop" },
-        { 0x0084DBF0, "lua_settop" },
-        { 0x0084DC50, "lua_remove" },
-        { 0x0084DCC0, "lua_insert" },
-        { 0x0084DEB0, "lua_type" },
-        { 0x0084DF20, "lua_isnumber" },
-        { 0x0084E280, "lua_pushnil" },
-        { 0x0084E2D0, "lua_pushinteger" },
-        { 0x0084E350, "lua_pushstring" },
-        { 0x0084E590, "lua_getfield" },
-        { 0x0084E900, "lua_setfield" },
-        { 0x0084E970, "lua_rawset" },
-        { 0x0084EC30, "lua_call" },
-        { 0x0084ED50, "lua_gc" },
+        { 0x0084DBD0,    17, "lua_gettop" },
+        { 0x0084DBF0,    89, "lua_settop" },
+        { 0x0084DC50,   112, "lua_remove" },
+        { 0x0084DCC0,   176, "lua_insert" },
+        { 0x0084DEB0,    31, "lua_type" },
+        { 0x0084DF20,    53, "lua_isnumber" },
+        { 0x0084E280,    31, "lua_pushnil" },
+        { 0x0084E2D0,    36, "lua_pushinteger" },
+        { 0x0084E350,    76, "lua_pushstring" },
+        { 0x0084E590,    98, "lua_getfield" },
+        { 0x0084E900,   101, "lua_setfield" },
+        { 0x0084E970,   142, "lua_rawset" },
+        { 0x0084EC30,    27, "lua_call" },
+        { 0x0084ED50,   216, "lua_gc" },
 
         // --- Lua VM dispatch / tables ---
-        { 0x00856760, "luaD_call" },
-        { 0x00857250, "luaV_gettable" },
-        { 0x008573C0, "luaV_settable" },
+        { 0x00856760,   169, "luaD_call" },
+        { 0x00857250,   357, "luaV_gettable" },
+        { 0x008573C0,   402, "luaV_settable" },
 
         // --- Lua base / conversion / table lib ---
-        { 0x00851C30, "table.concat" },
-        { 0x00854100, "tonumber" },
-        { 0x00854660, "type" },
-        { 0x00854A20, "tostring" },
+        { 0x00851C30,   231, "table.concat" },
+        { 0x00854100,   271, "tonumber" },
+        { 0x00854660,    48, "type" },
+        { 0x00854A20,   229, "tostring" },
     };
 
     g_knownCount = 0;
@@ -311,26 +316,26 @@ static const FuncEntry* FindNearestFunc(uintptr_t eip) {
 
     if (best < 0) return nullptr;
 
-    // How far past a symbol its name is still allowed to reach.
+    // A name reaches exactly as far as its function does, and no further.
     //
-    // This was 4KB, and 4KB is enough room to hold several functions. The
-    // report then names the wrong one with complete confidence. A tester
-    // profile put "tostring+0xE00" second overall at 4.29% of executing time,
-    // and tostring (sub_854A20) is 229 bytes long: the samples were 3.5KB past
-    // its end, in sub_855820, which is the Lua memory pool's block allocator and
-    // has nothing to do with tostring. Acting on that line would have meant
-    // optimizing a function that was not running.
+    // This was a flat 4KB window, which is room for several functions, and the
+    // report named the wrong one with complete confidence. A tester profile put
+    // "tostring+0xE00" second overall at 4.29% of executing time; tostring is
+    // 229 bytes long, so those samples were 3.5KB past its end, inside the Lua
+    // pool's block allocator. Acting on that line would have meant optimizing a
+    // function that was not running.
     //
-    // Printing the offset was supposed to fix this and does not, because a
-    // reader has no way to know the function ended long before the offset did.
+    // Narrowing the window to 512 bytes was not enough either, and the same log
+    // proved it twice over: "LuaMemPool_NewChunk+0x100" and
+    // "LuaMemPool_Alloc+0x100" were both neighbours of the named function, which
+    // are 97 and 187 bytes long. Any fixed window is wrong, because function
+    // sizes here run from 17 bytes to 6 kilobytes.
     //
-    // 512 bytes covers the body of most functions in this table. Past that the
-    // name is dropped and the sample is reported by address, which is honest and
-    // still actionable: an address can be looked up, a wrong name cannot be
-    // un-believed. Genuinely large functions lose their name on the tail; that
-    // is the right trade against naming a neighbour.
+    // So the table carries each function's exact length, read out of the binary.
+    // Past the end of a function the sample is reported by address, which can be
+    // looked up. A wrong name cannot be un-believed.
     uintptr_t delta = eip - g_knownFuncs[best].addr;
-    if (delta > 512) return nullptr;
+    if (delta >= g_knownFuncs[best].size) return nullptr;
 
     return &g_knownFuncs[best];
 }
