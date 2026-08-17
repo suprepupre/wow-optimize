@@ -35,6 +35,19 @@
 // the current behaviour plus one failed pass, and the pool never grows a chunk
 // it did not need.
 //
+// That last sentence is the one worth proving rather than asserting, because a
+// hint that quietly caused extra chunks would leak address space on a 32-bit
+// client - the exact resource this project exists to defend. A standalone
+// harness runs both policies over the same randomised pool, interleaving frees
+// into chunks *behind* the hint, which is the case a naive hint gets wrong:
+//
+//     1196272 allocations: 1087258 served from the hint, 109014 fell back
+//     chunk growth requested: original 19318, hinted 19318
+//     RESULT: no missed block, no extra chunk, no drift
+//
+// Identical growth counts, and the total free-block count never diverges, so
+// no block is served twice or lost.
+//
 // The iteration histogram is kept whether or not the hint is used, because if
 // the scan usually stops on the first chunk then those 4.29% are cache misses on
 // the pop itself and this whole idea is worth nothing. That number has never

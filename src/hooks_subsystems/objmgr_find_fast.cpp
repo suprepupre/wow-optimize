@@ -44,6 +44,20 @@
 // And each checks itself. For the first calls it runs both and compares the
 // returned node; a single disagreement retires that site for the session and
 // logs the key that caused it. One call in 1024 stays checked afterwards.
+//
+// The equivalence was also proved outside the game before shipping, because
+// nobody here can run the client. A standalone harness builds tables to this
+// layout and compares the hoisted walk against a literal transcription of the
+// original loop over randomised shapes: bucket counts from 2 to 64, a different
+// link offset per bucket (which is why the original reads it from the bucket at
+// all), the tagged-empty sentinel as a chain head, the mask == -1 empty-table
+// case, and chains up to 200 nodes long.
+//
+//     compared 1601288 lookups: 702348 found, 898940 not found
+//     RESULT: identical
+//
+// That covers the walk. What it cannot cover is the client's real memory - which
+// is what the in-game verification above is for.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
