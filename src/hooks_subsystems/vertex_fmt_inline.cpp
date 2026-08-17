@@ -78,6 +78,51 @@ const uint8_t kMovEcx[6] = { 0x8B, 0x0D, 0x88, 0xDF, 0xC5, 0x00 };
 int g_patched = 0;
 int g_rejected = 0;
 
+// The accessor and the global it is called on, so the replacement can be
+// checked against the thing it replaces rather than trusted.
+typedef char* (__fastcall* Accessor_fn)(void* self, void* edx);
+constexpr uintptr_t kAccessor  = 0x00532AF0;
+constexpr uintptr_t kRendererP = 0x00C5DF88;
+
+// Runs the original call and the arithmetic that replaces it, and reports
+// whether they land on the same address. Nothing is patched unless they do.
+//
+// This is cheap and it closes the one hole the byte checks leave open: they
+// prove the instructions being replaced are the ones expected, not that the
+// replacement computes the same value. A build where the accessor returned a
+// different offset would pass every byte check and then read the wrong dword
+// for the rest of the session.
+bool ReplacementAgrees() {
+    uint32_t renderer = 0;
+    __try {
+        renderer = *(volatile uint32_t*)kRendererP;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[VertexFmt] the renderer global is not readable yet - not patching");
+        return false;
+    }
+    if (renderer == 0) {
+        Log("[VertexFmt] the renderer global is null at install time - not patching");
+        return false;
+    }
+
+    char* viaCall = nullptr;
+    __try {
+        viaCall = ((Accessor_fn)kAccessor)((void*)renderer, nullptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[VertexFmt] the accessor faulted when called - not patching");
+        return false;
+    }
+
+    char* viaMath = (char*)(uintptr_t)(renderer + 532u);
+    if (viaCall != viaMath) {
+        Log("[VertexFmt] the accessor returns %p but the replacement computes %p. "
+            "This build does not use the offset these patches assume - not patching.",
+            (void*)viaCall, (void*)viaMath);
+        return false;
+    }
+    return true;
+}
+
 bool PatchOne(const Site& s) {
     uint8_t* p = (uint8_t*)s.addr;
 
@@ -137,6 +182,10 @@ bool PatchOne(const Site& s) {
 
 bool Init() {
     if (!Config::g_settings.OptVertexFmtInline) return true;
+
+    // Before touching any code: confirm the arithmetic really does replace the
+    // call on this client.
+    if (!ReplacementAgrees()) return false;
 
     for (const Site& s : kSites) PatchOne(s);
 
