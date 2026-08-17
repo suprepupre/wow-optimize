@@ -236,6 +236,12 @@ namespace Config {
         // allocations in six minutes. Opt-in until a log shows the search is
         // really where that time goes - the counters it adds answer that.
         bool OptLuaMemPoolFast = false;
+        // Removes a per-vertex call from the UI batcher and the particle vertex
+        // filler. The call resolved to a fixed offset from a global whose value
+        // cannot change between two vertices of a batch; together those two
+        // functions were 5.06% of executing time. Patches machine code in place
+        // after verifying it byte for byte, so it is opt-in.
+        bool OptVertexFmtInline = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

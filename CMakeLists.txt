@@ -98,6 +98,7 @@ add_library(wow_optimize SHARED
     src/diagnostics/anim_census.cpp
     src/diagnostics/anim_census.h
     src/diagnostics/crash_dumper.cpp
+    src/hooks_subsystems/vertex_fmt_inline.cpp
     src/hooks_subsystems/render_null_guard.cpp
     src/hooks_subsystems/device_callback_guard.cpp
     src/hooks_subsystems/layout_relink_fast.cpp
