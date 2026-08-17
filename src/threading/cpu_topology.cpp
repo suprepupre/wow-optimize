@@ -37,6 +37,7 @@
 
 #include "cpu_topology.h"
 #include "core/config.h"
+#include "core/version.h"   // IsWine
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -297,9 +298,18 @@ void Report() {
         g_pinned ? " (main thread pinned)" : " (not pinned)");
 
     if (!g_pinned && onEff > 0) {
-        Log("[CpuTopology] Time on the slower cores is time this client cannot "
-            "get back, because almost all of its work is on this one thread. "
-            "PinMainThread=1 keeps it off them.");
+        if (IsWine()) {
+            // Saying "turn on PinMainThread" here would be advice that cannot
+            // work: the thread setup it lives in is skipped entirely under a
+            // translation layer, and scheduling is the host's business anyway.
+            Log("[CpuTopology] Time is being spent on the slower cores, but the "
+                "pinning is not available here: thread scheduling is left alone "
+                "under Wine, where the host kernel makes these decisions.");
+        } else {
+            Log("[CpuTopology] Time on the slower cores is time this client cannot "
+                "get back, because almost all of its work is on this one thread. "
+                "PinMainThread=1 keeps it off them.");
+        }
     }
 
     // Per-core detail, so a machine where one core is doing all the work is

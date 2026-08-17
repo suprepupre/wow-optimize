@@ -4052,9 +4052,10 @@ static void OptimizeThreads() {
     SetThreadPriority(hMain, THREAD_PRIORITY_ABOVE_NORMAL);
 
     // The ideal-core call above is a preference the scheduler may ignore, and it
-    // picks an index without knowing what kind of core sits behind it. Read the
-    // core classes, and keep this thread off the slow ones if asked to.
-    CpuTopology::Init();
+    // picks an index without knowing what kind of core sits behind it. Pinning
+    // belongs here, behind the same Wine check as the rest of this function.
+    // Reading the topology does not, and is done by the caller instead - see the
+    // note there.
     CpuTopology::PinMainThread(hMain);
 
     CloseHandle(hMain);
@@ -7011,6 +7012,14 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // connect at all with the DLL loaded, regardless of feature toggles, because
     // these scheduling tweaks are applied unconditionally. When CompatMode is on
     // we skip all of them and let WoW run at normal priority/affinity/working set.
+    // Outside the CompatMode branch and ahead of OptimizeThreads, both of
+    // which would otherwise swallow it: OptimizeThreads returns early under
+    // Wine, and a tester's log reported "no topology read this session (not
+    // probed)" - the initial value of the reason string, which says that
+    // nothing ran and not why. Reading core classes is a query and is safe
+    // anywhere; only the pinning belongs behind those checks.
+    CpuTopology::Init();
+
     if (Config::g_settings.OptCompatMode) {
         Log("--- Process/Threads --- CompatMode ON: skipping CPU priority/affinity/working-set tweaks");
     } else {
