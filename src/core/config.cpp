@@ -116,6 +116,7 @@ static const BoolSetting kBoolSettings[] = {
     { "UI_Lua", "LuaMemPoolFast", &Settings::OptLuaMemPoolFast },
     { "Graphics_Sound", "VertexFmtInline", &Settings::OptVertexFmtInline },
     { "General", "ObjMgrFindFast", &Settings::OptObjMgrFindFast },
+    { "Graphics_Sound", "QuatLerpSse2", &Settings::OptQuatLerpSse2 },
     { "Graphics_Sound", "WorldStateCoalesce", &Settings::OptWorldStateCoalesce },
     { "Graphics_Sound", "D3d9RenderThread", &Settings::OptD3d9RenderThread },
     { "Combat_Net", "CombatLogFilter", &Settings::OptCombatLogFilter },
@@ -552,6 +553,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptLuaMemPoolFast      = GetPrivateProfileIntA("UI_Lua", "LuaMemPoolFast", 0, iniPath.c_str()) != 0;
         g_settings.OptVertexFmtInline     = GetPrivateProfileIntA("Graphics_Sound", "VertexFmtInline", 0, iniPath.c_str()) != 0;
         g_settings.OptObjMgrFindFast      = GetPrivateProfileIntA("General", "ObjMgrFindFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptQuatLerpSse2        = GetPrivateProfileIntA("Graphics_Sound", "QuatLerpSse2", 0, iniPath.c_str()) != 0;
         g_settings.OptWorldStateCoalesce  = GetPrivateProfileIntA("Graphics_Sound", "WorldStateCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptD3d9RenderThread    = GetPrivateProfileIntA("Graphics_Sound", "D3d9RenderThread", 0, iniPath.c_str()) != 0;
         // HARD-DISABLED regardless of ini: this offloads D3D9 draw/Present/Reset

@@ -247,6 +247,12 @@ namespace Config {
         // time in a CPU-bound profile. Verifies against the client and retires
         // on one disagreement, so it is opt-in until a log shows it agreeing.
         bool OptObjMgrFindFast = false;
+        // The per-bone quaternion interpolation (sub_982630), four components at
+        // once instead of one at a time on the x87 stack. Not bit-exact: the
+        // worst divergence measured over 12 million components is 2.98e-07,
+        // under three float epsilon, and the result is renormalised right after.
+        // Opt-in, and it verifies against the client before trusting itself.
+        bool OptQuatLerpSse2 = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

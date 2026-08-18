@@ -32,6 +32,7 @@
 #include "lua_mempool_fast.h"
 #include "vertex_fmt_inline.h"
 #include "objmgr_find_fast.h"
+#include "quat_lerp_sse2.h"
 #include "anim_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
@@ -4687,6 +4688,7 @@ static void DumpPeriodicStats() {
     HeapCompactor_LogStats();
     VertexFmtInline::LogStats();
     ObjMgrFindFast::LogStats();
+    QuatLerpSse2::LogStats();
     LuaAllocCensus::LogStats();
     ReportCrtFreeStats();
     if (g_spinTaken > 0 || g_spinSkipped > 0) {
@@ -7231,6 +7233,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- Object Manager Find ---");
     ObjMgrFindFast::Init();
+
+    Log("--- Quaternion Interpolation (SSE2) ---");
+    QuatLerpSse2::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST
