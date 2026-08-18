@@ -4684,6 +4684,7 @@ static void DumpPeriodicStats() {
     PerfDiagnostics::LogStats();
     LuaGCGovernor::LogStats();
     LuaMemPoolFast::LogStats();
+    HeapCompactor_LogStats();
     VertexFmtInline::LogStats();
     ObjMgrFindFast::LogStats();
     LuaAllocCensus::LogStats();
