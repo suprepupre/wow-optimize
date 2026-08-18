@@ -253,6 +253,12 @@ namespace Config {
         // under three float epsilon, and the result is renormalised right after.
         // Opt-in, and it verifies against the client before trusting itself.
         bool OptQuatLerpSse2 = false;
+        // 88% of the chunks this client compiles are source it already compiled
+        // this session - 332 MB of repeated parsing, measured. A repeat reuses
+        // the compiled Proto; the client still builds the closure, environment
+        // and taint, so nothing about ownership is shared. Opt-in, and it checks
+        // reuses against a fresh compile before trusting itself.
+        bool OptLuaProtoCache = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
