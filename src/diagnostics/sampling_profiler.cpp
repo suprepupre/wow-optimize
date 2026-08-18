@@ -212,7 +212,12 @@ static void BuildKnownFuncTable() {
         // a repeat appearance is recognisable rather than looking like noise.
         { 0x00494A10,   214, "Hot_494A10" },
         { 0x007A50C0,   384, "Hot_7A50C0" },
-        { 0x007C6D50,  1166, "Hot_7C6D50" },
+        { 0x007C6D50,  1166, "Collision_ClipVertsToBox" },
+        // Classifies every vertex of a collision model against the query box
+        // as a six-bit outcode, four vertices per unrolled pass, then tests
+        // each triangle by ANDing its three. Called once per line-of-sight or
+        // pick ray from sub_7C9A00. The six bounds live on the x87 stack for
+        // the whole loop, which is why 158 of its 418 instructions are x87.
         { 0x008203B0,   872, "Hot_8203B0" },
         { 0x00857CA0,  5151, "Hot_857CA0" },
         { 0x00855820,   187, "LuaMemPool_Alloc" },
@@ -239,7 +244,14 @@ static void BuildKnownFuncTable() {
         // percentages were never the hard part, working out what they belonged to
         // was.
         { 0x0082F0F0,  6267, "M2_AnimateModel" },        // bone tracks + matrix per bone
-        { 0x00828680,   885, "M2_AnimTrackVec3" },
+        { 0x00828680,   885, "M2_AnimTrackQuat" },
+        // Quaternion track, not a vector one: it unpacks each component from
+        // a uint16 as (double)v * 0.000030518044 - 1.0, eight or sixteen times
+        // per call, each through a store and an fild.
+        { 0x008284D0,   420, "M2_AnimTrackFindKey" },
+        // The keyframe search shared by all nine track evaluators. Hinted by
+        // the caller's last index, with a binary search for a jump over 500ms
+        // and a double division for the interpolation factor at the end.
         { 0x0082B0A0,   450, "M2_AnimTrackInterp" },
         { 0x0082AF40,   345, "M2_AnimTrackScalar" },
         { 0x0082B340,   273, "M2_AnimTrackColor" },
