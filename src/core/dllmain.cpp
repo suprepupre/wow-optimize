@@ -4691,6 +4691,7 @@ static void DumpPeriodicStats() {
     ObjMgrFindFast::LogStats();
     QuatLerpSse2::LogStats();
     LuaProtoCache::LogStats();
+    LuaThisCache_LogStats();
     LuaAllocCensus::LogStats();
     ReportCrtFreeStats();
     if (g_spinTaken > 0 || g_spinSkipped > 0) {
@@ -7103,7 +7104,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // Stream Reader/Writer Cache - eliminate bounds checks
 
     // Lua "this" Object Lookup Cache - cache method dispatcher results
-    bool luaThisCacheOk = Config::g_settings.OptUIFrameAccessorFast && InstallLuaThisCache();
+    // Gates itself on LuaThisFast. It used to hang off OptUIFrameAccessorFast,
+    // which names something else, and it was a stub that installed nothing.
+    bool luaThisCacheOk = InstallLuaThisCache();
 
     // I/O Dispatcher Cache - 4050 callers
     bool ioCacheOk = Config::g_settings.OptFileIoHooks && InstallIOCache();

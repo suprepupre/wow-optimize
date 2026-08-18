@@ -259,6 +259,11 @@ namespace Config {
         // and taint, so nothing about ownership is shared. Opt-in, and it checks
         // reuses against a fresh compile before trusting itself.
         bool OptLuaProtoCache = false;
+        // The object lookup every Lua call into a UI method starts with
+        // (sub_4A81B0, 674 call sites). Four Lua API calls replaced by direct
+        // reads, including the taint move lua_rawgeti performs. Opt-in, and it
+        // checks itself against the client before trusting itself.
+        bool OptLuaThisFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
