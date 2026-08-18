@@ -109,6 +109,8 @@ static uint64_t g_medianAtFrame = 0;
 static DWORD  g_lastSlowReport = 0;
 static uint64_t g_slowFrames  = 0;
 
+double MedianMs() { return g_medianMs; }
+
 static void ComputePercentiles(const uint32_t* buckets, uint64_t frames,
                                double maxMs, const double* wanted,
                                double* out, int n);

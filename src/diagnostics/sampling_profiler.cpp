@@ -15,6 +15,7 @@
 #include <algorithm>
 #include "sampling_profiler.h"
 #include "lua_addon_sampler.h"
+#include "frame_bench.h"
 #include "version.h"
 #pragma comment(lib, "psapi.lib")
 
@@ -1064,6 +1065,33 @@ static void DumpResults() {
         } else if (workPct > 60.0) {
             Log("[SamplingProfiler]   The client IS CPU-bound here. The list below "
                 "is where the frame time actually goes.");
+        }
+
+        // A frame-rate cap turns this verdict into a lie, and the lie is not
+        // obvious: under a translation layer the wait for the next frame is a
+        // busy-wait, so the thread reads as executing while doing nothing. An
+        // eight-hour session came back reporting 99.2% executing with the whole
+        // top fifty adding up to 2.9% of samples - the rest spread thinly across
+        // a spin loop. Every percentage below is then a share of waiting.
+        //
+        // A median pinned within a few percent of a display interval is what a
+        // cap looks like, and no real workload holds one that steadily.
+        double med = FrameBench::MedianMs();
+        if (med > 0.0) {
+            const double kIntervals[] = { 16.667, 33.333, 8.333, 20.0, 11.111 };
+            for (int i = 0; i < 5; i++) {
+                double d = med - kIntervals[i];
+                if (d < 0) d = -d;
+                if (d < kIntervals[i] * 0.03) {
+                    Log("[SamplingProfiler]   WARNING: the median frame is %.2f ms, "
+                        "which is a %.0f Hz display interval. This session is capped "
+                        "by vsync or a frame limiter, so the split above measures "
+                        "waiting, not work, and the percentages below are shares of "
+                        "a spin. Uncap the frame rate before drawing any conclusion "
+                        "from this profile.", med, 1000.0 / kIntervals[i]);
+                    break;
+                }
+            }
         }
     }
 

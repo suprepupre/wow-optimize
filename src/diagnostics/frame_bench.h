@@ -58,4 +58,9 @@ double RecentP95Ms();
 // per-Sleep path.
 double SmoothedFrameMs();
 
+// The running median frame time, refreshed from the histogram every few hundred
+// frames. Read by the sampling profiler to notice a frame-rate cap: a median
+// sitting on a display interval means its verdict is describing a wait.
+double MedianMs();
+
 } // namespace FrameBench
