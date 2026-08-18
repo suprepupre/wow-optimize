@@ -101,6 +101,10 @@ static volatile LONG g_bonesThisFrame = 0;
 static double   g_sumCalls = 0.0;
 static double   g_sumBones = 0.0;
 static uint64_t g_frames   = 0;
+// Frames that presented with nothing animated. Kept out of the average, which
+// answers "when models are animating, how many" - and reported, so the divisor
+// is visible rather than assumed.
+static uint64_t g_idleFrames = 0;
 static LONG     g_peakCalls = 0;
 static LONG     g_peakBones = 0;
 
@@ -300,7 +304,7 @@ void OnFrame() {
 
     LONG calls = InterlockedExchange(&g_callsThisFrame, 0);
     LONG bones = InterlockedExchange(&g_bonesThisFrame, 0);
-    if (calls == 0) return;   // no world, or nothing animated
+    if (calls == 0) { g_idleFrames++; return; }   // no world, or nothing animated
 
     g_frames++;
     g_sumCalls += (double)calls;
@@ -359,9 +363,11 @@ void LogStats() {
     double avgNs    = (g_sampledCount > 0) ? (g_sampledNs / (double)g_sampledCount) : 0.0;
 
     Log("[AnimCensus] %.1f models/frame (peak %ld), %.0f bones/frame (peak %ld), "
-        "%.0f bones per model",
+        "%.0f bones per model, over %llu presented frames that animated something "
+        "(%llu presented with nothing to animate)",
         avgCalls, g_peakCalls, avgBones, g_peakBones,
-        avgCalls > 0.0 ? avgBones / avgCalls : 0.0);
+        avgCalls > 0.0 ? avgBones / avgCalls : 0.0,
+        (unsigned long long)g_frames, (unsigned long long)g_idleFrames);
 
     if (g_sampledCount > 0) {
         Log("[AnimCensus] %.2f us per model measured over %llu sampled calls, so "

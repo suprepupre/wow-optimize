@@ -1672,7 +1672,6 @@ static void MainThreadPump() {
         AsyncTexLoader::OnFrame();
 #endif
         TextureUnloadDelay::OnFrame();
-        AnimCensus::OnFrame();
         SpellEffectCulling::OnFrame();
 #if !TEST_DISABLE_NAMEPLATE_MT
         NameplateMT::OnFrame(g_mainThreadId);
@@ -4974,6 +4973,17 @@ extern "C" void WowOpt_OnFrameBoundary() {
     // Which core the frame loop is on, sampled here because this is the one
     // place that runs exactly once per presented frame on both render paths.
     CpuTopology::NoteFrame();
+
+    // The animation census divides models counted by frames counted, so it has to
+    // close its frame here and nowhere else. It used to close it on the hooked
+    // Sleep tick, which is throttled to a few milliseconds and only runs when the
+    // client sleeps at all - and a CPU-bound client barely does. Everything the
+    // hook counted between two sleeps was then charged to one frame. The reported
+    // rate tracked how CPU-bound the session was rather than how many models were
+    // on screen: one log climbed 860, 906, 1092, 1909 models per frame as the main
+    // thread went 85.9%, 91.3%, 95.5%, 99.0% executing, and ended up claiming
+    // 72 ms of animation inside a 53 ms frame.
+    AnimCensus::OnFrame();
 
     FlushFieldUpdates();
     WorldStateCoalesce::OnFrame();
