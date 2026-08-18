@@ -1087,20 +1087,32 @@ static void DumpResults() {
         // a spin loop. Every percentage below is then a share of waiting.
         //
         // A median pinned within a few percent of a display interval is what a
-        // cap looks like, and no real workload holds one that steadily.
+        // cap looks like - but the median alone does not say it, and testing it
+        // alone made this warning fire on a session that was not capped at all.
+        //
+        // A tester ran uncapped on 2026-08-18 and got 96.5% executing, then this
+        // warning directly underneath, because the median was 20.00 ms and 20.00
+        // is the 50 Hz interval. It was a client that was simply slow: p50 23.10
+        // with p95 62.20, a tail nearly three times the middle. A limiter has no
+        // tail - it holds every frame at the interval, which is exactly what makes
+        // the median look pinned - so the spread is what separates the two, and
+        // the median is only worth checking once the spread says it is flat.
         double med = FrameBench::MedianMs();
-        if (med > 0.0) {
+        double p95 = FrameBench::SessionP95Ms();
+        bool   pinned = (med > 0.0 && p95 > 0.0 && p95 < med * 1.25);
+        if (pinned) {
             const double kIntervals[] = { 16.667, 33.333, 8.333, 20.0, 11.111 };
             for (int i = 0; i < 5; i++) {
                 double d = med - kIntervals[i];
                 if (d < 0) d = -d;
                 if (d < kIntervals[i] * 0.03) {
                     Log("[SamplingProfiler]   WARNING: the median frame is %.2f ms, "
-                        "which is a %.0f Hz display interval. This session is capped "
-                        "by vsync or a frame limiter, so the split above measures "
+                        "a %.0f Hz display interval, and the 95th is %.2f ms - the "
+                        "distribution is flat against that interval, which is a cap "
+                        "and not a workload. The split above therefore measures "
                         "waiting, not work, and the percentages below are shares of "
                         "a spin. Uncap the frame rate before drawing any conclusion "
-                        "from this profile.", med, 1000.0 / kIntervals[i]);
+                        "from this profile.", med, 1000.0 / kIntervals[i], p95);
                     break;
                 }
             }

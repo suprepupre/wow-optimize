@@ -105,11 +105,13 @@ static constexpr double SLOW_FRAME_FLOOR_MS = 8.0;    // never report below this
 static constexpr DWORD  SLOW_FRAME_QUIET_MS = 2000;   // spacing between reports
 
 static double g_medianMs      = 0.0;   // refreshed periodically from the histogram
+static double g_p95Ms         = 0.0;   // same walk, so the two are always comparable
 static uint64_t g_medianAtFrame = 0;
 static DWORD  g_lastSlowReport = 0;
 static uint64_t g_slowFrames  = 0;
 
 double MedianMs() { return g_medianMs; }
+double SessionP95Ms() { return g_p95Ms; }
 
 static void ComputePercentiles(const uint32_t* buckets, uint64_t frames,
                                double maxMs, const double* wanted,
@@ -120,10 +122,14 @@ static void ComputePercentiles(const uint32_t* buckets, uint64_t frames,
 static void RefreshMedian() {
     if (g_frames - g_medianAtFrame < 512 && g_medianMs > 0.0) return;
     g_medianAtFrame = g_frames;
-    static const double half[] = { 0.50 };
-    double p[1] = {};
-    ComputePercentiles(g_buckets, g_frames, g_maxMs, half, p, 1);
+    // The 95th comes from the same walk. A caller asking "is this session capped"
+    // needs the spread, not the middle, and reading the two from different windows
+    // would let them disagree.
+    static const double wanted[] = { 0.50, 0.95 };
+    double p[2] = {};
+    ComputePercentiles(g_buckets, g_frames, g_maxMs, wanted, p, 2);
     g_medianMs = p[0];
+    g_p95Ms    = p[1];
 }
 
 static const char* SourceName(Source s) {
