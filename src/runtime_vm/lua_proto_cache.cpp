@@ -175,15 +175,26 @@ inline void*    RDP (const void* p, unsigned off) { return *(void* const*)   ((c
 
 // --- Budget -----------------------------------------------------------------
 //
-// The census puts the average repeated chunk at 8.7 KB, so 32 KB keeps every
-// handler-sized chunk and turns away whole addon files, which load once and
-// never repeat anyway. The totals below cap what the cache can cost at roughly
-// 12 MB of source copies; both limits are reported, so a session that hits one
-// says so rather than silently degrading.
+// Nothing is cached until it has been compiled twice.
+//
+// The first field session said why. Of 6023 chunks, only 863 were repeats, but
+// the cache took the first 3648 it saw, filled its 12 MB on chunks averaging
+// 3.4 KB that never came back, and then turned away 1656 later ones - including
+// the repeats it existed for. The client's own census, in the same log, named
+// them: `*:OnLoad`, 831 compiles totalling 150 KB. About 185 bytes each. They
+// would have fitted a hundred times over.
+//
+// So a first sighting only records a key and a length, twelve bytes and no copy
+// of the source. The source is kept on the second sighting, and reuse starts on
+// the third. That costs one extra compile per chunk and buys a cache holding
+// nothing but proven repeats, which is also why the per-chunk limit can be
+// larger now: 402 chunks were refused for exceeding 32 KB, and with only proven
+// repeats competing for the budget there is room to keep the ones that recur.
 
-constexpr size_t kMaxChunkBytes = 32u * 1024u;
+constexpr size_t kMaxChunkBytes = 128u * 1024u;
 constexpr size_t kMaxEntries    = 8192;
-constexpr size_t kMaxTotalBytes = 12u * 1024u * 1024u;
+constexpr size_t kMaxTotalBytes = 24u * 1024u * 1024u;
+constexpr size_t kMaxSeenKeys   = 32768;
 
 // --- Verification -----------------------------------------------------------
 //
@@ -206,6 +217,10 @@ struct Entry {
 std::unordered_map<uint64_t, Entry> g_cache;
 size_t g_blobBytes = 0;
 
+// Chunks compiled once. Value is the source length, so a key collision between
+// two different chunks does not promote either of them on the wrong evidence.
+std::unordered_map<uint64_t, uint32_t> g_seenOnce;
+
 void*  g_globalState = nullptr;   // the l_G these Protos belong to
 DWORD  g_ownerThread = 0;
 
@@ -214,7 +229,7 @@ bool g_dead      = false;
 
 unsigned long g_seen = 0, g_hits = 0, g_stored = 0;
 unsigned long g_tooBig = 0, g_notBuffer = 0, g_capped = 0, g_anchorFailed = 0;
-unsigned long g_verified = 0;
+unsigned long g_verified = 0, g_firstSighting = 0, g_flushes = 0;
 unsigned long long g_bytesSaved = 0, g_bytesTooBig = 0;
 
 // What luaY_parser handed back on a miss, for the luaL_loadbuffer hook one
@@ -249,6 +264,7 @@ void FlushAll() {
         free(it->second.blob);
     }
     g_cache.clear();
+    g_seenOnce.clear();
     g_blobBytes = 0;
 }
 
@@ -315,7 +331,7 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
     // A new global state means every Proto from the old one is gone with it.
     void* lG = RDP(L, kL_lG);
     if (lG != g_globalState) {
-        if (g_globalState) FlushAll();
+        if (g_globalState) { FlushAll(); g_flushes++; }
         g_globalState = lG;
     }
 
@@ -355,11 +371,28 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
         return nullptr;
     }
 
+    // A first sighting leaves a key and a length behind and nothing else. Only
+    // something the client has now compiled twice is worth a copy of its source.
+    std::unordered_map<uint64_t, uint32_t>::iterator seen = g_seenOnce.find(key);
+    if (seen == g_seenOnce.end() || seen->second != (uint32_t)srcLen) {
+        if (g_seenOnce.size() < kMaxSeenKeys) {
+            g_seenOnce[key] = (uint32_t)srcLen;
+            g_firstSighting++;
+        } else {
+            g_capped++;
+        }
+        return nullptr;
+    }
+
     if (g_cache.size() >= kMaxEntries ||
         g_blobBytes + srcLen + nameLen + 2 > kMaxTotalBytes) {
         g_capped++;
         return nullptr;
     }
+
+    // Promoted. If the anchor fails later this key is gone and the chunk simply
+    // starts again as unseen, which costs one more compile and corrects itself.
+    g_seenOnce.erase(seen);
 
     g_pending.want    = true;
     g_pending.key     = key;
@@ -486,9 +519,11 @@ bool Init() {
     Log("[ProtoCache] ACTIVE on luaY_parser (0x%08X). A census of tester sessions "
         "found 88%% of compiled chunks were source already compiled that session, "
         "332 MB of repeated parsing. Repeats now reuse the compiled Proto and the "
-        "client still builds the closure, its environment and its taint. Chunks "
-        "over %u KB are not cached. The first %lu reuses are checked against a "
-        "fresh compile, then one in %d.",
+        "client still builds the closure, its environment and its taint. A chunk "
+        "is kept only once the client has compiled it twice, so the cache holds "
+        "proven repeats rather than whatever came first; chunks over %u KB are "
+        "never kept. The first %lu reuses are checked against a fresh compile, "
+        "then one in %d.",
         (unsigned)kLuaYParser, (unsigned)(kMaxChunkBytes / 1024), kVerifyFirst,
         (int)(kResampleMask + 1));
     return true;
@@ -499,16 +534,25 @@ void LogStats() {
     if (!g_installed) { Log("[ProtoCache] not installed - nothing measured"); return; }
     if (g_seen == 0)  { Log("[ProtoCache] installed but no chunk reached it yet"); return; }
 
-    Log("[ProtoCache] %lu chunks offered, %lu reused (%.1f%%), %lu cached in %u KB, "
-        "%llu KB of parsing skipped%s",
+    Log("[ProtoCache] %lu chunks offered, %lu reused (%.1f%%), %llu KB of parsing "
+        "skipped%s",
         g_seen, g_hits, g_seen ? (100.0 * (double)g_hits / (double)g_seen) : 0.0,
-        g_stored, (unsigned)(g_blobBytes / 1024), g_bytesSaved / 1024,
-        g_dead ? " - DISABLED" : "");
+        g_bytesSaved / 1024, g_dead ? " - DISABLED" : "");
+
+    // Holding now and stored over the session are different numbers, and printing
+    // one under the other's label is how an earlier log came to read "3648 cached
+    // in 1 KB" after a reload emptied the cache.
+    Log("[ProtoCache]   holding %u chunks in %u KB now; %lu stored over the "
+        "session, %lu Lua state reset(s) emptied it; %u distinct chunks compiled "
+        "once so far and not repeated",
+        (unsigned)g_cache.size(), (unsigned)(g_blobBytes / 1024), g_stored,
+        g_flushes, (unsigned)g_seenOnce.size());
+
     Log("[ProtoCache]   %lu reuses verified against a fresh compile; turned away: "
-        "%lu over the size cap (%llu KB), %lu after the cache filled, %lu not a "
-        "flat buffer, %lu could not be anchored",
-        g_verified, g_tooBig, g_bytesTooBig / 1024, g_capped, g_notBuffer,
-        g_anchorFailed);
+        "%lu over the %u KB size cap (%llu KB), %lu after the cache filled, %lu "
+        "not a flat buffer, %lu could not be anchored",
+        g_verified, g_tooBig, (unsigned)(kMaxChunkBytes / 1024),
+        g_bytesTooBig / 1024, g_capped, g_notBuffer, g_anchorFailed);
 }
 
 } // namespace LuaProtoCache
