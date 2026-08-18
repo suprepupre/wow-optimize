@@ -8121,7 +8121,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool d3d9StateOk = Config::g_settings.OptD3d9StateManager && InstallD3D9StateManager();
 
     Log("");
-    Log("--- Render Hooks (anim throttle, backbuffer) ---");
+    Log("--- Render Hooks (backbuffer) ---");
     bool renderHooksOk = Config::g_settings.OptDefragLf && InstallRenderHooks(); // BISECT
 
     Log("");

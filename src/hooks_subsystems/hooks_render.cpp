@@ -18,10 +18,6 @@
 
 extern "C" void Log(const char* fmt, ...);
 
-// ---- Off-screen animation throttle state ----
-static volatile LONG64 g_animOffScreen = 0;
-static volatile LONG64 g_animSkipped   = 0;
-
 // ---- Instanced mesh batch counters ----
 static volatile LONG64 g_instancedBatches = 0;
 static volatile LONG64 g_instancedSaved   = 0;
@@ -33,38 +29,18 @@ static LARGE_INTEGER  g_qpcFreq      = {0};
 static LARGE_INTEGER  g_lastBackbufferLock = {0};
 static constexpr LONG64 MIN_LOCK_INTERVAL_US = 2000;
 
-// ================================================================
-// Off-Screen Animation Throttling
-// ================================================================
-// Models outside the view frustum get reduced update frequency:
-//   - On-screen:  every frame (full rate)
-//   - Off-screen: every 4th frame (~25% update rate)
-//   - Far off-screen (>2x far plane): every 16th frame (~6% update rate)
-
-#ifndef ADDR_MODEL_ANIM_UPDATE
-#define ADDR_MODEL_ANIM_UPDATE  0x00960D20  // CM2Model::AdvanceTime vtable implementation
-#endif
-
-static constexpr int ANIM_TIER_FULL    = 0;
-static constexpr int ANIM_TIER_REDUCED = 1;
-static constexpr int ANIM_TIER_MINIMAL = 2;
-
-static int GetAnimVisibilityTier(float distanceToCamera, float farPlane) {
-    if (distanceToCamera <= farPlane) return ANIM_TIER_FULL;
-    if (distanceToCamera <= farPlane * 2.0f) return ANIM_TIER_REDUCED;
-    return ANIM_TIER_MINIMAL;
-}
-
-static bool ShouldSkipAnimUpdate(int tier, DWORD frameIndex) {
-    switch (tier) {
-        case ANIM_TIER_FULL:    return false;
-        case ANIM_TIER_REDUCED: return (frameIndex & 3) != 0;
-        case ANIM_TIER_MINIMAL: return (frameIndex & 15) != 0;
-        default: return false;
-    }
-}
-
-static DWORD g_animFrameIndex = 0;
+// Off-screen animation throttling used to be sketched here: a tier function, a
+// skip schedule and two counters, none of them reachable from any call site,
+// under an address for CM2Model::AdvanceTime that nothing verified. Init logged
+// that the throttle address was set, which read as a working feature.
+//
+// The groundwork it needed has since been established at the right function.
+// sub_82F0F0 takes the model in ECX - IDA reports it as __cdecl and misses that
+// entirely - and derives its animation time as (now - start) * speed + base from
+// an absolute clock rather than accumulating a delta, so a skipped call delays
+// when a pose refreshes and cannot make an animation run slow. What is still
+// missing is a camera position at that call site, which is the only reason this
+// is a comment and not an implementation.
 
 // ================================================================
 // Backbuffer LockRect Elimination
@@ -102,25 +78,15 @@ bool InstallRenderHooks(void) {
         Log("[RenderHooks] Waiting for D3D9 state manager to patch device");
     }
 
-    if (ADDR_MODEL_ANIM_UPDATE) {
-        Log("[RenderHooks] Model anim throttle address set (0x%08X)", ADDR_MODEL_ANIM_UPDATE);
-    }
-
-    Log("[RenderHooks] Initialized — anim throttle, backbuffer lock skip, instanced mesh");
+    Log("[RenderHooks] Initialized - backbuffer lock skip");
     return true;
 }
 
 void ShutdownRenderHooks(void) {
-    if (g_animOffScreen > 0) {
-        Log("[RenderHooks] Anim throttle: %lld off-screen, %lld skipped (%.1f%%)",
-            g_animOffScreen, g_animSkipped,
-            g_animOffScreen ? 100.0 * g_animSkipped / g_animOffScreen : 0.0);
-    }
 }
 
 void OnFrameRenderHooks(DWORD mainThreadId) {
     if (GetCurrentThreadId() != mainThreadId) return;
-    g_animFrameIndex++;
     
     // Clear render state deduplication cache on frame boundaries to prevent 
     // stale cached states during focus changes or driver state changes.
