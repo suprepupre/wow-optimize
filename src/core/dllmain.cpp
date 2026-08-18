@@ -4951,6 +4951,20 @@ extern "C" void WowOpt_OnFrameBoundary() {
     //
     // Calling from both present paths costs an empty-queue check per frame: each
     // of these takes its lock, sees head == tail, and returns.
+    // A presented frame is the honest proof that the main thread is alive.
+    //
+    // The liveness signal used to come only from hooked_Sleep and the frame
+    // limiter. A client with frames to spare barely calls Sleep, and under a
+    // translation layer it waits inside the graphics driver instead, so with the
+    // frame limiter off nothing marked the thread as running. An eight-hour
+    // session logged 177 freezes of ten to thirteen seconds each while this very
+    // function counted 1,548,383 presented frames: the client was rendering
+    // continuously and the watchdog was reporting it hung.
+    //
+    // Both present paths reach here exactly once per frame, which is what the
+    // watchdog wanted to know in the first place.
+    UpdateMainThreadActivity();
+
     // Which core the frame loop is on, sampled here because this is the one
     // place that runs exactly once per presented frame on both render paths.
     CpuTopology::NoteFrame();
