@@ -751,61 +751,6 @@ static uintptr_t HottestAddressInPage(uintptr_t pageBase) {
     return at;
 }
 
-// The ranked list charges samples to a region, so one function spread over many
-// regions is reported as many small lines and never as itself.
-//
-// M2_AnimateModel is 6267 bytes. It occupies a dozen 512-byte buckets, and only
-// the hottest of them, "M2_AnimateModel+0x600", reached the top fifty - at 0.17%.
-// The animation census timed the same call at 2.47 ms inside a 23.4 ms frame,
-// which is 10%. Both were right about what they measured: the census times a
-// whole call, the ranking splits it. A compact function beats a spread one in
-// that list on shape alone, and the reader has no way to see it happening.
-//
-// So the fine histogram is summed a second way. Every bucket is charged exactly
-// once, to the named function containing the bucket's start address, and the
-// named functions are then ranked by their totals. A bucket that straddles a
-// boundary charges the following function's first bytes to the preceding one,
-// which is at most 512 bytes of slop per boundary and matters only for functions
-// small enough that the ranking above already reports them whole.
-static void DumpFunctionTotals(uint64_t total) {
-    if (g_knownCount <= 0 || total == 0) return;
-
-    static uint64_t tally[MAX_KNOWN_FUNCS];
-    memset(tally, 0, sizeof(uint64_t) * (size_t)g_knownCount);
-
-    uint64_t attributed = 0;
-    for (int b = 0; b < WOW_FINE_SLOTS; b++) {
-        uint32_t n = g_wowFineCounts[b];
-        if (!n) continue;
-        uintptr_t addr = WOW_BASE + ((uintptr_t)b << WOW_FINE_SHIFT);
-        const FuncEntry* f = FindNearestFunc(addr);
-        if (!f) continue;
-        int idx = (int)(f - g_knownFuncs);
-        if (idx < 0 || idx >= g_knownCount) continue;
-        tally[idx] += n;
-        attributed += n;
-    }
-    if (attributed == 0) return;
-
-    Log("[SamplingProfiler] === NAMED FUNCTIONS BY TOTAL (whole function, not its "
-        "hottest 512 bytes; %llu of %llu samples fell inside one) ===",
-        (unsigned long long)attributed, (unsigned long long)total);
-
-    const int kTop = 20;
-    for (int rank = 1; rank <= kTop; rank++) {
-        int best = -1;
-        for (int i = 0; i < g_knownCount; i++)
-            if (tally[i] && (best < 0 || tally[i] > tally[best])) best = i;
-        if (best < 0) break;
-        Log("[SamplingProfiler]  %2d. %-30s %8llu samples (%5.2f%% total)  "
-            "0x%08X, %u bytes",
-            rank, g_knownFuncs[best].name, (unsigned long long)tally[best],
-            100.0 * (double)tally[best] / (double)total,
-            (unsigned)g_knownFuncs[best].addr, g_knownFuncs[best].size);
-        tally[best] = 0;
-    }
-}
-
 static void DumpFineHistogram(const uint32_t* counts, int slots, int shift,
                               uint64_t total, const char* title,
                               const char* addrFormat, uintptr_t addrBase) {
@@ -1178,8 +1123,19 @@ static void DumpResults() {
     // Two percentages: of everything, and of the time the thread was running -
     // the second is the one that says how much of a real optimization target
     // something is, and it is the one that was missing.
-    Log("[SamplingProfiler] === TOP %d HOT FUNCTIONS/REGIONS (%llu steady-state samples, "
-        "%llu idle ticks during loading/warmup where the main thread was left alone) ===",
+    // A count here is the whole named function, however large, and it is self
+    // time: a sample lands on the innermost function that was executing, so a
+    // caller is not charged for what its callees did. Both halves of that have
+    // been misread from these logs. A "+0x600" suffix marks where inside the
+    // function the samples concentrated and never splits the count, and a
+    // function whose children do the work reads as small here while an inclusive
+    // timer around the same call reads as large - which is how M2_AnimateModel
+    // came to be 0.17% in this table and 2.47 ms of a 23.4 ms frame in the
+    // animation census on the same day. Neither instrument was wrong.
+    Log("[SamplingProfiler] === TOP %d HOT FUNCTIONS/REGIONS - self time, whole "
+        "function; a +0xNNN suffix is where the weight sits, not a split "
+        "(%llu steady-state samples, %llu idle ticks during loading/warmup where "
+        "the main thread was left alone) ===",
         TOP_N, (unsigned long long)total, (unsigned long long)g_skippedSamples);
 
     int printed = 0;
@@ -1250,8 +1206,6 @@ static void DumpResults() {
         }
         printed++;
     }
-
-    DumpFunctionTotals(total);
 
     // Our own hot spots at 256-byte resolution, then the client's at 512-byte.
     // Both are narrow enough to land on a single function, which the 4KB page
