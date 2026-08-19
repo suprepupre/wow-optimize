@@ -264,6 +264,12 @@ namespace Config {
         // reads, including the taint move lua_rawgeti performs. Opt-in, and it
         // checks itself against the client before trusting itself.
         bool OptLuaThisFast = false;
+        // Animating models is 3.68 ms of a 24.5 ms frame in raid content, and no
+        // single function in it exceeds 0.4% of self time, so only doing less of
+        // it can help. Above a model budget each model updates every Nth frame
+        // instead of every frame. Opt-in; skipping cannot slow an animation down
+        // because the client derives its time from an absolute clock.
+        bool OptAnimLod = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

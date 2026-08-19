@@ -34,6 +34,7 @@
 #include "objmgr_find_fast.h"
 #include "quat_lerp_sse2.h"
 #include "lua_proto_cache.h"
+#include "anim_lod.h"
 #include "anim_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
@@ -4690,6 +4691,7 @@ static void DumpPeriodicStats() {
     ObjMgrFindFast::LogStats();
     QuatLerpSse2::LogStats();
     LuaProtoCache::LogStats();
+    AnimLod::LogStats();
     LuaThisCache_LogStats();
     LuaAllocCensus::LogStats();
     ReportCrtFreeStats();
@@ -4984,6 +4986,7 @@ extern "C" void WowOpt_OnFrameBoundary() {
     // thread went 85.9%, 91.3%, 95.5%, 99.0% executing, and ended up claiming
     // 72 ms of animation inside a 53 ms frame.
     AnimCensus::OnFrame();
+    AnimLod::OnFrame();
 
     FlushFieldUpdates();
     WorldStateCoalesce::OnFrame();
@@ -7252,6 +7255,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Quaternion Interpolation (SSE2) ---");
     QuatLerpSse2::Init();
     LuaProtoCache::Init();
+    AnimLod::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST

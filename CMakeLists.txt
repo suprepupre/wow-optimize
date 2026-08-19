@@ -100,6 +100,7 @@ add_library(wow_optimize SHARED
     src/diagnostics/crash_dumper.cpp
     src/hooks_subsystems/vertex_fmt_inline.cpp
     src/hooks_subsystems/objmgr_find_fast.cpp
+    src/hooks_subsystems/anim_lod.cpp
     src/runtime_vm/lua_proto_cache.cpp
     src/simd_math/quat_lerp_sse2.cpp
     src/hooks_subsystems/render_null_guard.cpp
