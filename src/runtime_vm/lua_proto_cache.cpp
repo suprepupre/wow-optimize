@@ -103,6 +103,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "lua_proto_cache.h"
 #include "MinHook.h"
@@ -221,6 +222,14 @@ size_t g_blobBytes = 0;
 // two different chunks does not promote either of them on the wrong evidence.
 std::unordered_map<uint64_t, uint32_t> g_seenOnce;
 
+// Chunks that have already earned their place once. A reload replaces the Lua
+// state and every Proto in it, so the cache has to be emptied - but what is worth
+// caching is not state-specific knowledge, and throwing it away meant every
+// handler had to be compiled twice again after each reload. The first field
+// session did four of them. This set survives, so a chunk already known to repeat
+// is kept the first time it is seen in the new state.
+std::unordered_set<uint64_t> g_knownRepeaters;
+
 void*  g_globalState = nullptr;   // the l_G these Protos belong to
 DWORD  g_ownerThread = 0;
 
@@ -229,7 +238,7 @@ bool g_dead      = false;
 
 unsigned long g_seen = 0, g_hits = 0, g_stored = 0;
 unsigned long g_tooBig = 0, g_notBuffer = 0, g_capped = 0, g_anchorFailed = 0;
-unsigned long g_verified = 0, g_firstSighting = 0, g_flushes = 0;
+unsigned long g_verified = 0, g_firstSighting = 0, g_flushes = 0, g_onSight = 0;
 unsigned long long g_bytesSaved = 0, g_bytesTooBig = 0;
 
 // What luaY_parser handed back on a miss, for the luaL_loadbuffer hook one
@@ -374,7 +383,10 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
     // A first sighting leaves a key and a length behind and nothing else. Only
     // something the client has now compiled twice is worth a copy of its source.
     std::unordered_map<uint64_t, uint32_t>::iterator seen = g_seenOnce.find(key);
-    if (seen == g_seenOnce.end() || seen->second != (uint32_t)srcLen) {
+    bool second = (seen != g_seenOnce.end() && seen->second == (uint32_t)srcLen);
+    bool known  = (g_knownRepeaters.find(key) != g_knownRepeaters.end());
+
+    if (!second && !known) {
         if (g_seenOnce.size() < kMaxSeenKeys) {
             g_seenOnce[key] = (uint32_t)srcLen;
             g_firstSighting++;
@@ -392,7 +404,14 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
 
     // Promoted. If the anchor fails later this key is gone and the chunk simply
     // starts again as unseen, which costs one more compile and corrects itself.
-    g_seenOnce.erase(seen);
+    if (second) g_seenOnce.erase(seen);
+    if (known) {
+        g_onSight++;
+    } else if (g_knownRepeaters.size() < kMaxSeenKeys) {
+        // Remember that this one repeats, so the next Lua state keeps it the
+        // first time it appears instead of paying for a second compile again.
+        g_knownRepeaters.insert(key);
+    }
 
     g_pending.want    = true;
     g_pending.key     = key;
@@ -543,10 +562,12 @@ void LogStats() {
     // one under the other's label is how an earlier log came to read "3648 cached
     // in 1 KB" after a reload emptied the cache.
     Log("[ProtoCache]   holding %u chunks in %u KB now; %lu stored over the "
-        "session, %lu Lua state reset(s) emptied it; %u distinct chunks compiled "
-        "once so far and not repeated",
+        "session, %lu of them kept on sight as known repeaters; %lu Lua state "
+        "reset(s) emptied it; %u compiled once so far and not repeated, %u known "
+        "to repeat",
         (unsigned)g_cache.size(), (unsigned)(g_blobBytes / 1024), g_stored,
-        g_flushes, (unsigned)g_seenOnce.size());
+        g_onSight, g_flushes, (unsigned)g_seenOnce.size(),
+        (unsigned)g_knownRepeaters.size());
 
     Log("[ProtoCache]   %lu reuses verified against a fresh compile; turned away: "
         "%lu over the %u KB size cap (%llu KB), %lu after the cache filled, %lu "
