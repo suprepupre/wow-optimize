@@ -77,17 +77,32 @@ static bool __fastcall Hooked_DbcGetRow(void* store, void* /* edx */, int record
     uint32_t idx = ((uint32_t)(storeKey >> 2) ^ recordId) & CACHE_MASK;
     DbcRowEntry* e = &g_cache[idx];
 
-    // Optimistic lock-free read using Sequence Lock
+    // Optimistic lock-free read using Sequence Lock.
+    //
+    // The payload goes straight to the caller rather than through a temporary.
+    // The seqlock was reading into tempBuf, verifying, then copying tempBuf out,
+    // which is 1360 bytes moved per hit for 680 bytes of result - and a tester
+    // session took 9869554 hits, so that spare copy was about 6.7 GB of memcpy
+    // on the main thread.
+    //
+    // Writing the caller's buffer before the sequence is verified is safe here
+    // because of what happens next: if the sequence moved, control falls through
+    // to g_orig, which fills that same buffer completely. The caller cannot
+    // observe the discarded bytes. It only works in that order, so the fall-
+    // through below must stay unconditional.
+    //
+    // The key comparison also moves ahead of the copy. It is not the
+    // authoritative check - the one after the sequence still is - but a slot
+    // holding a different record is the common collision case and there is no
+    // reason to copy 680 bytes before noticing.
     uint32_t s1 = e->seq.load(std::memory_order_acquire);
-    if ((s1 & 1) == 0 && e->valid) { // even sequence means no write in progress
-        uintptr_t sk = e->storePtr;
-        uint32_t rid = e->recordId;
-        uint8_t tempBuf[0x2A8];
-        memcpy(tempBuf, e->rowData, 0x2A8); // read payload safely into temp buffer
+    if ((s1 & 1) == 0 && e->valid &&
+        e->storePtr == storeKey && e->recordId == (uint32_t)recordId) {
+        if (outBuf) memcpy(outBuf, e->rowData, 0x2A8);
         uint32_t s2 = e->seq.load(std::memory_order_acquire);
 
         // If sequence didn't change, the data we read is consistent and valid
-        if (s1 == s2 && sk == storeKey && rid == (uint32_t)recordId) {
+        if (s1 == s2 && e->storePtr == storeKey && e->recordId == (uint32_t)recordId) {
             g_hits++;
             // Sampled, not per hit. This runs seventeen million times a session,
             // and a cross-module counter call on a path this hot costs a real
@@ -95,10 +110,7 @@ static bool __fastcall Hooked_DbcGetRow(void* store, void* /* edx */, int record
             // found once already in the SSE2 matrix-vector hook. One in 1024 is
             // still far more than enough to answer "is it reached".
             if ((g_hits & 1023u) == 0u) CrashDumper::FeatureHit(g_featureToken);
-            if (outBuf) {
-                memcpy(outBuf, tempBuf, 0x2A8);
-            }
-            return true;
+            return true;   // already in the caller's buffer
         }
     }
 
