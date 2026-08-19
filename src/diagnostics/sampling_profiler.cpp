@@ -943,7 +943,17 @@ static void DumpResults() {
     buckets[bucketCount].count = 0;
     bucketCount++;
 
-    // Walk the ring buffer and bucket each sample
+    // Walk the ring buffer and bucket each sample.
+    //
+    // The ring holds RING_SIZE samples and a long session takes far more, so what
+    // follows describes the last RING_SIZE of them and nothing before that. Every
+    // percentage below is therefore a share of `n`, not of `total`, and getting
+    // that wrong is not a rounding error: a three-hour session took 5853152
+    // samples into a ring of 1048576, so dividing bucket counts by the lifetime
+    // total understated every figure in the report by 5.6x. It made the client
+    // look like it had no hot spot anywhere - the top fifty summed to 12% of a
+    // profile where they are really 67% - and that false flatness was used to
+    // decide what to optimise for a week.
     uint64_t n = (total < RING_SIZE) ? total : RING_SIZE;
     uint64_t startIdx = (total <= RING_SIZE) ? 0 : (total - RING_SIZE);
 
@@ -1060,13 +1070,15 @@ static void DumpResults() {
     for (int i = 0; i < bucketCount; i++) {
         if (IsWaitSymbol(buckets[i].name)) waitSamples += buckets[i].count;
     }
-    uint64_t workSamples = (total > waitSamples) ? (total - waitSamples) : 0;
-    double   workPct     = total ? (100.0 * (double)workSamples / (double)total) : 0.0;
+    uint64_t workSamples = (n > waitSamples) ? (n - waitSamples) : 0;
+    double   workPct     = n ? (100.0 * (double)workSamples / (double)n) : 0.0;
 
     Log("[SamplingProfiler] === MAIN THREAD: %.1f%% executing, %.1f%% blocked "
-        "(%llu of %llu steady-state samples were a kernel wait) ===",
+        "(%llu of the %llu most recent samples were a kernel wait; %llu taken in "
+        "all, and everything below describes the recent ones) ===",
         workPct, 100.0 - workPct,
-        (unsigned long long)waitSamples, (unsigned long long)total);
+        (unsigned long long)waitSamples, (unsigned long long)n,
+        (unsigned long long)total);
     if (total >= 1000) {
         if (workPct < 15.0) {
             Log("[SamplingProfiler]   The client is not CPU-bound here - it spends "
@@ -1134,14 +1146,14 @@ static void DumpResults() {
     // animation census on the same day. Neither instrument was wrong.
     Log("[SamplingProfiler] === TOP %d HOT FUNCTIONS/REGIONS - self time, whole "
         "function; a +0xNNN suffix is where the weight sits, not a split "
-        "(%llu steady-state samples, %llu idle ticks during loading/warmup where "
-        "the main thread was left alone) ===",
-        TOP_N, (unsigned long long)total, (unsigned long long)g_skippedSamples);
+        "(shares of the %llu most recent samples, %llu idle ticks during "
+        "loading/warmup where the main thread was left alone) ===",
+        TOP_N, (unsigned long long)n, (unsigned long long)g_skippedSamples);
 
     int printed = 0;
     for (int i = 0; i < bucketCount && printed < TOP_N; i++) {
         if (buckets[i].count == 0) break;
-        double pct = 100.0 * (double)buckets[i].count / (double)total;
+        double pct = 100.0 * (double)buckets[i].count / (double)n;
         char label[40];
         const char* name;
         if (buckets[i].name) {
@@ -1210,9 +1222,9 @@ static void DumpResults() {
     // Our own hot spots at 256-byte resolution, then the client's at 512-byte.
     // Both are narrow enough to land on a single function, which the 4KB page
     // buckets in the ranking above cannot do.
-    DumpFineHistogram(g_selfFineCounts, SELF_FINE_SLOTS, SELF_FINE_SHIFT, total,
+    DumpFineHistogram(g_selfFineCounts, SELF_FINE_SLOTS, SELF_FINE_SHIFT, n,
                       "wow_optimize.dll HOT SPOTS (256-byte resolution)", "wowopt+0x%05X", 0);
-    DumpFineHistogram(g_wowFineCounts, WOW_FINE_SLOTS, WOW_FINE_SHIFT, total,
+    DumpFineHistogram(g_wowFineCounts, WOW_FINE_SLOTS, WOW_FINE_SHIFT, n,
                       "wow.exe HOT SPOTS (512-byte resolution)", "0x%08X", WOW_BASE);
 
     DumpWorkerThreads(total);
