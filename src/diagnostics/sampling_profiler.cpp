@@ -836,6 +836,67 @@ static void BuildModuleTable() {
     }
 }
 
+// The largest single entry in a corrected profile is a module we did not write.
+// AwesomeWotlkLib.dll came out at 9.7% of executing time in a tester's raid
+// session, reported as one line with nothing inside it, and there is nothing to
+// be done about a number like that until somebody knows which part of it is hot.
+//
+// So the hottest foreign module gets the treatment our own image and wow.exe
+// already get: a second walk of the ring, bucketed by offset from its base. The
+// bucket width is chosen so any module fits the same 8192 slots - a 4 MB library
+// lands on 512-byte buckets, a 32 MB one on 4 KB - and the width is printed,
+// because a reader has to know how much of a function a line covers.
+//
+// This runs once per report, at dump time, over a ring that has already been
+// walked once. It costs nothing while sampling.
+static constexpr int MOD_FINE_SLOTS = 8192;
+static constexpr int MOD_FINE_TOP   = 12;
+static uint32_t g_modFineCounts[MOD_FINE_SLOTS];
+
+static void DumpHottestForeignModule(const volatile uintptr_t* ring,
+                                     uint64_t startIdx, uint64_t n, uint64_t total) {
+    if (g_modCount <= 0 || n == 0) return;
+
+    int best = -1;
+    for (int i = 0; i < g_modCount; i++)
+        if (g_mods[i].count && (best < 0 || g_mods[i].count > g_mods[best].count))
+            best = i;
+    if (best < 0) return;
+
+    const ModRange& m = g_mods[best];
+    // Below a percent of the profile there is nothing worth a section.
+    if ((double)m.count < 0.01 * (double)n) return;
+
+    uintptr_t size = m.end - m.base;
+    int shift = 9;
+    while ((size >> shift) >= MOD_FINE_SLOTS && shift < 24) shift++;
+
+    memset(g_modFineCounts, 0, sizeof(g_modFineCounts));
+    for (uint64_t i = 0; i < n; i++) {
+        uintptr_t eip = ring[(startIdx + i) % RING_SIZE];
+        if (eip < m.base || eip >= m.end) continue;
+        uint32_t b = (uint32_t)((eip - m.base) >> shift);
+        if (b < MOD_FINE_SLOTS) g_modFineCounts[b]++;
+    }
+
+    Log("[SamplingProfiler] === %s HOT SPOTS (%d-byte resolution, %.2f%% of the "
+        "profile is in this module) ===",
+        m.name, 1 << shift, 100.0 * (double)m.count / (double)n);
+
+    for (int rank = 0; rank < MOD_FINE_TOP; rank++) {
+        int top = -1;
+        for (int i = 0; i < MOD_FINE_SLOTS; i++)
+            if (g_modFineCounts[i] && (top < 0 || g_modFineCounts[i] > g_modFineCounts[top]))
+                top = i;
+        if (top < 0) break;
+        Log("[SamplingProfiler]   %s+0x%06X %8u samples (%5.2f%%)",
+            m.name, (unsigned)((uintptr_t)top << shift), g_modFineCounts[top],
+            100.0 * (double)g_modFineCounts[top] / (double)n);
+        g_modFineCounts[top] = 0;
+    }
+    (void)total;
+}
+
 static ModRange* FindModule(uintptr_t eip) {
     for (int i = 0; i < g_modCount; i++) {
         if (eip >= g_mods[i].base && eip < g_mods[i].end) return &g_mods[i];
@@ -1232,6 +1293,8 @@ static void DumpResults() {
                       "wow_optimize.dll HOT SPOTS (256-byte resolution)", "wowopt+0x%05X", 0);
     DumpFineHistogram(g_wowFineCounts, WOW_FINE_SLOTS, WOW_FINE_SHIFT, n,
                       "wow.exe HOT SPOTS (512-byte resolution)", "0x%08X", WOW_BASE);
+
+    DumpHottestForeignModule(g_ring, startIdx, n, total);
 
     DumpWorkerThreads(total);
 
