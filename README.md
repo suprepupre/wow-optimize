@@ -204,6 +204,39 @@ of it and picks between them on the script-profiling flag. The copy that shows u
 is the one behind the "profiling off" branch, so the client is already taking the
 cheap path.
 
+### Six things removed that were never running
+
+Two modules turned up by accident this week that announced a feature and
+implemented none of it. A scan of all 208 source files for the same shape — a
+startup line saying ACTIVE or Initialized, with no hook and no patch anywhere in
+the file — found four more, plus one dead subsystem inside a module that is
+otherwise alive:
+
+* an event-name hash cache that memset a 512-slot table at startup, logged it,
+  and never touched it again — its one function had no caller at all
+* a second event-name cache, the same shape, 256 slots
+* a CDataStore batch module whose own comment read "For now, initialize counters
+  only", and whose Install was called from nowhere
+* a frame-script throttle with a real body and a real entry point that nothing
+  ever called
+* a sound guard that registered a feature name another module had already
+  registered, one line after that module installed the hook it claimed
+* a combat-text batch flushed every frame, whose producer index nothing ever
+  incremented — and whose flush would have done nothing anyway, since the
+  dispatch was a TODO comment
+
+Four of those had a switch or a startup line advertising them, and two were gated
+on an unrelated feature's switch. About 550 lines, and six fewer log lines
+claiming something is running.
+
+### Where the time actually goes now
+
+The largest single entry in a corrected profile is `AwesomeWotlkLib.dll` at 9.7%
+of main-thread execution — larger than model animation, larger than d3d9. It used
+to print as one line with nothing inside it. The profiler now breaks down the
+hottest module it did not write, the same way it already did for wow.exe and for
+this DLL, so the next log will say which part of it is expensive.
+
 ### What this release does not claim
 
 None of the four new features is measured as a frame-rate gain. The sizes of what
