@@ -270,6 +270,12 @@ namespace Config {
         // instead of every frame. Opt-in; skipping cannot slow an animation down
         // because the client derives its time from an absolute clock.
         bool OptAnimLod = false;
+        // The collision reject pass (sub_7C7230), 3.8% of executing in a
+        // corrected profile. Six x87 compares per vertex become six packed
+        // compares per four. The bounds are plain floats with no arithmetic
+        // applied, so this is bit-exact rather than close. Opt-in, and it
+        // predicts the client's whole output and compares before trusting itself.
+        bool OptCollisionOutcode = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

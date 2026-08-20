@@ -35,6 +35,7 @@
 #include "quat_lerp_sse2.h"
 #include "lua_proto_cache.h"
 #include "anim_lod.h"
+#include "collision_outcode_sse2.h"
 #include "anim_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
@@ -4692,6 +4693,7 @@ static void DumpPeriodicStats() {
     QuatLerpSse2::LogStats();
     LuaProtoCache::LogStats();
     AnimLod::LogStats();
+    CollisionOutcode::LogStats();
     LuaThisCache_LogStats();
     LuaAllocCensus::LogStats();
     ReportCrtFreeStats();
@@ -7256,6 +7258,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     QuatLerpSse2::Init();
     LuaProtoCache::Init();
     AnimLod::Init();
+    CollisionOutcode::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST
