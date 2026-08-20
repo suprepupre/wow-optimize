@@ -385,7 +385,6 @@ static void StopFreezeWatchdog() {
     }
 }
 
-#include "frame_throttle.h"
 // #include "ui_frame_batch.h" // REMOVED - optimization disabled
 
 #include "MinHook.h"
@@ -458,8 +457,6 @@ static void StopFreezeWatchdog() {
 #include "addon_profiler.h"
 #include "lua_compile_census.h"
 #include "shadow_state_probe.h"
-#include "event_name_hash.h"
-#include "cdatastore_batch.h"
 #include "crt_memcpy_fast.h"
 #include "frame_script_dispatch.h"
 #include "strcat_fast.h"
@@ -4519,19 +4516,6 @@ static void DumpPeriodicStats() {
             g_strcpyHits, g_strcpyFallbacks,
            (double)g_strcpyHits / (g_strcpyHits + g_strcpyFallbacks) * 100.0);
 
-    // Frame Throttle stats
-    {
-        long skipped = 0, executed = 0, bypassed = 0;
-        GetFrameThrottleStats(&skipped, &executed, &bypassed);
-        if (skipped + executed + bypassed > 0) {
-            long total = skipped + executed;
-            double skipPct = total > 0 ? (double)skipped / total * 100.0 : 0.0;
-            Log("[Stats] Frame Throttle: %ld executed, %ld skipped, %ld bypassed (%.1f%% reduction)",
-                executed, skipped, bypassed, skipPct);
-        }
-    }
-
-
     // UI Frame Batch stats - REMOVED (optimization disabled)
     // {
     //     long batched = 0, iterations = 0, peak = 0;
@@ -6878,7 +6862,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CrashDumper::RegisterFeature("LuaGetStrInline");
     CrashDumper::RegisterFeature("RawGetIInline");
     CrashDumper::RegisterFeature("HardwareCursor");
-    CrashDumper::RegisterFeature("FrameThrottle");
     CrashDumper::RegisterFeature("UIFrameBatch");
     CrashDumper::RegisterFeature("LuaRawGetICache");
     CrashDumper::RegisterFeature("CombatLogFullCache");
@@ -7410,7 +7393,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     ShadowStateProbe::Init();
 
     Log("--- Event Name Hash Cache ---");
-    bool eventHashOk = Config::g_settings.OptEventCoalescer && InstallEventNameHash();
 
     Log("--- CDataStore Batch Read ---");
 
@@ -7706,8 +7688,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
         Log("Hardware cursor: off (HardwareCursor=0)");
     }
 
-    Log("--- Frame Script Throttling ---");
-    bool frameThrottleOk = Config::g_settings.OptUIFrameBatch && InstallFrameThrottling();
 
     Log("--- Spell Data Caching ---");
 
@@ -10274,7 +10254,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             MipBiasGovernor::Shutdown();
             PerfDiagnostics::Shutdown();
             CrashDumper::Shutdown();
-            ShutdownFrameThrottling();
             // ShutdownUIFrameBatching(); // REMOVED - optimization disabled
             ShutdownCombatLogParser();
 #if !TEST_DISABLE_SAVED_VARS_ASYNC
@@ -10293,8 +10272,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             ShutdownRenderStateDedup();
 #endif
 
-            ShutdownEventNameHash();
-            ShutdownCDataStoreBatch();
             UninstallMemcpyFast();
             UninstallDbcLookupCache();
             UninstallFrameScriptDispatch();

@@ -198,8 +198,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/dxvk_bridge.h
     src/hooks_subsystems/strncmp_null_guard.cpp
     src/hooks_subsystems/strncmp_null_guard.h
-    src/hooks_subsystems/frame_throttle.cpp
-    src/hooks_subsystems/frame_throttle.h
     src/runtime_vm/lua_vm_cache.cpp
     src/runtime_vm/lua_vm_cache.h
     src/runtime_vm/lua_settable_cache.cpp
@@ -280,8 +278,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/gettime_fast.cpp
     src/runtime_vm/lua_pushvalue_fast.cpp
     src/hooks_subsystems/render_state_dedup.cpp
-    src/hooks_subsystems/event_name_hash.cpp
-    src/hooks_subsystems/cdatastore_batch.cpp
     src/runtime_vm/lua_tonumber_fast.h
     src/hooks_subsystems/strcat_fast.cpp
     src/hooks_subsystems/strcat_fast.h
