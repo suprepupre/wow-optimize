@@ -131,13 +131,27 @@ static void InvalidateLatencyQueries(bool release) {
 }
 
 // Statistics
-static std::atomic<long> g_textureSkips{0};
-static std::atomic<long> g_renderStateSkips{0};
-static std::atomic<long> g_stageStateSkips{0};
-static std::atomic<long> g_samplerSkips{0};
-static std::atomic<long> g_transformSkips{0};
-static std::atomic<long> g_viewportSkips{0};
-static std::atomic<long> g_vsConstantSkips{0};
+// Plain counters, deliberately, and every one of these sits on a path whose
+// entire job is to compare two dwords and return.
+//
+// They were std::atomic<long>, incremented with fetch_add on the skip branch -
+// the fast branch, the one the whole dedup exists to reach. On 32-bit x86 that
+// is a lock xadd: tens of cycles and a bus barrier, to count an event whose
+// entire cost it then dwarfs. The client issues these calls thousands of times
+// a frame, and this file measured about 1% of executing main-thread time in a
+// corrected profile, which is what a lock prefix on a fast path buys.
+//
+// This project has made the same mistake twice before, in the memset hook and
+// on the free wrapper, and wrote the reason down both times. An aligned 32-bit
+// increment can only ever lose counts, never tear, so the numbers are a lower
+// bound and are reported as one.
+static long g_textureSkips = 0;
+static long g_renderStateSkips = 0;
+static long g_stageStateSkips = 0;
+static long g_samplerSkips = 0;
+static long g_transformSkips = 0;
+static long g_viewportSkips = 0;
+static long g_vsConstantSkips = 0;
 
 // Clear the cache (called on Init and after device Reset)
 static void CleanVBCache() {
@@ -175,7 +189,7 @@ static HRESULT WINAPI Hooked_SetRenderState(IDirect3DDevice9* device, D3DRENDERS
 
     if ((DWORD)state < 512 && !isCriticalState) {
         if (g_renderStateValid[state] && g_renderStateCache[state] == value) {
-            g_renderStateSkips.fetch_add(1, std::memory_order_relaxed);
+            g_renderStateSkips += 1;
             return D3D_OK;
         }
         g_renderStateCache[state] = value;
@@ -193,7 +207,7 @@ static HRESULT WINAPI Hooked_SetTransform(IDirect3DDevice9* device, D3DTRANSFORM
 
     if ((DWORD)state < 512 && matrix && !isWorldTransform) {
         if (g_transformCache[state].valid && memcmp(&g_transformCache[state].matrix, matrix, sizeof(D3DMATRIX)) == 0) {
-            g_transformSkips.fetch_add(1, std::memory_order_relaxed);
+            g_transformSkips += 1;
             return D3D_OK;
         }
         memcpy(&g_transformCache[state].matrix, matrix, sizeof(D3DMATRIX));
@@ -209,7 +223,7 @@ static HRESULT WINAPI Hooked_SetTransform(IDirect3DDevice9* device, D3DTRANSFORM
 static HRESULT WINAPI Hooked_SetViewport(IDirect3DDevice9* device, const D3DVIEWPORT9* viewport) {
     if (viewport) {
         if (g_viewportValid && memcmp(&g_viewportCache, viewport, sizeof(D3DVIEWPORT9)) == 0) {
-            g_viewportSkips.fetch_add(1, std::memory_order_relaxed);
+            g_viewportSkips += 1;
             return D3D_OK;
         }
         memcpy(&g_viewportCache, viewport, sizeof(D3DVIEWPORT9));
@@ -324,7 +338,7 @@ static HRESULT WINAPI Hooked_SetVertexShaderConstantF(IDirect3DDevice9* device, 
         }
         
         if (allCached) {
-            g_vsConstantSkips.fetch_add(Vector4fCount, std::memory_order_relaxed);
+            g_vsConstantSkips += Vector4fCount;
             return D3D_OK;
         }
         
@@ -355,7 +369,7 @@ static HRESULT WINAPI Hooked_SetVertexShader(IDirect3DDevice9* device, IDirect3D
 static HRESULT WINAPI Hooked_SetSamplerState(IDirect3DDevice9* device, DWORD Sampler, D3DSAMPLERSTATETYPE Type, DWORD Value) {
     if (Sampler < 16 && (DWORD)Type < 32) {
         if (g_samplerStateValid[Sampler][Type] && g_samplerStateCache[Sampler][Type] == Value) {
-            g_samplerSkips.fetch_add(1, std::memory_order_relaxed);
+            g_samplerSkips += 1;
             return D3D_OK;
         }
         g_samplerStateCache[Sampler][Type] = Value;
@@ -383,7 +397,7 @@ static HRESULT WINAPI Hooked_SetSamplerState(IDirect3DDevice9* device, DWORD Sam
 static HRESULT WINAPI Hooked_SetTextureStageState(IDirect3DDevice9* device, DWORD Stage, D3DTEXTURESTAGESTATETYPE Type, DWORD Value) {
     if (Stage < 8 && (DWORD)Type < 64) {
         if (g_textureStageStateValid[Stage][Type] && g_textureStageStateCache[Stage][Type] == Value) {
-            g_stageStateSkips.fetch_add(1, std::memory_order_relaxed);
+            g_stageStateSkips += 1;
             return D3D_OK;
         }
         g_textureStageStateCache[Stage][Type] = Value;
@@ -742,9 +756,9 @@ void LogStats() {
     Log("[D3D9StateCache] redundancy skips - textures %ld, render states %ld, "
         "stage states %ld, samplers %ld, transforms %ld, viewports %ld, "
         "vs constants %ld",
-        g_textureSkips.load(), g_renderStateSkips.load(), g_stageStateSkips.load(),
-        g_samplerSkips.load(), g_transformSkips.load(), g_viewportSkips.load(),
-        g_vsConstantSkips.load());
+        g_textureSkips, g_renderStateSkips, g_stageStateSkips,
+        g_samplerSkips, g_transformSkips, g_viewportSkips,
+        g_vsConstantSkips);
 }
 
 void Shutdown() {
