@@ -471,7 +471,6 @@ static void StopFreezeWatchdog() {
 #include "sound_driver_guard.h"
 #include "sound_emitter_guard.h"
 #include "sound_buffer_guard.h"
-#include "sound_update_guard.h"
 #include "lua_vm_engine.h"
 #include "lua_gettable_cache.h"
 #include "saved_vars_async.h"
@@ -6913,7 +6912,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     InstallSoundDriverGuard();
     InstallSoundEmitterGuard();
     InstallSoundBufferGuard();
-    InstallSoundUpdateGuard();
     // Always installed: it owns the FrameScript_SignalEvent detour and publishes the
     // loading state that the DBC cache, deferred field updates, LuaOpcache and the
     // texture unload queue use as a safety gate. EventCoalescer, when enabled, hangs

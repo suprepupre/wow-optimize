@@ -399,13 +399,11 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/sound_driver_guard.cpp
     src/hooks_subsystems/sound_emitter_guard.cpp
     src/hooks_subsystems/sound_buffer_guard.cpp
-    src/hooks_subsystems/sound_update_guard.cpp
 
     src/diagnostics/sampling_profiler.h
     src/hooks_subsystems/sound_driver_guard.h
     src/hooks_subsystems/sound_emitter_guard.h
     src/hooks_subsystems/sound_buffer_guard.h
-    src/hooks_subsystems/sound_update_guard.h
 
     src/hooks_subsystems/sound_coalescer.cpp
     src/hooks_subsystems/sound_coalescer.h

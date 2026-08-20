@@ -11,7 +11,6 @@
 #include "version.h"
 #include "crash_dumper.h"
 #include "sound_buffer_guard.h"
-#include "sound_update_guard.h"
 #include <intrin.h>
 
 #pragma intrinsic(_ReturnAddress)
