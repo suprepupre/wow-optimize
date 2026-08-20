@@ -30,6 +30,7 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
+* [What's New in v3.19.0](#whats-new-in-v3190)
 * [What's New in v3.18.2](#whats-new-in-v3182)
 * [What's New in v3.18.1](#whats-new-in-v3181)
 * [Send me your log](#send-me-your-log)
@@ -42,6 +43,151 @@ The current public build is focused on real frametime stability, long-session sm
 * [Building](#building)
 * [Core Architecture](#core-architecture)
 * [Troubleshooting & Diagnostics](#troubleshooting)
+
+---
+
+## What's New in v3.19.0
+
+This one has three new optimizations in it, and three of the instruments this
+project measures itself with turned out to be reporting confident wrong numbers.
+The instruments are the bigger item. Thanks to [txtsd](https://github.com/txtsd),
+who ran four long sessions on request — including the first one anybody has ever
+sent in with the frame rate uncapped, which is what made the rest of this
+possible.
+
+### Three new features, all off by default
+
+They are in the **Experimental** tab, and **Enable All deliberately skips them**.
+Tick them yourself if you want to test them.
+
+**Reuse Compiled Scripts** (`UI_Lua/LuaProtoCache`)
+
+Interface scripts written inside XML templates get recompiled from scratch every
+time a frame is built from that template. A counter added for this measured 68%
+of every chunk the client compiled in a session as source it had already compiled
+that session. This keeps the compiled form and hands it back on a repeat, so the
+parse does not run.
+
+The client still builds the function object itself, with its own environment and
+its own addon ownership, so nothing about who is allowed to touch what is shared
+between two uses. The obvious implementation — dump the bytecode and reload it —
+does not work here and that was checked in the disassembler rather than assumed:
+this client's parser has no bytecode-loading path at all, it was removed.
+
+Two of txtsd's sessions ran it: 806 and 704 reuses, every one of them compared
+against a fresh compile of the same source, none of them differing.
+
+**UI Method Object Lookup** (`UI_Lua/LuaThisFast`)
+
+Every call an addon makes into a frame — `SetText`, `GetWidth`, `Show`, 674 of
+them — begins by fetching the frame object out of a table slot, and the game
+spends four separate script-engine calls plus a push and a pop doing it. This
+reads it directly.
+
+The one thing those calls do besides fetch is carry addon ownership between
+values, which is what decides whether a caller may touch a protected action.
+That is reproduced exactly, not skipped. Anything out of the ordinary is handed
+straight back to the game.
+
+Three sessions: 86.6 million, 63.4 million and 31.4 million lookups. None handed
+back, none disagreeing with the game's own answer.
+
+**Spread Model Animation** (`Graphics_Sound/AnimLod`)
+
+This one has the largest measured target behind it and **no field data at all
+yet**.
+
+Posing the skeletons of everything on screen is the single largest block of frame
+time this client spends. Measured across txtsd's runs: 3.68 ms out of a 24.5 ms
+frame during a VoA raid, across 114 models averaging 31 bones each. No single
+function inside it is worth rewriting — the cost is spread across dozens — so the
+only thing that reaches it is doing less of it.
+
+Below 96 models on screen this changes nothing whatsoever. Above that, each model
+has its pose refreshed every second to fourth frame instead of every frame, never
+less often than a quarter of your frame rate, and a model is never skipped before
+its first pose.
+
+It cannot make animations run slow or drift. The client works out where an
+animation should be from a clock each time rather than by counting frames, so a
+skipped update only delays when a pose is refreshed. That was read out of the
+function, not assumed, because if it had been wrong the feature would have been
+useless. What you may notice in a packed city is slightly steppier movement on
+some characters.
+
+### The instruments were lying
+
+None of these was found by reading code. Each was found because a number was
+impossible.
+
+**Every percentage the profiler printed was too small.** Sample counts came from
+the last million entries in the ring buffer; the divisor was the number of
+samples taken in the whole session. On a three-hour session that is 5.6× too
+small. The top fifty entries summed to 12% of the profile — and since every
+sample must land in some bucket, no program can have that shape.
+
+What it produced was a profile with no hot spot anywhere in it, and that reading
+was steering the work. Corrected, the same session reads: `AwesomeWotlkLib.dll`
+9.7%, the model animation functions 7.0%, `d3d9.dll` 6.3%, this DLL's own modules
+about 6%, particle vertex fill 2.5%, UI batch draw 2.3%.
+
+The executing-versus-blocked split had the same defect and worse: the wait samples
+came from the ring window while the divisor came from the session, so every long
+session reported itself as 99% executing whatever it was actually doing.
+
+**The animation counter claimed 72 ms of animation inside a 53 ms frame.** It was
+closing its frame on the hooked `Sleep` tick, which a CPU-bound client stops
+running, so everything counted between two sleeps was charged to a single frame.
+The number it reported tracked how CPU-bound the session was rather than how many
+models were on screen — 860, 906, 1092, 1909 models per frame as the main thread
+went 85.9%, 91.3%, 95.5%, 99.0% executing.
+
+**The feature summary called two working features dead.** It listed `CrtFreeHook`
+under "enabled but never ran — a zero here means the code path was not reached",
+forty lines below that same feature reporting 2,858,166 deallocations served.
+Both it and the SSE2 matrix-vector hook had registered a counter and deliberately
+never incremented it, for a good reason — the counter cost a real fraction of the
+work it was counting — and one of them discarded the counter handle at
+registration so nothing could have incremented it even by accident. Both now
+sample one call in 8192. A summary that calls a working default-on feature dead
+invites the next person to go and fix what is not broken.
+
+### Also in this release
+
+**The vsync detector told a tester to throw away a good session.** txtsd ran
+uncapped, got 96.5% executing, and then a warning directly underneath saying the
+session was capped and no conclusion should be drawn from it. It was testing the
+median frame time alone, and 20.00 ms is the 50 Hz interval. The client was
+simply slow at that moment: the distribution was 23.10 ms at the median against
+62.20 ms at the 95th. A frame limiter has no tail — it holds every frame at the
+interval — so the spread is what separates the two cases, and the median cannot
+say it alone.
+
+**The DBC row cache was moving 1360 bytes per hit to deliver 680.** Its sequence
+lock read the row into a temporary, verified, then copied the temporary out. At
+9,869,554 hits in one session that spare copy was about 6.7 GB of `memcpy` on the
+main thread. The payload now goes straight to the caller and the sequence is
+verified afterwards, which is safe only because a failed verification falls
+through to the client's own routine and that fills the same buffer completely.
+
+**A framework for throttling off-screen animation had been sitting in the source
+with nothing calling it** — a tier function, a skip schedule and two counters,
+none of them reachable, under an address nothing had verified, while startup
+logged that the throttle was configured. Removed, and what had been learned about
+the real function was left in its place.
+
+**`Hot_857CA0`, which has appeared in every profile this project ever collected,
+is `luaV_execute`** — the Lua bytecode interpreter. The client carries two copies
+of it and picks between them on the script-profiling flag. The copy that shows up
+is the one behind the "profiling off" branch, so the client is already taking the
+cheap path.
+
+### What this release does not claim
+
+None of the three new features is measured as a frame-rate gain. The sizes of
+what they target are measured, and their correctness is verified in the field
+across millions of operations, but no before-and-after frame time exists for any
+of them yet. If you run them, the log lines will tell you what they did.
 
 ---
 
@@ -456,7 +602,7 @@ Every measured item in these notes came out of a log somebody sent in.
 - GC step sync with !LuaBoost
 - safe Lua stats export to addon
 - Lua reload detection and clean reinitialization
-- **Lua VM Bytecode JIT Redirection & Cache** — detours standard Lua VM preparation function `sub_856370` to run JIT stubs under normal play conditions, utilizing a lock-free direct-mapped cache (`g_protoCache`) to avoid profiling lock contention.
+- **Reuse Compiled Scripts** *(off by default, experimental)* — keeps the compiled form of a Lua chunk and hands it back when the client compiles the same source under the same name again, so the parse does not run. The client still builds the function object, its environment and its addon ownership. Nothing is kept until a chunk has been compiled twice. `UI_Lua/LuaProtoCache`
 
 ### WoW API result cache
 - `GetItemInfo` - 8192-slot cache, Direct Memory Access *(disabled - breaks Aux / WCollections / ElvUI)*
@@ -504,6 +650,7 @@ Every measured item in these notes came out of a log somebody sent in.
   - `strsplit`
 
 ### Lua VM internals
+- **UI Method Object Lookup** *(off by default, experimental)* — the object fetch that starts every one of 674 Lua calls into a frame (`sub_4A81B0`). Four script-engine calls and a push/pop replaced by direct reads; the addon-ownership propagation `lua_rawgeti` performs is reproduced rather than skipped, and anything unusual is handed back to the client. `UI_Lua/LuaThisFast`
 - `luaV_concat` and `luaS_newlstr` hooks disabled for public stability
 - baseline-safe VM operation with zero overhead
 - string table pre-sizing remains active to prevent rehash freezes
@@ -559,6 +706,7 @@ Features that use worker threads and lock-free queues. Status reflects the curre
 - **Addon dispatcher** - lightweight event-driven addon update dispatch *(enabled)*
 
 ### Other runtime optimizations
+- **Spread Model Animation** *(off by default, experimental)* — posing model skeletons measured at 3.68 ms of a 24.5 ms frame in raid content. Below 96 models on screen nothing changes; above it each model's pose refreshes every 2nd to 4th frame, never slower than a quarter of the frame rate, and never before its first pose. Cannot make animations run slow: the client derives animation time from a clock rather than by counting frames. `Graphics_Sound/AnimLod`
 - combat log optimizer - **fixes the 16-year combat log bug** (log retention increased from 300s to 1800s, events no longer lost during extended sessions)
 - `CompareStringA` fast ASCII path
 - `MultiByteToWideChar` / `WideCharToMultiByte` - SSE2 ASCII fast path (bypasses NLS for pure-ASCII strings on ASCII-compatible codepages)
@@ -871,7 +1019,7 @@ Recent events:
     -110351ms  TID=900   D3D9 device Reset (dev=0x0EB1AA90)
 ```
 
-The startup banner reports the exact build the log came from (`v3.18.2 (build abc1234)`), so please don't trim the first lines.
+The startup banner reports the exact build the log came from (`v3.19.0 (build abc1234)`), so please don't trim the first lines.
 
 If the complaint is stuttering rather than a crash, look for `slow frame` lines — each one names how far past your session's own median that frame ran, and what was happening during it:
 

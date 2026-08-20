@@ -8297,8 +8297,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- Async Sound FX Loader ---");
     if (Config::g_settings.OptAudioDecodeMt && !RunningUnderTranslation()) AsyncSoundLoader::Init();
 
-    Log("");
-    Log("--- Lua VM Bytecode JIT Compiler ---");
+    // A "Lua VM Bytecode JIT Compiler" banner used to print here with nothing
+    // under it - no Init, no module, no such feature anywhere in the source. The
+    // README described it in detail, down to a detour of sub_856370 and a
+    // lock-free cache called g_protoCache, neither of which has ever existed.
+    // This client's Lua has no JIT and no bytecode loader at all; that is why the
+    // chunk cache had to keep Proto objects instead. Removed from both.
 
     Log("");
     Log("--- RCU Object Manager Traverser ---");
