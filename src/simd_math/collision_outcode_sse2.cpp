@@ -119,7 +119,19 @@ constexpr unsigned kT_mask      = 0x14;   // u16
 // something to differ about - those are handed straight back.
 constexpr int kMaxVerts = 452;
 
-typedef int (__stdcall* findModel_fn)(int a0, int a4, void* p1, void* p2, void* p3);
+// sub_79B1F0 is __thiscall, and its object is not the caller's - it is the value
+// held in dword_CDD7A0, an eight-way set-associative cache of collision models.
+// The client loads that into ECX at 0x007c723c, three instructions after moving
+// its own object into ESI, so by the time the call happens ECX no longer holds
+// what the decompiler's five-argument rendering suggests. Calling it __stdcall
+// with five stack arguments would hand it whatever ECX happened to contain and
+// index the cache off a wrong base.
+//
+// __fastcall is the standard way to reach a __thiscall from C++ here: the first
+// parameter lands in ECX, the second in EDX and is never pushed, and the callee
+// cleans the five that are - which is what its `retn 14h` does.
+typedef int (__fastcall* findModel_fn)(void* cache, void* edx,
+                                       int a0, int a4, void* p1, void* p2, void* p3);
 
 void* orig_Classify = nullptr;
 
@@ -231,9 +243,13 @@ extern "C" char __fastcall CollisionOutcode_Hooked(void* thisPtr, void* /*edx*/,
     bool      verifying = (g_armed == 0) || ((g_calls & kResampleMask) == 0);
 
     __try {
-        if (RD32(kEnabledFlg) == 0) { ++g_declined; return call_orig(thisPtr, nullptr, a0, a4); }
+        // The client's own first test. It reads as an enable flag and is really a
+        // null check on the model cache, which is also the object the lookup below
+        // runs against.
+        void* cache = *(void**)kEnabledFlg;
+        if (!cache) { ++g_declined; return call_orig(thisPtr, nullptr, a0, a4); }
 
-        model = ((findModel_fn)kFindModel)(a0, a4,
+        model = ((findModel_fn)kFindModel)(cache, nullptr, a0, a4,
                     *(void**)(T + 4), *(void**)(T + 8), *(void**)(T + 12));
         if (!model) { ++g_declined; return call_orig(thisPtr, nullptr, a0, a4); }
 
