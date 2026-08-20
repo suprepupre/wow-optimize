@@ -17,7 +17,11 @@ namespace SpellEffectCulling {
     typedef int (__thiscall *ParticleSpawn_fn)(void* thisPtr, float dt, int matrix);
     static ParticleSpawn_fn orig_ParticleSpawn = nullptr;
 
-    static std::atomic<int> g_frameSpawnCount{0};
+    // Plain, not atomic. Particle spawn is a main-thread path and so is the
+    // frame boundary that reads and clears this, so there is no race to protect
+    // against - and a lock xadd on every particle spawned is a real cost in the
+    // one situation this feature exists for, a screen full of spell effects.
+    static int g_frameSpawnCount = 0;
     static int g_lastFrameSpawnCount = 0;
 
     // ---- Density Getter Hook ----
@@ -33,7 +37,7 @@ namespace SpellEffectCulling {
     // ---- Hooked Functions ----
 
     static int __fastcall Hooked_ParticleSpawn(void* thisPtr, void* /*edx*/, float dt, int matrix) {
-        g_frameSpawnCount.fetch_add(1, std::memory_order_relaxed);
+        ++g_frameSpawnCount;
         return orig_ParticleSpawn(thisPtr, dt, matrix);
     }
 
@@ -93,7 +97,8 @@ namespace SpellEffectCulling {
         if (!g_enabled) return;
 
         // Snapshot the spawn count from last frame and reset
-        int spawns = g_frameSpawnCount.exchange(0, std::memory_order_relaxed);
+        int spawns = g_frameSpawnCount;
+        g_frameSpawnCount = 0;
         g_lastFrameSpawnCount = spawns;
 
         // Compute target scale factor based on spawn pressure
