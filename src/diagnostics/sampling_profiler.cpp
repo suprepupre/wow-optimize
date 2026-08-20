@@ -219,14 +219,20 @@ static void BuildKnownFuncTable() {
         // pick ray from sub_7C9A00. The six bounds live on the x87 stack for
         // the whole loop, which is why 158 of its 418 instructions are x87.
         { 0x008203B0,   872, "Hot_8203B0" },
-        { 0x00857CA0,  5151, "Hot_857CA0" },
+        { 0x00857CA0,  5151, "luaV_execute" },
+        // The Lua bytecode dispatch loop, and the client has two of them.
+        // luaD_call at 0x00856760 picks by the byte at G(L)+20 - the script
+        // profiling flag, the same one luaF_newLclosure reads: set, it calls a
+        // timing precall and the copy at 0x00859160; clear, it calls this one.
+        // This is the copy that shows up, so the client is already taking the
+        // cheap path and there is nothing to win by steering it.
         { 0x00855820,   187, "LuaMemPool_Alloc" },
         // The pool's lua_Alloc: takes (pool, ptr, oldSize, newSize), finds the
         // size class for each by walking a nine-entry table, and dispatches.
         // Showed up as "LuaMemPool_NewChunk+0x100" before sizes were exact.
         { 0x008558E0,   305, "LuaMemPool_Realloc" },
         { 0x00856C80,   326, "luaS_newlstr" },
-        { 0x00859160,  5583, "luaV_execute" },
+        { 0x00859160,  5583, "luaV_execute_profiled" },
         { 0x0085A960,   432, "luaC_traversetable" },
         { 0x0085B200,   143, "luaC_sweeplist" },
         { 0x00856E50,    78, "luaV_tonumber" },
