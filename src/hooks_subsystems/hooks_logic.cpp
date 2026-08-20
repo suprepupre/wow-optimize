@@ -78,61 +78,6 @@ static bool IsReadable(uintptr_t addr) {
 //   - Frame update loop: the parent UI frame's update that processes
 //     OnUpdate scripts. Look for the frame manager's main loop.
 
-// ADDR_COMBAT_TEXT_ADD: sub_608880 called from sub_404130 — initializes combat text event names
-// Hook the combat text event dispatch loop (sub_404130 for event processing)
-#ifndef ADDR_COMBAT_TEXT_ADD
-#define ADDR_COMBAT_TEXT_ADD 0x00608880
-#endif
-#ifndef ADDR_UI_FRAME_UPDATE_END
-#define ADDR_UI_FRAME_UPDATE_END 0x00000000 // End of UI frame update (flush point)
-#endif
-
-// Batching buffer — 256 pending text entries
-static constexpr int CT_BATCH_SIZE = 256;
-static constexpr int CT_BATCH_MASK = CT_BATCH_SIZE - 1;
-
-struct CombatTextEntry {
-    uint64_t guid;       // target GUID
-    int      amount;     // damage/heal amount
-    int      spellID;    // spell that caused it
-    int      flags;      // critical, miss, absorb, etc.
-    float    x, y, z;    // world position
-};
-
-static CombatTextEntry g_ctBuffer[CT_BATCH_SIZE] = {};
-static volatile LONG    g_ctHead  = 0;  // producer index
-static volatile LONG    g_ctTail  = 0;  // consumer index (flush)
-static volatile LONG64  g_ctBatched = 0;
-static volatile LONG64  g_ctFlushed = 0;
-static volatile LONG64  g_ctOverflow = 0;
-
-// Flush threshold — batch and flush when N entries collected
-static constexpr LONG CT_FLUSH_THRESHOLD = 128;
-
-static void FlushCombatTextBatch() {
-    LONG tail = g_ctTail;
-    LONG head = InterlockedCompareExchange(&g_ctHead, 0, 0); // read atomically
-    LONG count = (head - tail) & CT_BATCH_MASK;
-
-    if (count == 0) return;
-
-    // Process all entries in the batch
-    // The actual dispatch calls the original function for each entry.
-    // Batching saves D3D resource creation overhead by reusing
-    // the same font string texture for multiple entries.
-    while (tail != head) {
-        CombatTextEntry& entry = g_ctBuffer[tail & CT_BATCH_MASK];
-
-        // TODO: call original CombatText_AddMessage with entry data
-        // The hook on the original function allows us to batch state
-        // (font, color, position) and only flush D3D resources once.
-
-        tail = (tail + 1) & CT_BATCH_MASK;
-    }
-
-    InterlockedExchange(&g_ctTail, tail);
-    InterlockedIncrement64(&g_ctFlushed);
-}
 
 // ================================================================
 // 2. UI Layout Traversal Caching (Dirty Flag System)
@@ -792,9 +737,6 @@ bool InstallLogicHooks(void) {
     QueryPerformanceFrequency(&g_qpcFreqNet);
 
     // Initialize combat text batch buffer
-    memset(g_ctBuffer, 0, sizeof(g_ctBuffer));
-    g_ctHead = g_ctTail = 0;
-    g_ctBatched = g_ctFlushed = g_ctOverflow = 0;
 
     // Initialize UI layout cache
     memset(g_uiLayoutCache, 0, sizeof(g_uiLayoutCache));
@@ -805,8 +747,6 @@ bool InstallLogicHooks(void) {
     g_uiScriptGen = 1;
 
     // Log placeholder addresses that need to be filled
-    if (!ADDR_COMBAT_TEXT_ADD)
-        Log("[LogicHooks] Combat text batch: address placeholder — fill ADDR_COMBAT_TEXT_ADD");
     if (!ADDR_NETSEND_PACKET)
         Log("[LogicHooks] Network heartbeat: address placeholder — fill ADDR_NETSEND_PACKET");
 
@@ -825,7 +765,6 @@ bool InstallLogicHooks(void) {
 
 void ShutdownLogicHooks(void) {
     // Flush any remaining combat text entries
-    FlushCombatTextBatch();
 
     // Invariant script cache hooks not installed (disabled for stack leak safety)
     // MH_DisableHook((void*)ADDR_LUA_UNITLEVEL);
@@ -834,8 +773,6 @@ void ShutdownLogicHooks(void) {
     // MH_DisableHook((void*)ADDR_LUA_UNITMAXHEALTH);
     // MH_DisableHook((void*)ADDR_LUA_UNITPOWERMAX);
 
-    Log("[LogicHooks] Stats: Combat text — %lld batched, %lld flushed, %lld overflow",
-        g_ctBatched, g_ctFlushed, g_ctOverflow);
 
     Log("[LogicHooks] Stats: UI layout — %lld checked, %lld skipped (%.1f%%)",
         g_uiChecked, g_uiSkipped,
@@ -861,8 +798,6 @@ void OnFrameLogicHooks(DWORD mainThreadId) {
     // Flush any coalesced network packets
     FlushCoalescedPackets();
 
-    // Flush combat text batch every frame
-    FlushCombatTextBatch();
 
     // Invalidate frame-scoped caches
     InvalidateUILayoutCache();

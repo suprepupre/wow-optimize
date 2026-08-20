@@ -287,8 +287,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/dbc_lookup_cache.h
     src/hooks_subsystems/event_dispatch_cache.cpp
     src/hooks_subsystems/event_dispatch_cache.h
-    src/hooks_subsystems/event_name_cache.cpp
-    src/hooks_subsystems/event_name_cache.h
     src/runtime_vm/lua_getstr_inline.cpp
     src/runtime_vm/lua_rawgeti_inline.cpp
     src/runtime_vm/lua_rawget_inline.cpp

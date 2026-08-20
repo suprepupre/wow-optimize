@@ -463,7 +463,6 @@ static void StopFreezeWatchdog() {
 #include "script_handler_cache.h"
 #include "dbc_lookup_cache.h"
 #include "event_dispatch_cache.h"
-#include "event_name_cache.h"
 #include "lua_getstr_inline.h"
 #include "lua_rawgeti_inline.h"
 #include "lua_gettable_safety.h"
@@ -7411,8 +7410,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("[EventDispatchCache] DISABLED via TEST_DISABLE_UNIT_API_FASTPATH");
 #endif
 
-    Log("--- Event Name Cache ---");
-    bool eventNameOk = Config::g_settings.OptEventCoalescer && InstallEventNameCache();
 
     Log("--- luaH_getstr Inline Optimization ---");
 #if TEST_DISABLE_GETSTR_INLINE
