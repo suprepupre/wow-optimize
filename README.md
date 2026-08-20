@@ -55,7 +55,7 @@ who ran four long sessions on request — including the first one anybody has ev
 sent in with the frame rate uncapped, which is what made the rest of this
 possible.
 
-### Three new features, all off by default
+### Four new features, all off by default
 
 They are in the **Experimental** tab, and **Enable All deliberately skips them**.
 Tick them yourself if you want to test them.
@@ -114,6 +114,28 @@ skipped update only delays when a pose is refreshed. That was read out of the
 function, not assumed, because if it had been wrong the feature would have been
 useless. What you may notice in a packed city is slightly steppier movement on
 some characters.
+
+**Collision Box Test (SSE2)** (`Graphics_Sound/CollisionOutcode`)
+
+Every line-of-sight check, every click on the world and every projectile path
+makes the game sort the corners of a collision model against a box — six
+comparisons per corner, one corner at a time on the old floating-point stack. A
+corrected profile puts that one function at 3.8% of main-thread time, the largest
+single one left outside model animation. This does four corners per instruction.
+
+Unlike every other maths replacement in this tool, this one is **exact rather
+than close**. The box bounds are read as plain numbers with no arithmetic applied
+to them, and widening a float to a double is exact and order-preserving, so the
+vector comparison gives the same answer as the game's for every possible input
+including every NaN. There is no tolerance to pick and nothing to measure.
+
+Verifying it needed a different approach, because the function appends to two
+global lists and sets a flag that it also reads — so running it twice and
+comparing does not work, the first run changes what the second one does. Instead
+it predicts: it works out which corners are outside and which triangles the game
+is about to queue, lets the game run and do the real work, then compares the two
+lists. Three thousand of those have to match, on both the corner codes and the
+queued triangles, before it takes over.
 
 ### The instruments were lying
 
@@ -184,10 +206,11 @@ cheap path.
 
 ### What this release does not claim
 
-None of the three new features is measured as a frame-rate gain. The sizes of
-what they target are measured, and their correctness is verified in the field
-across millions of operations, but no before-and-after frame time exists for any
-of them yet. If you run them, the log lines will tell you what they did.
+None of the four new features is measured as a frame-rate gain. The sizes of what
+they target are measured, and correctness is verified — two of them across
+millions of operations in the field, the other two by construction and against
+the client's own output — but no before-and-after frame time exists for any of
+them yet. If you run them, the log lines will tell you what they did.
 
 ---
 
@@ -731,6 +754,7 @@ Replacements for WoW's own statically-linked CRT routines at verified addresses:
 - SSE2 matrix-vector transforms — 3D point × 4x4 matrix (0x4C21B0), 4D vector × 4x4 matrix (0x4C2270), in-place point × 4x4 (0x4C2300)
 - SSE2 `C3Vector::Normalize` — 0x4C3420 + 0x4C3600 (full-precision `sqrtss`/`divss`, engine guards replicated)
 - SSE2 `CMatrix::Transpose` — 0x4C23D0 (`_MM_TRANSPOSE4_PS`, bit-identical)
+- **SSE2 collision box test** *(off by default, experimental)* — the AABB outcode classification in `sub_7C7230`, 3.8% of main-thread time in a corrected profile. Six x87 comparisons per vertex become six packed comparisons per four vertices. Bit-exact, not approximate: the bounds are plain floats with no arithmetic applied. `Graphics_Sound/CollisionOutcode`
 - SSE2 frustum point culling — `CFrustum::IsPointVisible` (0x983D70)
 - SSE2 Möller-Trumbore ray-triangle intersection — 32-bit indices (0x9836B0), 16-bit indices (0x983490)
 - SSE2 frustum AABB-vs-4-planes cull
