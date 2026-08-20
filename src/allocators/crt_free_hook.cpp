@@ -117,8 +117,24 @@ static volatile LONG        g_allocCalls = 0;
 // 4.3 billion deallocations; a session that busy is worth knowing about anyway.
 static volatile LONG g_calls = 0;
 
+// The feature list reads its evidence from FeatureHit, and this hook used to
+// register a token and never touch it - deliberately, because a call into
+// another translation unit on the hottest path in the process is a real cost.
+// The consequence was worse than the cost: the list printed CrtFreeHook under
+// "enabled but never ran - a zero here means the code path was not reached",
+// in the same log where this module reported 2858166 deallocations served. A
+// summary that calls a working default-on feature dead invites someone to go
+// and fix what is not broken.
+//
+// Sampled instead, which is what DbcLookupCache already does on its own hot
+// path: a test and a branch per call, a real call once every 8192.
+static inline void NoteHit(LONG n) {
+    if ((n & 8191) == 0) CrashDumper::FeatureHit(g_token);
+}
+
 int __stdcall Hooked_CrtFree(void* block, int a2, int a3, int a4) {
-    ++g_calls;
+    LONG n = ++g_calls;
+    NoteHit(n);
     if (block) g_wow_free(block);
     return 1;
 }
@@ -143,7 +159,7 @@ static inline void NoteAllocSize(unsigned bytes) {
 }
 
 void* __stdcall Hooked_WowAlloc(int size, int a2, DWORD exitCode, char flags) {
-    ++g_allocCalls;
+    NoteHit(++g_allocCalls);
     NoteAllocSize((unsigned)size);
 
     unsigned rounded = ((unsigned)size + 7u) & 0xFFFFFFF8u;
