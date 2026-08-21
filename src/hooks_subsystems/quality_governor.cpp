@@ -119,10 +119,59 @@ static int Find(const char* name) {
     return -1;
 }
 
+// A setting this governor cannot actually apply is one it has no business
+// touching, and that is decidable from the CVar itself.
+//
+// CVar::Set at 0x007668C0 branches on the byte at cvar+0x28. With bit 1 set it
+// does not store the value into the live field at all: it assigns the string to
+// a second field through RCString::Set and raises the global byte_CA19F8, then
+// returns without reaching the normal store. The value becomes a pending change
+// that the client applies at a time of its own choosing.
+//
+// That alone makes such a CVar wrong for this governor, whatever the client then
+// does with it. The whole loop is write a value, watch the frame-time tail, and
+// decide from the result - and it cannot measure the effect of a change it did
+// not make. It also leaves a change queued inside the client that the player
+// never asked for.
+//
+// The occasion for finding it: a session on 2026-08-21 where the player was
+// walking and hitting mobs saw the screen flash like a /reload. The log has
+// particleDensity written at 14:33:23, farclip at 14:33:43, and the Lua state
+// recreated at 14:34:03 - a real interface reload, with no Lua error before it
+// and nothing in this DLL that calls ReloadUI. Applying a pending graphics
+// setting is the most likely thing to have done that, but this is a correlation
+// across one session and the causal step is not proved here.
+//
+// So a managed setting is checked when its object is learned, and one carrying
+// that bit is dropped and named in the log.
+static constexpr unsigned kCVarNeedsRestartBit = 2;   // cvar+0x28 & 2
+static constexpr unsigned kCVarFlagsOffset     = 0x28;
+
 void NoteCVarObject(void* cvar, const char* name) {
     if (!g_enabled || !cvar || !name) return;
     int i = Find(name);
-    if (i >= 0 && g_managed[i]) g_set[i].obj = cvar;
+    if (i < 0 || !g_managed[i]) return;
+
+    unsigned char flags = 0;
+    __try {
+        flags = *((const unsigned char*)cvar + kCVarFlagsOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_managed[i] = false;
+        Log("[QualityGovernor] %s - could not read its flags, so it is left alone",
+            g_set[i].cvar);
+        return;
+    }
+
+    if (flags & kCVarNeedsRestartBit) {
+        g_managed[i] = false;
+        Log("[QualityGovernor] %s is flagged as needing the client to restart "
+            "something before it takes effect, so this will not touch it. "
+            "Changing it would blank the screen and reload the interface.",
+            g_set[i].cvar);
+        return;
+    }
+
+    g_set[i].obj = cvar;
 }
 
 void NoteCVarWrite(const char* name, const char* value) {
