@@ -3,17 +3,6 @@
 > memory optimization tools as illegal software regardless of intent, and the
 > result is a permanent ban on your account.
 
-> [!CAUTION]
-> **WoW Circle appears to disconnect you for having this loaded.** A tester gets
-> kicked roughly every thirty minutes, reliably, including with every switch in
-> the launcher turned off. Note that until 3.18.2 "every switch off" still left
-> about 150 hooks in the client (see the release notes below), so that test did
-> not mean what it looked like. It is worth re-running on 3.18.2 with the four
-> **WoW.exe Hooks** groups turned off, which is the first build where the vanilla
-> button is honest. If the kicks continue there, the DLL itself is being
-> detected, and I am not going to add a workaround — evading a server's
-> anti-cheat is not what this project is for.
-
 # wow_optimize
 
 Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)
@@ -31,8 +20,6 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## Table of Contents
 * [What's New in v3.19.0](#whats-new-in-v3190)
-* [What's New in v3.18.2](#whats-new-in-v3182)
-* [What's New in v3.18.1](#whats-new-in-v3181)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
 * [Current Feature Set](#current-feature-set)
@@ -48,522 +35,104 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## What's New in v3.19.0
 
-This one has three new optimizations in it, and three of the instruments this
-project measures itself with turned out to be reporting confident wrong numbers.
-The instruments are the bigger item. Thanks to [txtsd](https://github.com/txtsd),
-who ran four long sessions on request — including the first one anybody has ever
-sent in with the frame rate uncapped, which is what made the rest of this
-possible.
+Thanks to [txtsd](https://github.com/txtsd) for four long sessions, including the
+first one anyone has sent in with the frame rate uncapped. Every number below
+comes from those logs.
 
 ### Four new features, all off by default
 
-They are in the **Experimental** tab, and **Enable All deliberately skips them**.
-Tick them yourself if you want to test them.
-
-**Reuse Compiled Scripts** (`UI_Lua/LuaProtoCache`)
-
-Interface scripts written inside XML templates get recompiled from scratch every
-time a frame is built from that template. A counter added for this measured 68%
-of every chunk the client compiled in a session as source it had already compiled
-that session. This keeps the compiled form and hands it back on a repeat, so the
-parse does not run.
-
-The client still builds the function object itself, with its own environment and
-its own addon ownership, so nothing about who is allowed to touch what is shared
-between two uses. The obvious implementation — dump the bytecode and reload it —
-does not work here and that was checked in the disassembler rather than assumed:
-this client's parser has no bytecode-loading path at all, it was removed.
-
-Two of txtsd's sessions ran it: 806 and 704 reuses, every one of them compared
-against a fresh compile of the same source, none of them differing.
-
-**UI Method Object Lookup** (`UI_Lua/LuaThisFast`)
-
-Every call an addon makes into a frame — `SetText`, `GetWidth`, `Show`, 674 of
-them — begins by fetching the frame object out of a table slot, and the game
-spends four separate script-engine calls plus a push and a pop doing it. This
-reads it directly.
-
-The one thing those calls do besides fetch is carry addon ownership between
-values, which is what decides whether a caller may touch a protected action.
-That is reproduced exactly, not skipped. Anything out of the ordinary is handed
-straight back to the game.
-
-Three sessions: 86.6 million, 63.4 million and 31.4 million lookups. None handed
-back, none disagreeing with the game's own answer.
-
-**Spread Model Animation** (`Graphics_Sound/AnimLod`)
-
-This one has the largest measured target behind it and **no field data at all
-yet**.
-
-Posing the skeletons of everything on screen is the single largest block of frame
-time this client spends. Measured across txtsd's runs: 3.68 ms out of a 24.5 ms
-frame during a VoA raid, across 114 models averaging 31 bones each. No single
-function inside it is worth rewriting — the cost is spread across dozens — so the
-only thing that reaches it is doing less of it.
-
-Below 96 models on screen this changes nothing whatsoever. Above that, each model
-has its pose refreshed every second to fourth frame instead of every frame, never
-less often than a quarter of your frame rate, and a model is never skipped before
-its first pose.
-
-It cannot make animations run slow or drift. The client works out where an
-animation should be from a clock each time rather than by counting frames, so a
-skipped update only delays when a pose is refreshed. That was read out of the
-function, not assumed, because if it had been wrong the feature would have been
-useless. What you may notice in a packed city is slightly steppier movement on
-some characters.
-
-**Collision Box Test (SSE2)** (`Graphics_Sound/CollisionOutcode`)
-
-Every line-of-sight check, every click on the world and every projectile path
-makes the game sort the corners of a collision model against a box — six
-comparisons per corner, one corner at a time on the old floating-point stack. A
-corrected profile puts that one function at 3.8% of main-thread time, the largest
-single one left outside model animation. This does four corners per instruction.
-
-Unlike every other maths replacement in this tool, this one is **exact rather
-than close**. The box bounds are read as plain numbers with no arithmetic applied
-to them, and widening a float to a double is exact and order-preserving, so the
-vector comparison gives the same answer as the game's for every possible input
-including every NaN. There is no tolerance to pick and nothing to measure.
-
-Verifying it needed a different approach, because the function appends to two
-global lists and sets a flag that it also reads — so running it twice and
-comparing does not work, the first run changes what the second one does. Instead
-it predicts: it works out which corners are outside and which triangles the game
-is about to queue, lets the game run and do the real work, then compares the two
-lists. Three thousand of those have to match, on both the corner codes and the
-queued triangles, before it takes over.
-
-### The instruments were lying
-
-None of these was found by reading code. Each was found because a number was
-impossible.
-
-**Every percentage the profiler printed was too small.** Sample counts came from
-the last million entries in the ring buffer; the divisor was the number of
-samples taken in the whole session. On a three-hour session that is 5.6× too
-small. The top fifty entries summed to 12% of the profile — and since every
-sample must land in some bucket, no program can have that shape.
-
-What it produced was a profile with no hot spot anywhere in it, and that reading
-was steering the work. Corrected, the same session reads: `AwesomeWotlkLib.dll`
-9.7%, the model animation functions 7.0%, `d3d9.dll` 6.3%, this DLL's own modules
-about 6%, particle vertex fill 2.5%, UI batch draw 2.3%.
-
-The executing-versus-blocked split had the same defect and worse: the wait samples
-came from the ring window while the divisor came from the session, so every long
-session reported itself as 99% executing whatever it was actually doing.
-
-**The animation counter claimed 72 ms of animation inside a 53 ms frame.** It was
-closing its frame on the hooked `Sleep` tick, which a CPU-bound client stops
-running, so everything counted between two sleeps was charged to a single frame.
-The number it reported tracked how CPU-bound the session was rather than how many
-models were on screen — 860, 906, 1092, 1909 models per frame as the main thread
-went 85.9%, 91.3%, 95.5%, 99.0% executing.
-
-**The feature summary called two working features dead.** It listed `CrtFreeHook`
-under "enabled but never ran — a zero here means the code path was not reached",
-forty lines below that same feature reporting 2,858,166 deallocations served.
-Both it and the SSE2 matrix-vector hook had registered a counter and deliberately
-never incremented it, for a good reason — the counter cost a real fraction of the
-work it was counting — and one of them discarded the counter handle at
-registration so nothing could have incremented it even by accident. Both now
-sample one call in 8192. A summary that calls a working default-on feature dead
-invites the next person to go and fix what is not broken.
-
-### Also in this release
-
-**The vsync detector told a tester to throw away a good session.** txtsd ran
-uncapped, got 96.5% executing, and then a warning directly underneath saying the
-session was capped and no conclusion should be drawn from it. It was testing the
-median frame time alone, and 20.00 ms is the 50 Hz interval. The client was
-simply slow at that moment: the distribution was 23.10 ms at the median against
-62.20 ms at the 95th. A frame limiter has no tail — it holds every frame at the
-interval — so the spread is what separates the two cases, and the median cannot
-say it alone.
-
-**The DBC row cache was moving 1360 bytes per hit to deliver 680.** Its sequence
-lock read the row into a temporary, verified, then copied the temporary out. At
-9,869,554 hits in one session that spare copy was about 6.7 GB of `memcpy` on the
-main thread. The payload now goes straight to the caller and the sequence is
-verified afterwards, which is safe only because a failed verification falls
-through to the client's own routine and that fills the same buffer completely.
-
-**A framework for throttling off-screen animation had been sitting in the source
-with nothing calling it** — a tier function, a skip schedule and two counters,
-none of them reachable, under an address nothing had verified, while startup
-logged that the throttle was configured. Removed, and what had been learned about
-the real function was left in its place.
-
-**`Hot_857CA0`, which has appeared in every profile this project ever collected,
-is `luaV_execute`** — the Lua bytecode interpreter. The client carries two copies
-of it and picks between them on the script-profiling flag. The copy that shows up
-is the one behind the "profiling off" branch, so the client is already taking the
-cheap path.
-
-### Six things removed that were never running
-
-Two modules turned up by accident this week that announced a feature and
-implemented none of it. A scan of all 208 source files for the same shape — a
-startup line saying ACTIVE or Initialized, with no hook and no patch anywhere in
-the file — found four more, plus one dead subsystem inside a module that is
-otherwise alive:
-
-* an event-name hash cache that memset a 512-slot table at startup, logged it,
-  and never touched it again — its one function had no caller at all
-* a second event-name cache, the same shape, 256 slots
-* a CDataStore batch module whose own comment read "For now, initialize counters
-  only", and whose Install was called from nowhere
-* a frame-script throttle with a real body and a real entry point that nothing
-  ever called
-* a sound guard that registered a feature name another module had already
-  registered, one line after that module installed the hook it claimed
-* a combat-text batch flushed every frame, whose producer index nothing ever
-  incremented — and whose flush would have done nothing anyway, since the
-  dispatch was a TODO comment
-
-Four of those had a switch or a startup line advertising them, and two were gated
-on an unrelated feature's switch. About 550 lines, and six fewer log lines
-claiming something is running.
-
-### Nine counters that cost more than the thing they were counting
-
-With the profiler's numbers corrected, this tool's own modules add up to about 6%
-of main-thread execution — and some of that turned out to be the counting rather
-than the work.
-
-The D3D9 state cache filters redundant render-state changes: compare two numbers,
-return, do not go to the driver. Six of its counters were incremented with an
-atomic add on that exact branch — the fast one, the one the whole feature exists
-to reach. On 32-bit x86 that is a locked instruction: tens of cycles and a bus
-barrier, on a path whose useful work is one comparison, called thousands of times
-a frame.
-
-The script handler cache was worse. Its two counters were 64-bit atomics, and
-there is no 64-bit atomic add on 32-bit x86, so each one compiled to a locked
-retry loop — one on every call and another on every hit, in a module whose entire
-purpose is to be the fast replacement for a chain of string comparisons. The
-third was on the particle spawn path, counting spawns in the one situation the
-feature exists for.
-
-All nine are plain counters now, which is what two comments already in this
-codebase said they should be. The numbers they report are a lower bound and now
-say so.
-
-### Where the time actually goes now
-
-The largest single entry in a corrected profile is `AwesomeWotlkLib.dll` at 9.7%
-of main-thread execution — larger than model animation, larger than d3d9. It used
-to print as one line with nothing inside it. The profiler now breaks down the
-hottest module it did not write, the same way it already did for wow.exe and for
-this DLL, so the next log will say which part of it is expensive.
-
-### What this release does not claim
-
-None of the four new features is measured as a frame-rate gain. The sizes of what
-they target are measured, and correctness is verified — two of them across
-millions of operations in the field, the other two by construction and against
-the client's own output — but no before-and-after frame time exists for any of
-them yet. If you run them, the log lines will tell you what they did.
-
----
-
-## What's New in v3.18.2
-
-Mostly the same story as 3.18.1, told again: most of what is below is something
-this project was already shipping that turned out not to be doing what its own
-description said. Thanks to **Doc.James**, [txtsd](https://github.com/txtsd),
-**prince**, **kojekude**, **nobus**, [biship](https://github.com/suprepupre/wow-optimize/issues/50),
-**Sicsoo**, **Signalborn Soulweaver** and **Morbent** — every fixed item here
-came out of a log somebody sent in, or out of checking a claim this repo was
-making about itself.
-
-**The loading screen fix**
-
-Doc.James reported his first zone change of a session taking two to three seconds
-longer than normal, with the loading bar never appearing. Three sessions made it
-reproducible, and one switch made it go away.
-
-The lock-free defragmenter was running a full forced heap collection **once a
-second for the entire duration of every loading screen** — which is the worst
-possible moment for it, because that is when the main thread is allocating harder
-than at any other time. From his own logs, same machine, that switch the only
-difference:
-
-```
-DefragLf=1    184 MB loaded in 10171 ms  =  18 MB/s
-DefragLf=0    113 MB loaded in  1222 ms  =  94 MB/s
-```
-
-Disk accounted for 107 ms of those 10171. A module named after making loading
-screens better was making them five times slower. It now waits the loading screen
-out and collects once afterwards, which is when the transient allocations are
-actually free to return.
-
-Not all of what he saw was this. A single ~2.15 second frame at the start of each
-zone change survives with the switch off, in the same place both times, with no
-hook of ours running inside it. That one is the client's own teardown.
-
-**Faster, and now provably identical to the client**
-
-Four routines on the per-bone animation path were replaced. All four verify
-themselves against the client's own function at startup and refuse to install if
-a single bit differs:
-
-- Quaternion to rotation matrix — **1.40x**. Runs once per animated bone per frame.
-- Quaternion normalize — **2.01x**, and now on by default. It was off because the
-  old version sat a float ULP away from the client on 1,535,779 of two million
-  test quaternions.
-- Both vector normalises — **2.25x**.
-- `strncmp` — **3.88x** on long strings, 1.33x on short ones.
-
-The reason those first three were wrong before is worth stating, because it
-invalidated every "sub-ULP" comment in this repo: the client is not doing single-
-precision arithmetic. The CRT leaves x87 at 53-bit, so the engine accumulates in
-double and narrows only when it stores a float. Anything written in packed single
-disagrees with it on most inputs. Rewritten in packed double with the original's
-summation order preserved, all four are bit-identical.
-
-**Boss voice lines going missing in raids**
-
-Reported by **kojekude**: no boss voice before or during fights, every other sound
-working normally. The Sound Coalescer did it, and it should never have shipped in
-that shape.
-
-It dropped a sound whose id matched the previous one within 16 ms, keeping a
-single global "last id". Three things are wrong with that, all of them visible in
-the target's own disassembly:
-
-- `sub_4C6A40` is `PlaySoundKit` out of `SoundInterface2.cpp`. Its return value
-  is an **error code** — `0` means the sound started. Coalescing returned `0` for
-  a sound that never reached the mixer, so nothing upstream could notice.
-- The engine already suppresses duplicate plays, using information we don't have:
-  sounds flagged `0x20` are registered in a list when they start, and replaying
-  one that is still in it returns `15`. Everything else is *meant* to overlap. We
-  applied one blanket rule to all of them.
-- `GetTickCount` moves in ~15.6 ms steps, so "less than 16 ms apart" was really
-  "zero or one ticks apart" — anywhere between an instant and a frame, depending
-  on where the plays fell against a timer we don't control.
-
-Removed rather than repaired. The engine's own rule is better than one
-reconstructed from outside it, and it was already running underneath ours.
-
-**The crash where the game executes address zero**
-
-Reported independently by **prince** and by **nobus**, who hit it swapping
-warrior stances; a third tester's alt-tab crashes fit the same path. Both logs
-land on the same instruction:
-
-```
-0xC0000005 (ACCESS_VIOLATION) at 0x00000000
-[ESP+0x00] = 0x006A2B69   (WoW.exe+0x2A2B69)
-[ESP+0x3C] = 0x00690160   (WoW.exe+0x290160)
-```
-
-`sub_690150` is device teardown. It calls `sub_6A2AA0`, which walks a list of
-registered callbacks and tells each one the graphics device is going away. The
-callback lives in the list node itself, at `+0x34`, and the client null-checks
-the neighbouring field at `+0x38` twice while never checking `+0x34` at all. A
-node with an empty callback slot takes the whole process down.
-
-The guard walks that list read-only before the client does, applying the
-client's own two visit conditions. On a healthy client it finds nothing and
-hands straight over — one pointer walk per device teardown, not per frame, and
-no behaviour change whatsoever. Only when it finds a node that is certain to
-crash does it run the loop itself, transcribed instruction by instruction from
-the original, skipping exactly one thing: the call through the null pointer.
-Everything else the client writes, it writes, in the same order.
-
-It does not try to repair the node. Writing a substitute callback in, or zeroing
-a field so the client skips the entry, would both mean writing into a client
-structure on a guess — the mistake that produced the layout-relink crash removed
-below. The node is written to your log in full instead, which is the first time
-anyone will have seen what is in one.
-
-**Two diagnostics that cried wolf**
-
-- **Every log opened with `!!! DISCONNECT !!!`.** Logging in uses two
-  connections — the client talks to the logon server, gets its realm list, and
-  closes that socket to go and talk to the world server. That close was reported
-  as a disconnect on every launch on every machine. One tester's log shows the
-  banner at 19:44:31 followed by 593,038 receives over the next twenty-four
-  minutes. Worse, the report fires once per session, so the login socket used it
-  up and a real mid-raid drop later had nothing left to say. The counters now
-  follow whichever socket is actually carrying traffic, only that socket can
-  report, and a clean client-side close has to have been a real session before it
-  earns a banner.
-- **A 179-second "stutter".** Nothing stalled for three minutes; the window was
-  alt-tabbed, so `Present` was not called and the gap between two of them was
-  measured as one frame. Each of those burned one of the twelve full snapshots
-  this build is allowed to write, on an idle process. Gaps over thirty seconds
-  are now counted separately and named for what they are.
-
-**"Disable All (vanilla)" did not mean vanilla**
-
-Found by being asked the obvious question about the WoW Circle kicks: *are you
-sure nothing is still running with everything switched off?* No, as it turns out.
-
-A tester's log with **every** boolean setting reading 0 still contained:
-
-```
-[EXTENDED]  34/40  EXTENDED performance features installed
-[SUBSYSTEM] 98/100 SUBSYSTEM performance features installed
---- WoW.exe Optimization Hooks (20 hooks) ---
---- WoW.exe Performance Hooks (20 hooks) ---
-```
-
-Four batches — 20, 20, 40 and 100 hooks into WoW's own code — were installed
-unconditionally. Not one of those four source files contains a single reference
-to any setting. So "Disable All (vanilla)" left roughly 150 detours in the
-client, and every report of the form "I turned everything off and it still
-happens" was measuring something other than what the person thought.
-
-All four now have a switch. They **default on**, because they have been running
-for everyone since they were written and silently removing them on upgrade is
-the mistake 3.18.1 already made once. Turning them off is what makes the vanilla
-button honest, and they are the first thing to try when you are working out
-whether this DLL is behind a problem at all.
-
-**The Lua suite can now be bisected**
-
-**nobus** reported that the Lua C-API Inline Cache Suite corrupts ElvUI: addon
-names come out wrong in the addon list, the options panel reports itself
-missing, and a `/reload` drops you to the default Blizzard UI. Neither of us
-could narrow it, because that one checkbox gated **fifty-five separate hooks**.
-That is the same fault as #50, several times over.
-
-It is now four groups, all on by default so the master switch behaves exactly as
-it did:
-
-- **Table & index caches** — the global, table, index and `luaH_getstr` caches
-  and the VM table indexing path. First to suspect: these are the hooks that can
-  return a value for the wrong key, which is what a wrong addon name is.
-- **String & buffer paths** — `pushstring`, `pushfstring`, the buffer helpers,
-  `tolstring`, `loadstring`, the pattern cache.
-- **Setters & object creation** — everything that writes into Lua state.
-- **Accessors, arg checks & debug** — mostly read-only, least likely.
-
-Turn the suite on, then turn one group off at a time. Two sessions should find
-it. The suite stays off by default.
-
-While looking for the cause I checked the string interning fast path against the
-client's own `luaS_newlstr` instruction by instruction — bucket index, length
-test, content compare, and the dead-string resurrect — and it is faithful,
-including the `marked ^= 3` on an other-white hit. So that one is not the
-culprit, which is worth writing down so nobody re-checks it.
-
-**Things that were not doing their job**
-
-- **"High-Precision Timing Fix" was neither.** Reported by
-  [biship](https://github.com/suprepupre/wow-optimize/issues/50), who read the
-  code and was right about all of it. One checkbox gated twelve unrelated
-  installs, its description promised timer work it did not do, and the three
-  hooks it named — `GetTickCount`, `timeGetTime` and the QPC coalescing cache —
-  are compiled out of the build entirely, after they were found to cause random
-  stutters under DXVK. What actually sat behind the switch was eight Windows API
-  lookup caches. So a player chasing a timing bug turned off eight caches
-  instead, and a player wanting smoothness turned eight caches on. It is now
-  called **Windows API Caches**, the description says what it gates, and the log
-  states plainly that the timer hooks are compiled out and this switch does not
-  reach them. Also gone: an `InstallTimingFix()` whose entire body logged
-  "Hook skipped. Using console override only" — there was no console override
-  either, and it was called unconditionally, ignoring the setting.
-- **A second switch of the same kind, found by looking for one.** "Saved
-  Variables Pretokenize" installed the entire Win32 file-hook suite, a stream
-  cache, a packet batcher and a stream-buffer fast path. Every one of those was
-  dead: the pretokenizer's six entry points were each `return false`, the stream
-  cache logged "Disabled" and returned, the batcher only initialised counters,
-  and the stream-buffer path aimed at the same two addresses as the packet
-  accessors and always lost the race. Two of those dead calls sat on the
-  `ReadFile` and `CreateFile` hot paths, running on every file the client
-  touched. What was actually doing work behind the switch was the six CDataStore
-  packet accessors, about 4,000 call sites, so it is now called **Network Packet
-  Reader Fast Paths** and installs only those. The file hooks it forced on are
-  back to being gated by the cache that uses them.
-- **Two launcher switches did nothing.** Asynchronous Texture Loader and Mipmap
-  Bias Governor were written to one section of `wow_opt.ini` and read from
-  another, so no setting of either ever reached the DLL. Both now work, both are
-  marked experimental, and both stay off unless you go and turn them on — nobody
-  has ever run them, so there is no log anywhere saying what they do.
-- **Fifteen build flags said "disabled" and disabled nothing.** Each named a
-  module that had already been deleted. One of them carried a HARD-DISABLED
-  notice about a use-after-free in code that no longer existed. A flag that reads
-  1 and decides nothing answers a bisection question falsely, which is worse than
-  having no flag.
-- The DBC lookup cache was **slower than the function it caches**, about half the
-  time — on the client's memcpy path there is nothing for a cache to win. It now
-  steps aside there.
-- The render null guard could silently drop a model's draw parameters.
-- The D3D9 device vtable was left pointing into this DLL after unload.
-- Two of our own modules aimed at the same address, and the loser said nothing.
-  MinHook knows the difference between "somebody else got here first" and "one of
-  ours already owns this"; the log now does too.
-- SimdMathFast installed nothing and reported itself active.
-- Texture Smart Unload Delay now measures its own reuse rate and switches itself
-  off below one percent. Two testers measured 0.4% and 0.2%. It does not pay.
-- The addon profiler raised a dialog box and collected nothing at all.
-- MinHook's trampolines are no longer freed while WoW's threads may still be
-  inside them on the way out.
-
-**Removed**
-
-The UI layout relink shortcut, which corrupted the client's layout list and
-crashed on login — `off_AC101C` and `dword_AC1020` are one link pair, and the
-client writes to the second during an insert. The shadow buffer experiment, which
-a tester confirmed does not stop the flicker in Dalaran. A trig lookup table, two
-dead SSE2 helpers, three features that were never installed, and two empty
-headers.
-
-**New diagnostics**
-
-- **Lua compile census** (on by default, silent on a healthy client). It answers
-  a question nothing could answer before: 88% of everything the client compiles
-  at runtime is source it already compiled this session — 332 MB of it in one
-  measured session. If your log starts naming something with a five-figure count,
-  that is the addon to update or drop.
-- **Per-addon CPU profiler** (opt-in). Switches on the script profiler the client
-  has always had and nothing ever enabled, and writes a ranked table to your log.
-- **Shadow state probe** (opt-in, read-only). For the shadow flicker some people
-  see below the highest quality step. That is not caused by this DLL — a tester
-  reproduced it with every feature here off and without DXVK — but nobody had
-  ever looked at what the game itself is doing when it happens.
-- The sampling profiler was attributing up to 4 KB of code to whichever symbol
-  came before it. It now reports `name+0xNNN`.
-
----
-
-## What's New in v3.18.1
-
-A fix release. Thanks to **prince**, [txtsd](https://github.com/txtsd),
-**Signalborn Soulweaver**, **Sicsoo**, **Morbent** and **Doc.James** for the logs.
-
-**Fixed**
-
-- False freeze reports, and per-frame work that stopped running with them — caches were not dropped on a reload or character swap. Introduced in 3.18.0.
-- Random UI reloads. Also introduced in 3.18.0.
-- WeakAuras icons staying wrong after a talent switch. `GetSpellInfo` is no longer cached; it cannot be cached correctly.
-- Loading screens finishing and then sitting for several seconds with Texture Smart Unload Delay on.
-- Five launcher switches that controlled nothing, one of which was meant to stop worker threads from starting. Three more removed — their features were gone in 3.18.0.
-- Hooks are no longer installed over a function something else has already detoured.
-
-**Faster**
-
-- 4x4 matrix multiply, once per bone per frame on every animated model: 2.38x, and now bit-identical to the client's own result.
-- SSE2 terrain horizon rasterisation, 2.46% of main-thread time. New, off by default, on the Experimental tab.
-
-Both verify themselves against the client at startup and refuse to install if the results differ.
-
-**Memory**
-
-148 MB of address space returned on a 32-bit client — 136 MB from the API cache, sized to the function it caches instead of a round number, and 16.6 MB from disabled features that were reserving buffers anyway. The DLL's data section drops from 30.6 MB to 14.0 MB.
-
-**Changed**
-
-- `wow_opt.ini` now lives in the `WTF` folder. An existing file is moved there on first run; nothing is reset.
-- Texture Smart Unload Delay reports how often a held texture is actually reused. One long session measured 0.4%. Check your own log before leaving it on.
+They sit in the **Experimental** tab and **Enable All skips them**. Tick them
+yourself.
+
+**Reuse Compiled Scripts** — `UI_Lua/LuaProtoCache`
+
+Interface scripts written inside XML templates are recompiled every time a frame
+is built from that template. Measured: 68% of every chunk the client compiled in
+a session was source it had already compiled. This keeps the compiled form and
+hands it back, so the parse does not run. The client still builds the function
+object, its environment and its addon ownership, so nothing about permissions is
+shared between two uses.
+
+Field: 806 and 704 reuses across two sessions, each compared against a fresh
+compile, none differing.
+
+**UI Method Object Lookup** — `UI_Lua/LuaThisFast`
+
+Every call an addon makes into a frame (`SetText`, `GetWidth`, and 672 others)
+starts by fetching the frame object out of a table slot through four script-engine
+calls. This reads it directly. The addon-ownership propagation those calls perform
+is reproduced, not skipped — it decides what may touch protected actions.
+
+Field: 86.6M, 63.4M and 31.4M lookups across three sessions. None handed back,
+none disagreeing.
+
+**Spread Model Animation** — `Graphics_Sound/AnimLod`
+
+Posing model skeletons is the largest single block of frame time: 3.68 ms of a
+24.5 ms frame in a VoA raid, 114 models averaging 31 bones. No one function
+inside it is worth rewriting, so the only way to reach it is to do less.
+
+Below 96 models on screen nothing changes. Above that each model's pose refreshes
+every 2nd–4th frame, never slower than a quarter of your frame rate, and never
+before its first pose. It cannot make animations run slow: the client derives
+animation time from a clock, not by counting frames. In a packed city you may
+notice steppier movement on some characters.
+
+**Collision Box Test (SSE2)** — `Graphics_Sound/CollisionOutcode`
+
+Line-of-sight checks, world clicks and projectile paths sort a collision model's
+corners against a box — six comparisons per corner on the x87 stack, 3.8% of
+main-thread time. This does four corners per instruction.
+
+Unlike the other maths replacements here it is **exact, not approximate**: the
+bounds are plain floats with no arithmetic applied, so the vector comparison
+answers identically for every input including NaN. Before taking over it predicts
+which corners are outside and which triangles the game will queue, lets the game
+run, and compares — 3000 matches required.
+
+### The measurement tools were wrong
+
+**Every percentage the profiler printed was 5.6× too small** on a three-hour
+session: counts came from the last million ring entries, the divisor was the whole
+session. The top fifty summed to 12% of a profile, which no program can do. It
+produced a profile with no hot spot in it, and that reading was steering the work.
+Corrected: `AwesomeWotlkLib.dll` 9.7%, model animation 7.0%, `d3d9.dll` 6.3%, this
+DLL's own modules ~6%, particle vertex fill 2.5%, UI batch draw 2.3%. The
+executing/blocked split had the same defect and pinned every long session near
+99% executing whatever it was doing.
+
+**The animation counter claimed 72 ms of animation inside a 53 ms frame.** It
+closed its frame on the hooked `Sleep` tick, which a CPU-bound client stops
+running, so many frames were charged to one.
+
+**The feature summary listed two working default-on features as never having
+run**, forty lines below those features reporting their own work.
+
+**The vsync detector called an uncapped session capped** and told a tester to
+redo it. It tested the median frame time alone; a limiter has no tail, so the
+spread is what separates the two cases.
+
+### Removed and cheapened
+
+Six things that were never running: two event-name caches that logged themselves
+at startup and were never read, a CDataStore batch whose Install was called from
+nowhere, a frame-script throttle whose entry point nothing called, a sound guard
+that re-registered another module's hook, and a combat-text batch flushed every
+frame whose producer index nothing incremented. About 550 lines, and six log
+lines that claimed something was running.
+
+Nine counters on hot paths were atomic. On 32-bit x86 that is a locked
+instruction — and in the D3D9 state cache they sat on the skip branch, the fast
+one the whole feature exists to reach. The 64-bit ones in the script handler cache
+compiled to a locked retry loop. All are plain counters now; the numbers they
+report are a lower bound.
+
+The DBC row cache moved 1360 bytes per hit to deliver 680 — about 6.7 GB of spare
+`memcpy` in one session. The payload now goes straight to the caller.
+
+The quality governor could change settings the client only applies later, which
+queues a change the player never asked for and leaves the governor unable to
+measure what it did. It now reads each setting's flags and refuses those.
 
 ---
 
