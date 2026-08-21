@@ -229,6 +229,30 @@ Four of those had a switch or a startup line advertising them, and two were gate
 on an unrelated feature's switch. About 550 lines, and six fewer log lines
 claiming something is running.
 
+### Nine counters that cost more than the thing they were counting
+
+With the profiler's numbers corrected, this tool's own modules add up to about 6%
+of main-thread execution — and some of that turned out to be the counting rather
+than the work.
+
+The D3D9 state cache filters redundant render-state changes: compare two numbers,
+return, do not go to the driver. Six of its counters were incremented with an
+atomic add on that exact branch — the fast one, the one the whole feature exists
+to reach. On 32-bit x86 that is a locked instruction: tens of cycles and a bus
+barrier, on a path whose useful work is one comparison, called thousands of times
+a frame.
+
+The script handler cache was worse. Its two counters were 64-bit atomics, and
+there is no 64-bit atomic add on 32-bit x86, so each one compiled to a locked
+retry loop — one on every call and another on every hit, in a module whose entire
+purpose is to be the fast replacement for a chain of string comparisons. The
+third was on the particle spawn path, counting spawns in the one situation the
+feature exists for.
+
+All nine are plain counters now, which is what two comments already in this
+codebase said they should be. The numbers they report are a lower bound and now
+say so.
+
 ### Where the time actually goes now
 
 The largest single entry in a corrected profile is `AwesomeWotlkLib.dll` at 9.7%
