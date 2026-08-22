@@ -487,8 +487,12 @@
 // Parallel Network Packet Deserialization Offloader
 #define TEST_DISABLE_NET_PACKET_OFFLOAD 0
 
-// Velocity-Based Predictive Asset Prefetcher
-#define TEST_DISABLE_PREDICTIVE_PREFETCH 1
+// Velocity-Based Predictive Asset Prefetcher.
+// Was 1, with no note saying why. It read its coordinate from an address the
+// client never writes, so it could not have worked whatever this said. It now
+// has a real one and a runtime switch of its own that defaults off, and leaving
+// this at 1 would make that switch a control the DLL cannot read.
+#define TEST_DISABLE_PREDICTIVE_PREFETCH 0
 
 // Low-Latency GPU Sync (Max Frame Latency = 1)
 #define TEST_DISABLE_LOW_LATENCY_SYNC    0
