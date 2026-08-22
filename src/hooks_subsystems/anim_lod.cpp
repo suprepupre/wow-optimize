@@ -87,8 +87,10 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 #include "anim_lod.h"
+#include "../core/world_position.h"
 #include "MinHook.h"
 #include "version.h"
 #include "config.h"
@@ -161,6 +163,64 @@ constexpr unsigned kD_matAnims  = 0x128;   // texture-animation count, gates sub
 constexpr unsigned kD_attachCnt = 0x0F0;   // attachment count, sub_82E550's loop bound
 constexpr unsigned kM_childList = 0x58;    // attached models, sub_82E550's second walk
 
+// ---------------------------------------------------------------------------
+// Distance
+//
+// sub_82E140, this function's sibling, does
+//
+//     sub_4C1F00(tmp, this+180, a2);   // tmp = [this+180] x a2
+//     sub_407F80(this+244, tmp);       // and the product feeds the bone palette
+//
+// so this+180 is a 4x4 whose translation row sits at this+228. Whether that
+// translation is world space or model space is not decidable by reading the
+// code - it is the left operand of a multiply and could be either - and the
+// animation census could not decide it either: it measured the translation
+// varying by up to 5641.8 units between models in one frame, which is map
+// scale, but its distance column was computed against 0x00BE1F30 and was
+// therefore all zeros. See world_position.cpp.
+//
+// It is decidable at runtime, without waiting for another tester log, because
+// the two cases look nothing alike once a real camera position exists:
+//
+//   world space   distance varies model to model and is small - the client is
+//                 not animating anything past its own far clip, and the model
+//                 under the camera is a few yards away
+//   model space   distance is |translation - camera| ~= |camera|, which is
+//                 thousands of yards and nearly identical for every model,
+//                 because the camera is at map coordinates and the local
+//                 translations are all near zero
+//
+// So the learning phase below watches, per frame, the smallest distance and the
+// spread between smallest and largest. A world-space candidate produces a small
+// minimum and a wide spread. Anything else is refused and the feature stays on
+// the crowd rule, saying so in the log.
+constexpr unsigned kM_localMatrix = 180;   // 4x4; translation row at +228
+constexpr unsigned kM_worldMatrix = 244;   // the product, same shape
+
+// Thresholds for the verdict. A world position must put something within this
+// distance of the camera in a frame, and must spread the models out by at
+// least this much. Both are generous: the intent is to reject a candidate that
+// is off by thousands, not to grade a good one.
+constexpr float kLearnMaxNearYd = 300.0f;
+constexpr float kLearnMinSpread = 40.0f;
+
+// Frames of agreement before the distance rule is used, and the smallest crowd
+// worth judging - a frame with three models says nothing about spread.
+constexpr uint32_t kLearnFrames   = 240;
+constexpr uint32_t kLearnMinCrowd = 8;
+
+// Distance bands. Near models are never throttled at all.
+constexpr float kBandNearYd = 40.0f;
+constexpr float kBandMidYd  = 90.0f;
+constexpr float kBandFarYd  = 180.0f;
+
+// With distance the crowd threshold can be far lower than the crowd-only rule
+// needs: a model 150 yards away does not need a new pose every frame whether or
+// not the scene is busy. Measured on txtsd's sessions, the open world averages
+// 16.7 models a frame and peaks at 161, so a budget of 96 never engaged at all
+// outside a raid.
+constexpr uint32_t kDistBudget = 24;
+
 // Below this many distinct models in a frame, nothing is throttled.
 constexpr uint32_t kBudget = 96;
 
@@ -182,6 +242,24 @@ struct Slot {
 };
 Slot g_slots[kSlots];
 
+// Which candidate translation, if either, turned out to be a world position.
+enum DistState { kLearning, kArmed, kRefused };
+DistState g_distState  = kLearning;
+unsigned  g_distOffset = 0;        // kM_localMatrix or kM_worldMatrix once armed
+
+// Per-frame extremes for each candidate, and how many frames each has agreed.
+float    g_minD[2], g_maxD[2];
+uint32_t g_agree[2]     = { 0, 0 };
+uint32_t g_learnFrames  = 0;
+
+// The camera, read once a frame rather than once a model.
+float    g_cam[3]   = { 0.0f, 0.0f, 0.0f };
+bool     g_camValid = false;
+uint32_t g_camFrames = 0;   // frames a world position was actually available
+
+unsigned long long g_distSkipped = 0;   // skips the distance rule made
+unsigned long long g_nearKept    = 0;   // models the distance rule protected
+
 
 bool g_installed = false;
 bool g_dead      = false;
@@ -194,6 +272,30 @@ uint32_t g_seenPrev    = 0;
 unsigned long long g_calls = 0, g_skipped = 0, g_firstSight = 0, g_evicted = 0;
 unsigned long long g_hasTailWork = 0;   // declined: the tail animates materials
 uint32_t g_peakModels = 0, g_peakStride = 1;
+
+// Squared distance from the camera to the translation row of the 4x4 at
+// model+off. Squared, so no square root runs per model per frame; the bands are
+// squared once at file scope terms below. Returns false if the value is not a
+// finite map coordinate, which also rejects a matrix that has never been
+// written.
+inline bool CameraDistSq(uint32_t model, unsigned off, float& outSq) {
+    const float* m = (const float*)(model + off);
+    float x = m[12], y = m[13], z = m[14];
+    if (!(x > -64000.0f && x < 64000.0f)) return false;
+    if (!(y > -64000.0f && y < 64000.0f)) return false;
+    if (!(z > -64000.0f && z < 64000.0f)) return false;
+    float dx = x - g_cam[0], dy = y - g_cam[1], dz = z - g_cam[2];
+    outSq = dx * dx + dy * dy + dz * dz;
+    return true;
+}
+
+// Stride for a distance, in yards squared.
+inline uint32_t StrideForDistSq(float dSq) {
+    if (dSq <= kBandNearYd * kBandNearYd) return 1;
+    if (dSq <= kBandMidYd  * kBandMidYd)  return 2;
+    if (dSq <= kBandFarYd  * kBandFarYd)  return 3;
+    return kMaxStride;
+}
 
 inline uint32_t Hash(uint32_t p) {
     p ^= p >> 16; p *= 0x7feb352du;
@@ -276,10 +378,40 @@ extern "C" int __cdecl AnimLod_ShouldSkip(uint32_t model) {
             s->seenFrame = g_frame;
             ++g_seenThis;
         }
+        // While learning, both candidates are sampled on every model of every
+        // frame that has a crowd worth judging. This costs two reads and two
+        // subtractions per model for four seconds of play and then stops.
+        if (g_camValid && g_distState == kLearning) {
+            float dSq;
+            if (CameraDistSq(model, kM_localMatrix, dSq)) {
+                if (dSq < g_minD[0]) g_minD[0] = dSq;
+                if (dSq > g_maxD[0]) g_maxD[0] = dSq;
+            }
+            if (CameraDistSq(model, kM_worldMatrix, dSq)) {
+                if (dSq < g_minD[1]) g_minD[1] = dSq;
+                if (dSq > g_maxD[1]) g_maxD[1] = dSq;
+            }
+        }
+
+        // The stride for this model. Distance wins when it is available: a far
+        // model does not need a new pose every frame whether or not the scene
+        // is busy, and a near one should never be throttled however busy it is.
+        uint32_t stride = g_stride;
+        bool     byDistance = false;
+        if (g_distState == kArmed && g_camValid && g_seenPrev >= kDistBudget) {
+            float dSq;
+            if (CameraDistSq(model, g_distOffset, dSq)) {
+                stride = StrideForDistSq(dSq);
+                byDistance = true;
+                if (stride == 1) ++g_nearKept;
+            }
+        }
+
         {
             uint32_t age = g_frame - s->lastFrame;
-            if (g_stride > 1 && age < g_stride) {
+            if (stride > 1 && age < stride) {
                 ++g_skipped;
+                if (byDistance) ++g_distSkipped;
                 decision = 1;
             } else {
                 s->lastFrame = g_frame;
@@ -343,10 +475,70 @@ __declspec(naked) void HookedAnimateModel() {
 
 } // namespace
 
+// One frame of learning evidence, folded in at the frame boundary. Both
+// candidates are judged on the same frame, against the same camera.
+// Called from the frame boundary before g_seenThis is reset, so g_seenThis is
+// still the distinct model count of the frame being judged.
+void JudgeLearningFrame() {
+    if (g_seenThis < kLearnMinCrowd) return;   // too few models to say anything
+    ++g_learnFrames;
+
+    for (int c = 0; c < 2; ++c) {
+        if (g_minD[c] > g_maxD[c]) continue;     // nothing readable this frame
+        float nearYd = sqrtf(g_minD[c]);
+        float farYd  = sqrtf(g_maxD[c]);
+        if (nearYd <= kLearnMaxNearYd && (farYd - nearYd) >= kLearnMinSpread)
+            ++g_agree[c];
+    }
+
+    if (g_learnFrames < kLearnFrames) return;
+
+    // Whichever agreed on more of the judged frames, and only if it agreed on a
+    // clear majority of them. A tie or a weak winner is a refusal, because the
+    // cost of being wrong here is throttling a model that is standing in front
+    // of the player.
+    int   win  = (g_agree[1] > g_agree[0]) ? 1 : 0;
+    uint32_t hits = g_agree[win];
+    if (hits * 4 >= g_learnFrames * 3) {
+        g_distState  = kArmed;
+        g_distOffset = win ? kM_worldMatrix : kM_localMatrix;
+        Log("[AnimLod] Distance rule armed on model+%u: it put something within "
+            "%.0f yards of the camera and spread the models by at least %.0f "
+            "yards on %u of %u judged frames. The other candidate (model+%u) "
+            "managed %u. Models inside %.0f yards are never throttled from here "
+            "on; past that the stride is 2, 3 and %u by %.0f and %.0f yards.",
+            win ? kM_worldMatrix : kM_localMatrix,
+            kLearnMaxNearYd, kLearnMinSpread, hits, g_learnFrames,
+            win ? kM_localMatrix : kM_worldMatrix, g_agree[win ^ 1],
+            kBandNearYd, kMaxStride, kBandMidYd, kBandFarYd);
+    } else {
+        g_distState = kRefused;
+        Log("[AnimLod] Distance rule refused. Over %u judged frames model+%u "
+            "looked like a world position on %u and model+%u on %u, and neither "
+            "reached three quarters. Neither translation is being used; the "
+            "feature is on the crowd rule alone, which engages above %u models "
+            "in a frame.",
+            g_learnFrames, kM_localMatrix, g_agree[0], kM_worldMatrix,
+            g_agree[1], kBudget);
+    }
+}
+
 void OnFrame() {
     if (!g_installed || g_dead) return;
 
     if (g_seenThis > g_peakModels) g_peakModels = g_seenThis;
+
+    if (g_distState == kLearning) {
+        JudgeLearningFrame();
+        g_minD[0] = g_minD[1] = 3.4e38f;
+        g_maxD[0] = g_maxD[1] = -1.0f;
+    }
+
+    // Once a frame, not once a model. A frame with no world - a loading screen,
+    // character select - leaves the distance rule inert for that frame and the
+    // crowd rule carries it.
+    g_camValid = WowWorld::StreamCentre(g_cam);
+    if (g_camValid) ++g_camFrames;
 
     // How many frames to spread one pass over every model across. Computed from
     // the frame that just finished, so it reacts within one frame of a scene
@@ -378,6 +570,8 @@ bool Init() {
         return false;
     }
     memset(g_slots, 0, sizeof(g_slots));
+    g_minD[0] = g_minD[1] = 3.4e38f;
+    g_maxD[0] = g_maxD[1] = -1.0f;
 
     if (WineSafe_CreateHook((void*)kAnimateModel, (void*)HookedAnimateModel,
                             &g_origAnimateModel) != MH_OK) {
@@ -391,13 +585,20 @@ bool Init() {
 
     g_installed = true;
     Log("[AnimLod] ACTIVE on sub_82F0F0 (0x%08X), the per-model animation pass. "
-        "A census measured it at 3.68 ms of a 24.5 ms frame in raid content. "
-        "Under %u models in a frame nothing is skipped; above that each model "
-        "updates once every %u frames at most, so a model animates no slower than "
-        "a quarter of the frame rate. A model is never skipped before its first "
-        "evaluation. Skipping cannot slow an animation down: the client derives "
-        "its time from an absolute clock rather than accumulating it.",
-        (unsigned)kAnimateModel, kBudget, kMaxStride);
+        "A census measured it at 3.68 ms of a 24.5 ms frame in raid content and "
+        "0.69 ms in open world. A model is never skipped before its first "
+        "evaluation, and never when the call's tail would have animated its "
+        "materials or its attachments. Skipping cannot slow an animation down: "
+        "the client derives its time from an absolute clock rather than "
+        "accumulating it.",
+        (unsigned)kAnimateModel);
+    Log("[AnimLod]   Two rules. The crowd rule spreads work above %u models in a "
+        "frame, capped at one update in %u. The distance rule is better and has "
+        "to earn its place first: for the next %u frames with at least %u models "
+        "in them it watches both candidate translations against the camera and "
+        "arms whichever behaves like a world position, or refuses both and says "
+        "so. Armed, it never throttles a model inside %.0f yards.",
+        kBudget, kMaxStride, kLearnFrames, kLearnMinCrowd, kBandNearYd);
     return true;
 }
 
@@ -415,6 +616,28 @@ void LogStats() {
     Log("[AnimLod]   %llu calls (%.1f%%) declined because the tail would have "
         "animated materials or attachments", g_hasTailWork,
         g_calls ? (100.0 * (double)g_hasTailWork / (double)g_calls) : 0.0);
+
+    // Three states, and the fourth thing that can happen to it.
+    if (g_camFrames == 0) {
+        Log("[AnimLod]   distance: no world position was available on any frame, "
+            "so the distance rule never had anything to learn from. The crowd "
+            "rule is what ran.");
+    } else if (g_distState == kLearning) {
+        Log("[AnimLod]   distance: still learning - %u of %u frames judged so far "
+            "(model+%u agreed on %u, model+%u on %u). A frame is only judged when "
+            "at least %u models are in it.",
+            g_learnFrames, kLearnFrames, kM_localMatrix, g_agree[0],
+            kM_worldMatrix, g_agree[1], kLearnMinCrowd);
+    } else if (g_distState == kRefused) {
+        Log("[AnimLod]   distance: refused after %u judged frames, neither "
+            "translation looked like a world position. Crowd rule only.",
+            g_learnFrames);
+    } else {
+        Log("[AnimLod]   distance: armed on model+%u; %llu of the %llu skips were "
+            "its decision, and it protected %llu models that were inside %.0f "
+            "yards and would otherwise have been throttled by the crowd rule.",
+            g_distOffset, g_distSkipped, g_skipped, g_nearKept, kBandNearYd);
+    }
     if (g_evicted)
         Log("[AnimLod]   %llu entries displaced by collisions; those models were "
             "animated rather than skipped", g_evicted);
