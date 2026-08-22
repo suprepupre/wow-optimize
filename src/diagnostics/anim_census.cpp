@@ -70,6 +70,7 @@
 #include <cmath>
 
 #include "anim_census.h"
+#include "../core/world_position.h"
 #include "crash_dumper.h"
 #include "config.h"
 #include "MinHook.h"
@@ -152,21 +153,19 @@ static double g_worstSpread = 0.0;
 static int g_samplesLogged = 0;
 static constexpr int MAX_SAMPLES = 16;
 
-// The player's world position, already relied on by perf_diagnostics and
-// predictive_prefetch. Without it the sampled translations are just numbers;
-// with it they can be read as distances, which is the form the answer is
-// actually needed in.
-static float* const g_playerX = (float*)0x00BE1F30;
-static float* const g_playerY = (float*)0x00BE1F34;
-
+// The client's terrain streaming centre. Without a world position the sampled
+// translations are just numbers; with one they can be read as distances, which
+// is the form the answer is actually needed in - this census exists to find out
+// whether a distance is reachable at the animation call site at all.
+//
+// It used to read 0x00BE1F30, which no instruction in wow.exe touches, so every
+// distance printed here before 2026-08-22 is a distance from the map origin.
 static bool ReadPlayerXY(float& px, float& py) {
-    __try {
-        px = *g_playerX;
-        py = *g_playerY;
-        return (px > -64000.0f && px < 64000.0f && py > -64000.0f && py < 64000.0f);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    float pos[3];
+    if (!WowWorld::StreamCentre(pos)) return false;
+    px = pos[0];
+    py = pos[1];
+    return true;
 }
 
 static void NoteDistinct(void* m) {
@@ -268,10 +267,14 @@ static int __fastcall Hooked_AnimateModel(void* This, void* edx,
             // one of these two distances will look like a plausible yardage and
             // will differ between models.
             float px, py;
-            if (ReadPlayerXY(px, py)) {
+            if (!ReadPlayerXY(px, py)) {
+                Log("[AnimCensus]            no world position available for "
+                    "this sample, so neither translation can be read as a "
+                    "distance");
+            } else {
                 double dl = sqrt((double)(loc[0] - px) * (loc[0] - px) +
                                  (double)(loc[1] - py) * (loc[1] - py));
-                Log("[AnimCensus]            player at %.1f %.1f -> %.1f yd from "
+                Log("[AnimCensus]            camera at %.1f %.1f -> %.1f yd from "
                     "the this+180 translation", px, py, dl);
                 if (haveArg) {
                     double da = sqrt((double)(arg[0] - px) * (arg[0] - px) +

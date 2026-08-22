@@ -106,6 +106,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "AudioDecodeMt", &Settings::OptAudioDecodeMt },
     { "Graphics_Sound", "DbcLookupCache", &Settings::OptDbcLookupCache },
     { "General", "FileIoHooks", &Settings::OptFileIoHooks },
+    { "General", "TerrainPrefetch", &Settings::OptTerrainPrefetch },
     { "UI_Lua", "LuaTypeFast", &Settings::OptLuaTypeFast },
     { "General", "Win32ApiCaches", &Settings::OptWin32ApiCaches },
     { "General", "DebugApiHooks", &Settings::OptDebugApiHooks },
@@ -544,6 +545,9 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         // existing wow_opt.ini therefore keeps the behaviour it had.
         g_settings.OptFileIoHooks         = GetPrivateProfileIntA("General", "FileIoHooks", g_settings.OptDbcLookupCache ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptLuaTypeFast         = GetPrivateProfileIntA("UI_Lua", "LuaTypeFast", g_settings.OptDbcLookupCache ? 1 : 0, iniPath.c_str()) != 0;
+        // Deliberately not inheriting FileIoHooks. See config.h: this one has
+        // never executed, so defaulting it off takes nothing away from anyone.
+        g_settings.OptTerrainPrefetch     = GetPrivateProfileIntA("General", "TerrainPrefetch", 0, iniPath.c_str()) != 0;
         // Same inheritance rule as FileIoHooks: each takes the switch it used to
         // hang off as its default, so an existing wow_opt.ini keeps behaving the
         // way it did until its owner writes the new key.

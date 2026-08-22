@@ -6,6 +6,7 @@
 // ============================================================================
 
 #include "predictive_prefetch.h"
+#include "../core/world_position.h"
 #include "version.h"
 #include <windows.h>
 #include <string>
@@ -47,10 +48,14 @@ static std::atomic<bool> g_shutdown{false};
 // Private Storm Archive handles
 static std::vector<HANDLE> g_archives;
 
-// Player coordinates globals (WoW 3.3.5a)
-static float* const g_playerX = (float*)0x00BE1F30;
-static float* const g_playerY = (float*)0x00BE1F34;
-static float* const g_playerZ = (float*)0x00BE1F38;
+// Three states, never two: a session that queued nothing has to be able to say
+// whether it never saw a position or saw one and found nothing worth fetching.
+static bool          g_started            = false;
+static unsigned long g_framesSeen         = 0;
+static unsigned long g_framesWithPosition = 0;
+static unsigned long g_queued             = 0;
+static unsigned long g_loaded             = 0;
+
 
 // Last tracked state
 static float g_lastX = 0.0f;
@@ -123,7 +128,7 @@ static void WorkerProc() {
                     // Just reading
                 }
                 pSFileCloseFile(hFile);
-                Log("[PredictivePrefetch] Background loaded: '%s'", filename.c_str());
+                ++g_loaded;
                 break;
             }
         }
@@ -141,20 +146,27 @@ bool Init() {
 
     // Spawn background thread
     g_workerThread = CreateThread(NULL, 0, PredictivePrefetchWorkerThread, NULL, 0, NULL);
+    g_started = true;
 
     Log("[PredictivePrefetch] Active - Predictive movement-based read-ahead prefetcher running");
     return true;
 }
 
 void OnFrame() {
-    // Only process coordinates if memory pressure is not critical and coordinates are initialized
-    if (!g_playerX || !g_playerY) return;
+    ++g_framesSeen;
 
-    float cx = *g_playerX;
-    float cy = *g_playerY;
+    // This module read the player position from 0x00BE1F30 until 2026-08-22.
+    // No instruction in wow.exe references that address, so it read 0.0 on
+    // every frame of every session, hit its own "reject uninitialized" guard
+    // below, and queued nothing - while logging itself as running. The tell was
+    // in a tester log: perf_diagnostics printed "Player position: X=0.00,
+    // Y=0.00" on a stutter recorded while the player was walking.
+    float pos[3];
+    if (!WowWorld::StreamCentre(pos)) return;
+    ++g_framesWithPosition;
 
-    // Reject uninitialized or zero coordinate locations (often during loading screens)
-    if (cx == 0.0f && cy == 0.0f) return;
+    float cx = pos[0];
+    float cy = pos[1];
 
     // Calculate movement velocity vector
     float vx = cx - g_lastX;
@@ -195,9 +207,21 @@ void OnFrame() {
             char path[128];
             sprintf_s(path, "World\\Maps\\%s\\%s_%d_%d.adt", continent, continent, adtX, adtY);
             g_prefetchQueue.push(path);
+            ++g_queued;
         }
         g_queueCv.notify_one();
     }
+}
+
+void LogStats() {
+    if (!g_started) { Log("[PredictivePrefetch] not started - nothing measured"); return; }
+    Log("[PredictivePrefetch] %lu frames, %lu with a world position, %lu tiles "
+        "queued, %lu loaded",
+        g_framesSeen, g_framesWithPosition, g_queued, g_loaded);
+    if (g_framesWithPosition == 0)
+        Log("[PredictivePrefetch]   never saw a world position, so nothing was "
+            "ever predicted - this is not the same as predicting and finding "
+            "nothing to fetch");
 }
 
 void Shutdown() {

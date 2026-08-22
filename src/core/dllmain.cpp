@@ -4701,6 +4701,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     DbcLookupCache_LogStats();
     LuaCompileCensus::LogStats();
     AnimCensus::LogStats();
+    PredictivePrefetch::LogStats();
     DeviceCallbackGuard::LogStats();
     LayoutRelinkFast::LogStats();
     HorizonOcclusion::LogStats();
@@ -8189,7 +8190,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("");
     Log("--- Velocity-Based Predictive Asset Prefetcher ---");
 #if !TEST_DISABLE_PREDICTIVE_PREFETCH
-    bool predictivePrefetchOk = Config::g_settings.OptFileIoHooks && PredictivePrefetch::Init();
+    bool predictivePrefetchOk = Config::g_settings.OptTerrainPrefetch && PredictivePrefetch::Init();
 #else
     bool predictivePrefetchOk = false;
     Log("[PredictivePrefetch] DISABLED via TEST_DISABLE_PREDICTIVE_PREFETCH");

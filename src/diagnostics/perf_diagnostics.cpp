@@ -1,4 +1,5 @@
 #include "perf_diagnostics.h"
+#include "../core/world_position.h"
 #include "version.h"
 #include "crash_dumper.h"
 #include <psapi.h>
@@ -18,8 +19,6 @@ namespace PerfDiagnostics {
 static DWORD g_lastDiagTick = 0;
 static std::atomic<long> g_stutterCount{0};
 
-static float* const g_playerX = (float*)0x00BE1F30;
-static float* const g_playerY = (float*)0x00BE1F34;
 
 // Insert one allocation into a descending top-N list, dropping the smallest.
 template <typename T>
@@ -55,9 +54,17 @@ void LogPerformanceSnapshot(double elapsedMs) {
     
     Log("[PerfDiag] === STUTTER DETECTED (Frame duration: %.1f ms) ===", elapsedMs);
     
-    // 1. Coordinates & Zone
-    if (g_playerX && g_playerY) {
-        Log("[PerfDiag]   Player position: X=%.2f, Y=%.2f", *g_playerX, *g_playerY);
+    // 1. Where this happened. Not a player position: the client's terrain
+    //    streaming centre, the only world coordinate available here that the
+    //    client actually writes. Said plainly when it cannot be read - a
+    //    stutter at the origin and a stutter with no world are different facts,
+    //    and the line this replaces printed 0.00, 0.00 for both, always.
+    float pos[3];
+    if (WowWorld::StreamCentre(pos)) {
+        Log("[PerfDiag]   World position: X=%.2f, Y=%.2f, Z=%.2f",
+            pos[0], pos[1], pos[2]);
+    } else {
+        Log("[PerfDiag]   World position: no world loaded, nothing to report");
     }
     
     // 2. Memory State

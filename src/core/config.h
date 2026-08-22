@@ -190,6 +190,15 @@ namespace Config {
         // asked for. Defaults to whatever DbcLookupCache resolved to, so no
         // install changes behaviour until its owner sets it deliberately.
         bool OptFileIoHooks = false;
+        // The terrain read-ahead. It hung off FileIoHooks, which names the
+        // Win32 file layer and not a prefetcher, and it never ran: its player
+        // coordinate came from an address no instruction in wow.exe writes, so
+        // it took its own zero-coordinate early return on every frame ever.
+        // Now that it has a working coordinate it does real background I/O, and
+        // that has never been tested by anyone. Off by default is not the 3.18.1
+        // mistake of removing a running feature - there is nothing running to
+        // remove.
+        bool OptTerrainPrefetch = false;
         // The lua_type fast path in hot_patch.cpp, which resolves a positive
         // stack index inline instead of calling the engine's index2adr. It was
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc

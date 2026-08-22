@@ -11,6 +11,10 @@ bool Init();
 // Tick called per frame to track velocity and prefetch files
 void OnFrame();
 
+// What it saw and what it did. A session that queued nothing must be able to
+// say whether it never had a world position or had one and found nothing.
+void LogStats();
+
 // Shut down resources
 void Shutdown();
 

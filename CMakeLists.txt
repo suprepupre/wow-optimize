@@ -51,6 +51,7 @@ FetchContent_MakeAvailable(mimalloc)
 add_library(wow_optimize SHARED
     src/core/dllmain.cpp
     src/core/config.cpp
+    src/core/world_position.cpp
     # Windows file-version metadata. This was never attached to a target, so the
     # shipped DLL carried no version resource at all and the file sat at 3.12.0
     # unnoticed through several releases.
