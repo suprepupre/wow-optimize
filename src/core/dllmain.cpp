@@ -462,6 +462,7 @@ static void StopFreezeWatchdog() {
 #include "strcat_fast.h"
 #include "script_handler_cache.h"
 #include "dbc_lookup_cache.h"
+#include "../hooks_subsystems/tick_list_prefetch.h"
 #include "event_dispatch_cache.h"
 #include "lua_getstr_inline.h"
 #include "lua_rawgeti_inline.h"
@@ -4702,6 +4703,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     LuaCompileCensus::LogStats();
     AnimCensus::LogStats();
     PredictivePrefetch::LogStats();
+    TickListPrefetch::LogStats();
     DeviceCallbackGuard::LogStats();
     LayoutRelinkFast::LogStats();
     HorizonOcclusion::LogStats();
@@ -8195,6 +8197,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool predictivePrefetchOk = false;
     Log("[PredictivePrefetch] DISABLED via TEST_DISABLE_PREDICTIVE_PREFETCH");
 #endif
+
+    // Its own line, outside the block above. Put inside it, this was compiled
+    // out entirely by TEST_DISABLE_PREDICTIVE_PREFETCH - a different feature's
+    // compile-time switch - and the linker then dropped Init and the thunk as
+    // unreferenced, leaving only a LogStats that said "not installed".
+    TickListPrefetch::Init();
 
     Log("");
     Log("--- Parallel M2 Geometry SIMD Skinning ---");

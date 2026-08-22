@@ -199,6 +199,9 @@ namespace Config {
         // mistake of removing a running feature - there is nothing running to
         // remove.
         bool OptTerrainPrefetch = false;
+        // Prefetches the next node of the per-frame object tick walk. New, and
+        // it is a cache hint on a hot list, so off until someone has run it.
+        bool OptTickListPrefetch = false;
         // The lua_type fast path in hot_patch.cpp, which resolves a positive
         // stack index inline instead of calling the engine's index2adr. It was
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc
