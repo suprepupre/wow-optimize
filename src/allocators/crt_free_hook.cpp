@@ -186,7 +186,7 @@ bool InstallCrtFreeHook() {
         return false;
     }
 
-    g_token = CrashDumper::FeatureTokenForCounting("CrtFreeHook");
+    g_token = CrashDumper::FeatureTokenForCounting("CrtFreeHook", 8192);
     SamplingProfiler::RegisterSelfSymbol("crt_free", (const void*)&Hooked_CrtFree);
     g_installed = true;
     Log("[CrtFree] ACTIVE at 0x%08X - dropping the discarded _msize from every free",

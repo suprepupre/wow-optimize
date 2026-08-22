@@ -26,7 +26,8 @@ struct FeatureState {
     const char*  name;        // Feature name (e.g., "AdaptiveGC", "GetStrInline")
     bool         active;      // Currently enabled
     bool         counted;     // Something calls FeatureHit for this one
-    unsigned int hits;        // Times its work actually ran (32-bit: see FeatureHit)
+    unsigned int hits;        // Times FeatureHit was called (32-bit: see FeatureHit)
+    unsigned int hitStride;   // Calls per FeatureHit. See FeatureTokenForCounting.
     long long    callCount;   // Total invocations via the legacy by-name API
     long long    errorCount;  // SEH exceptions caught
     DWORD        lastCallTick;// GetTickCount of last invocation
@@ -52,7 +53,14 @@ namespace CrashDumper {
     // distinction the report accuses every uninstrumented feature of doing
     // nothing, which is the same lie as a feature logging success while installing
     // no hook.
-    int FeatureTokenForCounting(const char* name);
+    // hitStride is how many calls each FeatureHit stands for. Features on a hot
+    // path only report one in a few thousand, and the report used to print those
+    // raw sample counts in the same column as the ones that count every call:
+    // txtsd's five-hour session listed MatrixVectorSSE2 at 807878 next to
+    // HotFunctions at 485862648, when the first samples one call in 8192 and is
+    // really the larger of the two by an order of magnitude. Pass the divisor
+    // the call site uses, or 1 when it counts every call.
+    int FeatureTokenForCounting(const char* name, unsigned hitStride = 1);
 
     // O(1) increment at a known index. The old by-name API below scans the table
     // and strcmps every entry, which is why in practice it was wired into three

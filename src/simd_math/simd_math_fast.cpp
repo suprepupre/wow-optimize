@@ -165,7 +165,7 @@ bool Init() {
     // to be kept: registering a token and discarding it leaves a counter nothing
     // can ever increment, which is exactly how this module came to be reported
     // as never having run.
-    g_featureToken = CrashDumper::FeatureTokenForCounting("MatrixVectorSSE2");
+    g_featureToken = CrashDumper::FeatureTokenForCounting("MatrixVectorSSE2", 8192);
     SamplingProfiler::RegisterSelfSymbol("MatVec3Mul_SSE2", (const void*)&Hooked_MatVec3Mul);
     return true;
 }

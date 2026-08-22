@@ -213,7 +213,7 @@ bool InstallDbcLookupCache()
         return false;
     }
 
-    g_featureToken = CrashDumper::FeatureTokenForCounting("DbcLookupCache");
+    g_featureToken = CrashDumper::FeatureTokenForCounting("DbcLookupCache", 1024);
     SamplingProfiler::RegisterSelfSymbol("dbc_lookup_cache", (const void*)&Hooked_DbcGetRow);
     Log("[DbcLookupCache] Installed: %d-slot transformed data cache at 0x4CFD20", CACHE_SIZE);
     return true;

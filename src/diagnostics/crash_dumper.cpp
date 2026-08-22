@@ -1133,21 +1133,24 @@ int RegisterFeature(const char* name) {
     return (int)idx;
 }
 
-int FeatureTokenForCounting(const char* name) {
+int FeatureTokenForCounting(const char* name, unsigned hitStride) {
     if (!name) return -1;
+    if (hitStride == 0) hitStride = 1;
 
     LONG count = InterlockedCompareExchange(&s_featureCount, 0, 0);
     if (count > MAX_TRACKED_FEATURES) count = MAX_TRACKED_FEATURES;
     for (int i = 0; i < count; i++) {
         if (s_features[i].name && strcmp(s_features[i].name, name) == 0) {
-            s_features[i].counted = true;
+            s_features[i].counted   = true;
+            s_features[i].hitStride = hitStride;
             return i;
         }
     }
 
     int token = RegisterFeature(name);
     if (token >= 0) {
-        s_features[token].counted = true;
+        s_features[token].counted   = true;
+        s_features[token].hitStride = hitStride;
     }
     return token;
 }
@@ -1191,7 +1194,18 @@ void ReportFeatureActivity() {
         Log("[Features] Did work (%d):", ran);
         for (int i = 0; i < count; i++) {
             if (s_features[i].active && s_features[i].counted && s_features[i].hits > 0) {
-                Log("[Features]     %-32s %u", s_features[i].name, s_features[i].hits);
+                unsigned stride = s_features[i].hitStride ? s_features[i].hitStride : 1;
+                if (stride == 1) {
+                    Log("[Features]     %-32s %u", s_features[i].name, s_features[i].hits);
+                } else {
+                    // Scaled, because otherwise this column silently mixes units.
+                    // Stated as an estimate: the sample count is a plain counter
+                    // on a hot path, so it is itself a lower bound.
+                    Log("[Features]     %-32s ~%.0f  (%u samples x %u)",
+                        s_features[i].name,
+                        (double)s_features[i].hits * (double)stride,
+                        s_features[i].hits, stride);
+                }
             }
         }
     }
