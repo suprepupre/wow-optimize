@@ -59,12 +59,22 @@ static CvarWatchEntry g_watch[] = {
     { 0x00C24238, "dword_C24238 (visual alert)",     0, false },
 
     // ---- Taint system (secure execution) ----
+    // Only the cell pointer. dword_D413A0 was in this list as "Taint check
+    // flag" and reported corrupt on every session of every user: sub_48EC10
+    // increments it on entry, decrements it on exit and clamps it with
+    // `if (result <= 0) dword_D413A0 = 0`, so it is a nesting depth whose
+    // resting value is zero. Zero is the correct state, not a broken one.
     { 0x00D4139C, "Taint cell (secure execution)",    0, false },
-    { 0x00D413A0, "Taint check flag",                 0, false },
 
     // ---- Lua state ----
+    // There used to be a second entry here, 0x00D3F790, called "lua_State stack
+    // pointer (L+4)". It is neither. It is GLOBAL_LUA_STATE + 4 - the global
+    // sitting next to the pointer, not a field of the state - and sub_8192E0
+    // shows what lives there: a 64-bit counter that gets multiplied by
+    // dbl_D3F780. It reported corrupt on every session ever logged. A real
+    // check of the stack would have to load L first and read L+0x0C, because
+    // this client's lua_State is +4-shifted from stock.
     { 0x00D3F78C, "lua_State* (global Lua state)",    0, true  },
-    { 0x00D3F790, "lua_State stack pointer (L+4)",    0, true  },
 
     // ---- CRT heap ----
     { 0x00B31684, "_crtheap (CRT heap handle)",       0, false },
@@ -91,31 +101,35 @@ void CvarWatchdog_Check()
         (int)(sizeof(g_watch)/sizeof(g_watch[0])));
 
     int fixed = 0;
+    int unset = 0;
     bool anyCorrupt = false;
     for (size_t i = 0; i < sizeof(g_watch)/sizeof(g_watch[0]); i++) {
         CvarWatchEntry& e = g_watch[i];
         uintptr_t val = *(uintptr_t*)e.addr;
 
-        if (e.isPointer) {
-            if (val < 0x10000) {
-                anyCorrupt = true;
-                Log("[CvarWatchdog] CORRUPT: %s is NULL (0x%08X) — "
-                    "dependent code may crash", e.name, e.addr);
-                if (e.safeValue != 0) {
-                    *(uintptr_t*)e.addr = e.safeValue;
-                    fixed++;
-                }
+        // Zero is not corruption. Several of these globals are populated
+        // lazily - dword_C24238 is allocated before sub_5E90D0 first walks its
+        // twelve dwords, not at startup - and this scan runs the moment a Lua
+        // state exists, which is earlier than that. Reading zero as corrupt is
+        // what made every log ever collected report a corrupted client that
+        // then played for five hours without a fault.
+        //
+        // The patterns that do mean something are the fill bytes: 0xCDCDCDCD is
+        // uninitialised heap, 0xFFFFFFFF is a freed handle, and a pointer that
+        // is small but not zero is a genuine bad value.
+        bool isFill   = (val == 0xFFFFFFFF || val == 0xCDCDCDCD);
+        bool isBadPtr = e.isPointer && val != 0 && val < 0x10000;
+
+        if (isFill || isBadPtr) {
+            anyCorrupt = true;
+            Log("[CvarWatchdog] CORRUPT: %s = 0x%08X at 0x%08X",
+                e.name, (unsigned)val, (unsigned)e.addr);
+            if (e.safeValue != 0) {
+                *(uintptr_t*)e.addr = e.safeValue;
+                fixed++;
             }
-        } else {
-            if (val == 0 || val == 0xFFFFFFFF || val == 0xCDCDCDCD) {
-                anyCorrupt = true;
-                Log("[CvarWatchdog] CORRUPT: %s = 0x%08X at 0x%08X",
-                    e.name, (unsigned)val, (unsigned)e.addr);
-                if (e.safeValue != 0) {
-                    *(uint32_t*)e.addr = e.safeValue;
-                    fixed++;
-                }
-            }
+        } else if (val == 0) {
+            ++unset;
         }
     }
 
@@ -124,7 +138,13 @@ void CvarWatchdog_Check()
     } else if (anyCorrupt) {
         Log("[CvarWatchdog] Scan completed: corrupted CVars found (reported above).");
     } else {
-        Log("[CvarWatchdog] All CVars OK");
+        Log("[CvarWatchdog] No corrupted CVars");
+    }
+    if (unset > 0) {
+        Log("[CvarWatchdog]   %d of the %d were still zero at scan time. That is "
+            "not a verdict: this runs as soon as a Lua state exists and several "
+            "of them are populated later.",
+            unset, (int)(sizeof(g_watch)/sizeof(g_watch[0])));
     }
 }
 
