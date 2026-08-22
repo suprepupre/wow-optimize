@@ -115,6 +115,39 @@ constexpr unsigned kM_animBlock = 0x28;
 constexpr unsigned kM_owner     = 0x2C;
 constexpr unsigned kM_stamp     = 0x3C;
 
+// This function does not only pose bones, and the first version of this module
+// missed it. Its last instructions are:
+//
+//     and  [esi+10h], 0FFFFFBFFh          clear a flag
+//     cmp  [edx+128h], 0  / call sub_82D2F0     edx = [[esi+2Ch]+150h]
+//     cmp  [esi+4Ch], 0 / cmp [esi+58h], 0 / call sub_82E550
+//     mov  [esi+3Ch], [[esi+28h]+14h]     stamp it done for this frame
+//
+// sub_82D2F0 is the material pass. It walks the model's texture-animation blocks
+// and calls M2_AnimTrackColor ten times per block, writing colour and alpha, and
+// it maintains bit 0x400 of the flags. Skip the call and every one of those
+// tracks freezes at its last value.
+//
+// A tester saw exactly that on 2026-08-22: characters glowing, shoulder pads and
+// weapons glowing, then snapping back to normal. Turning this feature off stopped
+// it. Emissive and alpha tracks stuck bright until the model was posed again.
+//
+// The rule in CLAUDE.md is "before skipping an engine call, establish what else
+// that call does", and it records three features that shipped on "skipping this
+// only skips work" and were wrong. This was the fourth. What was established was
+// that skipping cannot affect animation *timing* - true, and beside the point.
+//
+// So a model is now skipped only when the tail would have done nothing: no
+// texture-animation blocks, and neither of the two fields that send it into
+// sub_82E550. Anything unreadable declines too. This can only ever refuse to
+// skip, so it cannot break rendering - and if it turns out that character models
+// always have material animation, the counter below will say so and this feature
+// is not viable in this form.
+constexpr unsigned kM_attach1   = 0x4C;
+constexpr unsigned kM_attach2   = 0x58;
+constexpr unsigned kO_data      = 0x150;   // model data: [[model+0x2C]+0x150], IDA var_4
+constexpr unsigned kD_matAnims  = 0x128;   // its texture-animation count
+
 // Below this many distinct models in a frame, nothing is throttled.
 constexpr uint32_t kBudget = 96;
 
@@ -146,6 +179,7 @@ uint32_t g_seenThis    = 0;   // distinct models so far this frame
 uint32_t g_seenPrev    = 0;
 
 unsigned long long g_calls = 0, g_skipped = 0, g_firstSight = 0, g_evicted = 0;
+unsigned long long g_hasTailWork = 0;   // declined: the tail animates materials
 uint32_t g_peakModels = 0, g_peakStride = 1;
 
 inline uint32_t Hash(uint32_t p) {
@@ -176,6 +210,20 @@ extern "C" int __cdecl AnimLod_ShouldSkip(uint32_t model) {
         if (!fpA) return 0;
         if (*(const uint32_t*)(model + kM_stamp) == *(const uint32_t*)(fpA + 0x14))
             return 0;   // already animated this frame; the client would bail too
+
+        // Would the tail have run the material or attachment pass? If so this
+        // model is not skippable at any stride - see the note on the offsets.
+        if (*(const uint32_t*)(model + kM_attach1) != 0 ||
+            *(const uint32_t*)(model + kM_attach2) != 0) {
+            ++g_hasTailWork;
+            return 0;
+        }
+        if (!fpB) { ++g_hasTailWork; return 0; }
+        uint32_t data = *(const uint32_t*)(fpB + kO_data);
+        if (!data || *(const uint32_t*)(data + kD_matAnims) != 0) {
+            ++g_hasTailWork;
+            return 0;
+        }
 
         uint32_t i = Hash(model) & kMask;
         uint32_t probe = 0;
@@ -350,6 +398,9 @@ void LogStats() {
         g_calls ? (100.0 * (double)g_skipped / (double)g_calls) : 0.0,
         g_firstSight, g_peakModels, g_peakStride, g_stride,
         g_dead ? " - DISABLED" : "");
+    Log("[AnimLod]   %llu calls (%.1f%%) declined because the tail would have "
+        "animated materials or attachments", g_hasTailWork,
+        g_calls ? (100.0 * (double)g_hasTailWork / (double)g_calls) : 0.0);
     if (g_evicted)
         Log("[AnimLod]   %llu entries displaced by collisions; those models were "
             "animated rather than skipped", g_evicted);
