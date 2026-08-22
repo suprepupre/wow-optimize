@@ -1022,7 +1022,8 @@ bool   g_isMultiClient = false;         // Set by DetectMultiClient() via named 
 static HANDLE g_instanceMutex = NULL;   // "wow_optimize_instance_v2" mutex
 static DWORD  g_nextStatsDumpTick = 0;  // Next periodic stats dump (GetTickCount)
 static DWORD  g_nextMiCollectTick = 0;  // Next mimalloc collect (multi-client only)
-static void   DumpPeriodicStats();
+static void   DumpPeriodicStats(const char* why = "periodic",
+                                bool atProcessExit = false);
 
 // ================================================================
 // Logging - ring buffer + background thread
@@ -4352,7 +4353,7 @@ static void TryRemoveFPSCap() {
 // Periodic stats dump called from hooked_Sleep.
 //
 
-static void DumpPeriodicStats() {
+static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     extern long g_assetPathHits;
     extern long g_assetPathMisses;
     extern long g_tvalueMemcpyHits;
@@ -4658,12 +4659,16 @@ static void DumpPeriodicStats() {
     // If the sampling profiler is active, fold its current top-50 into the
     // periodic dump. Shutdown() is skipped on the fast process-exit path, so
     // this is the only way the profile reliably reaches the log.
-    if (Config::g_settings.OptSamplingProfiler) {
+    // Not at process exit: the sampler runs on its own thread, that thread is
+    // already gone by then, and if it died holding the ring's lock this would
+    // hang a quitting process. Every other report below is a plain read of a
+    // counter the main thread owns.
+    if (Config::g_settings.OptSamplingProfiler && !atProcessExit) {
         SamplingProfiler::DumpNow();
     }
 #endif
     CpuTopology::Report();
-    FrameBench::Report("periodic");
+    FrameBench::Report(why);
     CrashDumper::ReportFeatureActivity();
     CrashDumper::ReportFirstChanceSummary();
     PerfDiagnostics::LogStats();
@@ -10144,9 +10149,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 FlushSavedVarsAsyncSynchronously();
 #endif
                 ClearAssetPathCache();
-                // The distribution is the point of the whole session; emit it
-                // before the log is finalized or it is lost on every normal exit.
-                FrameBench::Report("session end");
+                // The whole report, not only the frame times. The periodic dump
+                // fires at 30 s and then every 300 s, so a session shorter than
+                // about five and a half minutes produced exactly one, taken
+                // before the player had done anything - which is what a tester's
+                // five-minute session reporting a visual defect looked like on
+                // 2026-08-21: one AnimLod line from the first half-minute and
+                // nothing after it. Emit it here or it is lost on every normal
+                // exit, since this process leaves through TerminateProcess and
+                // Shutdown() never runs.
+                __try {
+                    DumpPeriodicStats("session end", true);
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    FrameBench::Report("session end");
+                }
                 LogFinalizeOnProcessExit(
                     "wow_optimize.dll: process terminating, detours removed and the "
                     "D3D9 device vtable restored, skipping the rest of cleanup");
