@@ -137,16 +137,29 @@ constexpr unsigned kM_stamp     = 0x3C;
 // only skips work" and were wrong. This was the fourth. What was established was
 // that skipping cannot affect animation *timing* - true, and beside the point.
 //
-// So a model is now skipped only when the tail would have done nothing: no
-// texture-animation blocks, and neither of the two fields that send it into
-// sub_82E550. Anything unreadable declines too. This can only ever refuse to
-// skip, so it cannot break rendering - and if it turns out that character models
-// always have material animation, the counter below will say so and this feature
-// is not viable in this form.
-constexpr unsigned kM_attach1   = 0x4C;
-constexpr unsigned kM_attach2   = 0x58;
+// sub_82E550 is the attachment pass, and it accounts for the rest of the report.
+// Its first loop runs [data+0F0h] attachment points; its second walks the list
+// of attached models at [esi+58h], linked through +60h, and calls sub_82F0F0 on
+// each one. A weapon and a shoulder pad are attached models. Skipping a
+// character skipped its whole attached chain with it.
+//
+// The rule in CLAUDE.md is "before skipping an engine call, establish what else
+// that call does", and it records three features that shipped on "skipping this
+// only skips work" and were wrong. This was the fourth. What was established was
+// that skipping cannot affect animation *timing* - true, and beside the point.
+//
+// So a model is now skipped only when the tail would have done nothing. The test
+// is not the client's own two `cmp` guards above: those over-approximate, and
+// [esi+4Ch] is the bone array, which is set on everything that reaches this far,
+// so guarding on it would decline every model there is. The tests below are the
+// conditions the tail functions themselves loop on - texture-animation count,
+// attachment count, child list. Anything unreadable declines too. This can only
+// ever refuse to skip, so it cannot break rendering, and the counter below says
+// how much population is left after it.
 constexpr unsigned kO_data      = 0x150;   // model data: [[model+0x2C]+0x150], IDA var_4
-constexpr unsigned kD_matAnims  = 0x128;   // its texture-animation count
+constexpr unsigned kD_matAnims  = 0x128;   // texture-animation count, gates sub_82D2F0
+constexpr unsigned kD_attachCnt = 0x0F0;   // attachment count, sub_82E550's loop bound
+constexpr unsigned kM_childList = 0x58;    // attached models, sub_82E550's second walk
 
 // Below this many distinct models in a frame, nothing is throttled.
 constexpr uint32_t kBudget = 96;
@@ -211,16 +224,17 @@ extern "C" int __cdecl AnimLod_ShouldSkip(uint32_t model) {
         if (*(const uint32_t*)(model + kM_stamp) == *(const uint32_t*)(fpA + 0x14))
             return 0;   // already animated this frame; the client would bail too
 
-        // Would the tail have run the material or attachment pass? If so this
-        // model is not skippable at any stride - see the note on the offsets.
-        if (*(const uint32_t*)(model + kM_attach1) != 0 ||
-            *(const uint32_t*)(model + kM_attach2) != 0) {
-            ++g_hasTailWork;
-            return 0;
-        }
+        // Would the tail have done anything? If so this model is not skippable
+        // at any stride - see the note on the offsets above. Not the client's
+        // own cheap pre-tests: those over-approximate, and one of them is the
+        // bone array, which is set on everything that reaches here. These are
+        // the conditions the two tail functions themselves loop on.
         if (!fpB) { ++g_hasTailWork; return 0; }
         uint32_t data = *(const uint32_t*)(fpB + kO_data);
-        if (!data || *(const uint32_t*)(data + kD_matAnims) != 0) {
+        if (!data) { ++g_hasTailWork; return 0; }
+        if (*(const uint32_t*)(data + kD_matAnims) != 0 ||
+            *(const uint32_t*)(data + kD_attachCnt) != 0 ||
+            *(const uint32_t*)(model + kM_childList) != 0) {
             ++g_hasTailWork;
             return 0;
         }
