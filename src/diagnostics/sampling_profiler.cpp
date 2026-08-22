@@ -674,7 +674,7 @@ void RegisterSelfSymbol(const char* name, const void* addr) {
 // matters: without it every unregistered hot spot would be attributed to whichever
 // registered function happens to sit lowest in the image, which is worse than
 // admitting we do not know.
-static const char* ResolveSelfSymbol(uintptr_t addr) {
+static const char* ResolveSelfSymbol(uintptr_t addr, uintptr_t* outDelta = nullptr) {
     const char* best = nullptr;
     uintptr_t bestDelta = 0x4000;   // 16 KB
     for (int i = 0; i < g_selfSymbolCount; i++) {
@@ -685,8 +685,20 @@ static const char* ResolveSelfSymbol(uintptr_t addr) {
             best = g_selfSymbols[i].name;
         }
     }
+    if (outDelta) *outDelta = best ? bestDelta : 0;
     return best;
 }
+
+// The distance past a registered symbol at which its name stops being evidence.
+// Nothing here records a function's size - RegisterSelfSymbol is handed an entry
+// point and nothing else - so a sample far past one is at best "somewhere after
+// it" and at worst inside an unregistered neighbour. Naming those was how
+// txtsd's 2026-08-22 session reported wowopt!dbc_lookup_cache at 1.00% of the
+// profile while the cache's own counter recorded 336908 calls over 184004
+// frames, which is 1.8 calls a frame and cannot cost one percent of anything.
+// Past this the offset is printed, so a reader can see the label is a
+// neighbourhood and not a function.
+static constexpr uintptr_t kSelfSymbolTrusted = 0x200;   // 512 bytes
 static constexpr int SELF_PAGES = 4096;   // covers a 16MB image
 static uint32_t g_selfPageCounts[SELF_PAGES];
 
@@ -788,9 +800,12 @@ static void DumpFineHistogram(const uint32_t* counts, int slots, int shift,
         uint32_t c = counts[idx[i]];
         char addr[32];
         uintptr_t slotAddr = addrBase + ((uintptr_t)idx[i] << shift);
-        const char* sym = (addrBase == 0) ? ResolveSelfSymbol(g_selfBase + slotAddr) : nullptr;
-        if (sym) wsprintfA(addr, "wowopt!%.20s", sym);
-        else     wsprintfA(addr, addrFormat, (unsigned)slotAddr);
+        uintptr_t delta = 0;
+        const char* sym = (addrBase == 0)
+                        ? ResolveSelfSymbol(g_selfBase + slotAddr, &delta) : nullptr;
+        if (sym && delta < kSelfSymbolTrusted) wsprintfA(addr, "wowopt!%.20s", sym);
+        else if (sym) wsprintfA(addr, "wowopt!%.14s+0x%X", sym, (unsigned)delta);
+        else          wsprintfA(addr, addrFormat, (unsigned)slotAddr);
         Log("[SamplingProfiler]   %-14s %8u samples (%5.2f%%)",
             addr, c, 100.0 * (double)c / (double)total);
     }
@@ -1257,8 +1272,10 @@ static void DumpResults() {
         } else if (g_selfBase && buckets[i].addr >= g_selfBase && buckets[i].addr < g_selfEnd) {
             // A hot page inside our own DLL — label by offset from our base so it
             // maps directly to wow_optimize.map (which of our hooks costs time).
-            const char* sym = ResolveSelfSymbol(buckets[i].addr);
-            if (sym) wsprintfA(label, "wowopt!%.24s", sym);
+            uintptr_t delta = 0;
+            const char* sym = ResolveSelfSymbol(buckets[i].addr, &delta);
+            if (sym && delta < kSelfSymbolTrusted) wsprintfA(label, "wowopt!%.24s", sym);
+            else if (sym) wsprintfA(label, "wowopt!%.16s+0x%X", sym, (unsigned)delta);
             else     wsprintfA(label, "wowopt+0x%05X", (unsigned)(buckets[i].addr - g_selfBase));
             name = label;
         } else {
