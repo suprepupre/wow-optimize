@@ -641,6 +641,33 @@ struct SelfSymbol { uintptr_t addr; const char* name; };
 static SelfSymbol g_selfSymbols[MAX_SELF_SYMBOLS] = {};
 static int        g_selfSymbolCount = 0;
 
+bool ShareForRange(uintptr_t lo, uintptr_t hi, unsigned long minSamples,
+                   double* outPercent, unsigned long* outSamples,
+                   unsigned long* outWindow) {
+    if (outPercent) *outPercent = 0.0;
+    if (outSamples) *outSamples = 0;
+    if (outWindow)  *outWindow  = 0;
+
+    if (!g_ring || hi <= lo) return false;
+
+    uint64_t total = g_totalSamples;
+    uint64_t n     = (total < RING_SIZE) ? total : RING_SIZE;
+    if (n < (uint64_t)minSamples) return false;
+
+    uint64_t startIdx = (total <= RING_SIZE) ? 0 : (total - RING_SIZE);
+
+    unsigned long hits = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        uintptr_t eip = g_ring[(startIdx + i) % RING_SIZE];
+        if (eip >= lo && eip < hi) hits++;
+    }
+
+    if (outPercent) *outPercent = 100.0 * (double)hits / (double)n;
+    if (outSamples) *outSamples = hits;
+    if (outWindow)  *outWindow  = (unsigned long)n;
+    return true;
+}
+
 void RegisterSelfSymbol(const char* name, const void* addr) {
     if (!name || !addr) return;
 

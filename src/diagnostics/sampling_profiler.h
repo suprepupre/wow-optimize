@@ -65,4 +65,20 @@ void DumpNow();
 // nothing at sample time - resolution happens only when the profile is printed.
 void RegisterSelfSymbol(const char* name, const void* addr);
 
+// What share of the profile sits inside [lo, hi). For a module that changes how
+// often some client code runs and wants to report the cost of having done so,
+// rather than only the cost of its own work.
+//
+// Measured over the same window the periodic dump uses - the last RING_SIZE
+// samples - and never over the lifetime total. Dividing a windowed count by a
+// lifetime total is what understated every percentage this profiler printed
+// before 133c4456 by 5.6x.
+//
+// Returns false when there is nothing to answer with: profiler off, or fewer
+// than `minSamples` samples in the window. A caller that gets false must say it
+// could not see this rather than print a zero.
+bool ShareForRange(uintptr_t lo, uintptr_t hi, unsigned long minSamples,
+                   double* outPercent, unsigned long* outSamples,
+                   unsigned long* outWindow);
+
 } // namespace SamplingProfiler

@@ -1,6 +1,8 @@
 #include "lua_gc_governor.h"
 #include "version.h"
 #include "lua_optimize.h"
+#include "../diagnostics/sampling_profiler.h"
+#include "../core/config.h"
 #include <atomic>
 #include <emmintrin.h>
 
@@ -87,14 +89,46 @@ static inline void StepTimed(void* L, int kb) {
     }
 }
 
+// The client's own collector, which is what the pause setting below actually
+// moves. luaC_traversetable is 0x0085A960 and 432 bytes long, luaC_sweeplist is
+// 0x0085B200 and 143; both from the profiler's symbol table.
+constexpr uintptr_t kTraverseLo = 0x0085A960, kTraverseHi = 0x0085A960 + 432;
+constexpr uintptr_t kSweepLo    = 0x0085B200, kSweepHi    = 0x0085B200 + 143;
+
 void LogStats() {
     if (g_gcStepCount == 0) {
         Log("[GCGovernor] no collection steps requested this session");
+    } else {
+        Log("[GCGovernor] %llu steps requested, %.1f ms total, %.3f ms average",
+            (unsigned long long)g_gcStepCount, g_gcStepMsTotal,
+            g_gcStepMsTotal / (double)g_gcStepCount);
+    }
+
+    // Those numbers are this module's own work and nothing else. Lowering the
+    // pause below the stock 200 makes the client start a new collection cycle
+    // sooner, and all of that work is the client's, in its own functions, where
+    // nothing here counts it. A pause of 100 means a new cycle begins as soon
+    // as the previous one ends.
+    //
+    // So the two functions that do the work are measured directly and printed
+    // beside the steps. This is the number that says whether the trade is
+    // worth making, and until now no log contained it.
+    double tp = 0.0, sp = 0.0;
+    unsigned long ts = 0, ss = 0, win = 0;
+    bool haveT = SamplingProfiler::ShareForRange(kTraverseLo, kTraverseHi, 20000, &tp, &ts, &win);
+    bool haveS = SamplingProfiler::ShareForRange(kSweepLo,    kSweepHi,    20000, &sp, &ss, &win);
+
+    if (!haveT || !haveS) {
+        Log("[GCGovernor]   what this costs the client is not measured: the "
+            "sampling profiler is off or has too few samples yet. Turn on "
+            "SamplingProfiler to see it.");
         return;
     }
-    Log("[GCGovernor] %llu steps requested, %.1f ms total, %.3f ms average",
-        (unsigned long long)g_gcStepCount, g_gcStepMsTotal,
-        g_gcStepMsTotal / (double)g_gcStepCount);
+    Log("[GCGovernor]   the client's own collector, over the last %lu profiler "
+        "samples: luaC_traversetable %.2f%% (%lu), luaC_sweeplist %.2f%% (%lu), "
+        "%.2f%% together. That is the cost of the pause set here, and it is not "
+        "in the step figures above.",
+        win, tp, ts, sp, ss, tp + sp);
 }
 
 void OnFrame(double frameMs) {
@@ -103,6 +137,24 @@ void OnFrame(double frameMs) {
 
     void* L = *(void**)0x00D3F78C;
     if (!L) return;
+
+    // The control case. Stock Lua is 200/200 and no manual stepping at all, so
+    // one session with this on and one with it off is the whole experiment.
+    // Re-applied whenever the state changes rather than once, because a reload
+    // brings a new collector with the stock values already in it and this has
+    // to survive being right by accident.
+    if (Config::g_settings.OptLuaGcStockPace) {
+        static void* s_lastL = nullptr;
+        if (L != s_lastL) {
+            s_lastL = L;
+            g_lua_gc(L, 1, 0);          // LUA_GCRESTART
+            g_lua_gc(L, 6, 200);        // LUA_GCSETPAUSE
+            g_lua_gc(L, 7, 200);        // LUA_GCSETSTEPMUL
+            Log("[GCGovernor] LuaGcStockPace is on: the collector is left at "
+                "200/200 and nothing here steps it. This is the control run.");
+        }
+        return;
+    }
 
     double memKB = GetLuaMemoryKB(L);
     double diffKB = memKB - g_lastMemoryKB;

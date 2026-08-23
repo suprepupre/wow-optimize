@@ -202,6 +202,10 @@ namespace Config {
         // Prefetches the next node of the per-frame object tick walk. New, and
         // it is a cache hint on a hot list, so off until someone has run it.
         bool OptTickListPrefetch = false;
+        // Makes the GC governor leave Lua's collector at its stock 200/200 and
+        // stop stepping it by hand, so the pace it normally sets can be
+        // measured against doing nothing. Off, because on is what ships today.
+        bool OptLuaGcStockPace = false;
         // The lua_type fast path in hot_patch.cpp, which resolves a positive
         // stack index inline instead of calling the engine's index2adr. It was
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc
