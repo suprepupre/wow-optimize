@@ -4534,7 +4534,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     // }
 
     if (g_tableReshapeHits > 0)
-        Log("[Stats] Lua Table Rehash: %ld rounded to pow2", g_tableReshapeHits);
+        Log("[Stats] Lua Table Rehash: %I64u rounded to pow2", g_tableReshapeHits);
     if (g_getstrHits + g_getstrFallbacks > 0) {
         Log("[Stats] luaH_getstr: %I64u hits, %I64u fallbacks (%.1f%%)",
             g_getstrHits, g_getstrFallbacks,
