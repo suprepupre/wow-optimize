@@ -4709,6 +4709,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     AnimCensus::LogStats();
     PredictivePrefetch::LogStats();
     TickListPrefetch::LogStats();
+    D3D9StateManager_LogStats();
     DeviceCallbackGuard::LogStats();
     LayoutRelinkFast::LogStats();
     HorizonOcclusion::LogStats();

@@ -776,15 +776,33 @@ void ShutdownD3D9StateManagerAtProcessExit(void) {
 void ShutdownD3D9StateManager(void) {
     UnpatchDeviceVTable();
 
-    Log("[D3D9State] ===== Final Statistics (%lu frames, counts are lower "
-        "bounds) =====", g_totalFrames);
-    if (g_totalFrames > 0) {
-        for (int i = 0; i < NUM_HOOKS; i++) {
-            Log("[D3D9State]   %-22s: calls=%lu skipped=%lu (%.1f%%)",
-                g_statNames[i], g_statCalls[i], g_statSkipped[i],
-                g_statCalls[i] > 0 ? (double)g_statSkipped[i] * 100.0 / g_statCalls[i] : 0.0);
-        }
+    D3D9StateManager_LogStats();
+}
+
+// These used to print only from ShutdownD3D9StateManager, which this process
+// never reaches: it leaves through TerminateProcess and the exit path skips
+// straight past it. So the call and skip counts of all sixteen device hooks
+// have never appeared in a single log, and a report of a black cursor could not
+// be checked against them - there was no way to ask whether this cache had
+// suppressed anything at all. It is called from the periodic report now.
+void D3D9StateManager_LogStats(void) {
+    if (!g_deviceHooked && g_totalFrames == 0) {
+        Log("[D3D9State] not hooked - nothing measured");
+        return;
     }
+    Log("[D3D9State] %lu frames; per-hook calls and skips, all lower bounds:",
+        g_totalFrames);
+    bool anySkip = false;
+    for (int i = 0; i < NUM_HOOKS; i++) {
+        if (g_statCalls[i] == 0) continue;
+        Log("[D3D9State]   %-22s: calls=%lu skipped=%lu (%.1f%%)",
+            g_statNames[i], g_statCalls[i], g_statSkipped[i],
+            (double)g_statSkipped[i] * 100.0 / (double)g_statCalls[i]);
+        if (g_statSkipped[i]) anySkip = true;
+    }
+    if (!anySkip)
+        Log("[D3D9State]   nothing was suppressed on any hook, so nothing this "
+            "module did can have changed what the client drew");
 }
 
 // DXVK (and some other D3D9-on-Vulkan translation layers) can resize its

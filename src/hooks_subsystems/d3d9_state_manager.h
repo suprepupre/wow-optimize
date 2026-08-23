@@ -16,6 +16,10 @@
 bool InstallD3D9StateManager(void);
 void ShutdownD3D9StateManager(void);
 
+// Per-hook call and skip counts. Printed from the periodic report rather than
+// from shutdown, which this process does not reach.
+void D3D9StateManager_LogStats(void);
+
 // Restores the device vtable on the process-exit teardown path, where blocking
 // on the vtable lock could hang the exiting process. Gives up rather than waits.
 void ShutdownD3D9StateManagerAtProcessExit(void);
