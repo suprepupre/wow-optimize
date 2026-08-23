@@ -270,7 +270,16 @@ uint32_t g_seenThis    = 0;   // distinct models so far this frame
 uint32_t g_seenPrev    = 0;
 
 unsigned long long g_calls = 0, g_skipped = 0, g_firstSight = 0, g_evicted = 0;
-unsigned long long g_hasTailWork = 0;   // declined: the tail animates materials
+unsigned long long g_hasTailWork = 0;   // declined: the tail would have run
+// Split, because the first field measurement came back at 94.2% declined and a
+// single number cannot say which of the two guards to attack. Counted
+// independently rather than short-circuited, so a model with both is in both.
+unsigned long long g_hasMatAnim = 0;    // texture-animation count is non-zero
+unsigned long long g_hasAttach  = 0;    // attachment count or child list is set
+// What the distance rule would have decided for the models the guard turned
+// away. This is the ceiling: it is what solving the guard would be worth, and
+// it costs nothing to measure because nothing acts on it.
+unsigned long long g_declinedButFar = 0;
 uint32_t g_peakModels = 0, g_peakStride = 1;
 
 // Squared distance from the camera to the translation row of the 4x4 at
@@ -334,10 +343,25 @@ extern "C" int __cdecl AnimLod_ShouldSkip(uint32_t model) {
         if (!fpB) { ++g_hasTailWork; return 0; }
         uint32_t data = *(const uint32_t*)(fpB + kO_data);
         if (!data) { ++g_hasTailWork; return 0; }
-        if (*(const uint32_t*)(data + kD_matAnims) != 0 ||
-            *(const uint32_t*)(data + kD_attachCnt) != 0 ||
-            *(const uint32_t*)(model + kM_childList) != 0) {
+        bool matAnim = *(const uint32_t*)(data + kD_matAnims) != 0;
+        bool attach   = *(const uint32_t*)(data + kD_attachCnt) != 0 ||
+                        *(const uint32_t*)(model + kM_childList) != 0;
+        if (matAnim || attach) {
             ++g_hasTailWork;
+            if (matAnim) ++g_hasMatAnim;
+            if (attach)  ++g_hasAttach;
+
+            // Measured, not acted on: would the distance rule have thrown this
+            // model away if the tail were not in the way? Without this the log
+            // says the feature skips nothing and cannot say whether that is
+            // because the guard is in the way or because there was nothing to
+            // skip in the first place.
+            if (g_distState == kArmed && g_camValid && g_seenPrev >= kDistBudget) {
+                float dSq;
+                if (CameraDistSq(model, g_distOffset, dSq) &&
+                    StrideForDistSq(dSq) > 1)
+                    ++g_declinedButFar;
+            }
             return 0;
         }
 
@@ -614,8 +638,13 @@ void LogStats() {
         g_firstSight, g_peakModels, g_peakStride, g_stride,
         g_dead ? " - DISABLED" : "");
     Log("[AnimLod]   %llu calls (%.1f%%) declined because the tail would have "
-        "animated materials or attachments", g_hasTailWork,
-        g_calls ? (100.0 * (double)g_hasTailWork / (double)g_calls) : 0.0);
+        "run: %llu have texture animation, %llu have attachments (a model with "
+        "both is in both counts)", g_hasTailWork,
+        g_calls ? (100.0 * (double)g_hasTailWork / (double)g_calls) : 0.0,
+        g_hasMatAnim, g_hasAttach);
+    Log("[AnimLod]   of those, %llu were far enough that the distance rule would "
+        "have thrown them away. That is what removing the guard would be worth, "
+        "against the %llu skips actually made.", g_declinedButFar, g_skipped);
 
     // Three states, and the fourth thing that can happen to it.
     if (g_camFrames == 0) {
