@@ -141,6 +141,7 @@ constexpr unsigned kZ_data   = 12;
 // Proto, from luaF_newproto at 0x0085CF40 (80 bytes, every field zeroed) and
 // open_func at 0x0085F410, which writes source at +36 and maxstacksize at +79.
 constexpr unsigned kP_code            = 16;
+constexpr unsigned kP_lineinfo        = 24;
 constexpr unsigned kP_source          = 36;
 constexpr unsigned kP_sizek           = 44;
 constexpr unsigned kP_sizecode        = 48;
@@ -213,7 +214,42 @@ struct Entry {
     uint32_t      srcLen;
     uint32_t      nameLen;
     unsigned long hits;
+    // Read off the Proto when it was stored, checked again before it is handed
+    // back. If the block was freed and the client's Lua memory pool handed it
+    // to something else, these stop matching. See FingerprintStillHolds.
+    uint32_t      fpCode;
+    uint32_t      fpLineinfo;
+    uint32_t      fpSizecode;
 };
+
+// A recycled Proto is what the crash on 2026-08-22 was: the client faulted in
+// its own error formatter at sub_84FDF0, reading Proto->lineinfo[pc] with
+// lineinfo holding 4. Four is not a pointer, and the client's only guard there
+// is a test against zero, so a small non-zero value walks straight into a read
+// of address 4.
+//
+// The root cause is fixed elsewhere - the cache now hears about every lua_State
+// swap instead of guessing from l_G. This is the second line: three words read
+// when the Proto was stored and compared before it is used. It cannot prove a
+// Proto is alive, and a block recycled into another Proto with the same shape
+// would still pass. It does catch the case that actually happened, where the
+// pool wrote its own bookkeeping over the fields.
+bool FingerprintStillHolds(const Entry& e) {
+    __try {
+        uint32_t code     = RD32(e.proto, kP_code);
+        uint32_t lineinfo = RD32(e.proto, kP_lineinfo);
+        uint32_t sizecode = RD32(e.proto, kP_sizecode);
+        if (code != e.fpCode || lineinfo != e.fpLineinfo || sizecode != e.fpSizecode)
+            return false;
+        // Whatever they are, code has to be a real pointer and lineinfo has to
+        // be one or nothing. This is what the client itself fails to check.
+        if (code < 0x10000) return false;
+        if (lineinfo != 0 && lineinfo < 0x10000) return false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 std::unordered_map<uint64_t, Entry> g_cache;
 size_t g_blobBytes = 0;
@@ -239,6 +275,7 @@ bool g_dead      = false;
 unsigned long g_seen = 0, g_hits = 0, g_stored = 0;
 unsigned long g_tooBig = 0, g_notBuffer = 0, g_capped = 0, g_anchorFailed = 0;
 unsigned long g_verified = 0, g_firstSighting = 0, g_flushes = 0, g_onSight = 0;
+unsigned long g_stale = 0;
 unsigned long long g_bytesSaved = 0, g_bytesTooBig = 0;
 
 // What luaY_parser handed back on a miss, for the luaL_loadbuffer hook one
@@ -276,6 +313,12 @@ void FlushAll() {
     g_seenOnce.clear();
     g_blobBytes = 0;
 }
+
+// Set by OnLuaStateSwapped, acted on inside the parser hook where the cache is
+// actually touched. A flush from arbitrary code would be a container mutation
+// at a moment this module knows nothing about.
+bool g_swapPending = false;
+unsigned long g_swapFlushes = 0;
 
 void Retire(const char* why) {
     if (g_dead) return;
@@ -338,11 +381,17 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
     }
 
     // A new global state means every Proto from the old one is gone with it.
+    // Two independent reasons to drop everything, and the second is the one
+    // that matters. l_G changing proves a new state; l_G staying the same
+    // proves nothing, because the client's Lua memory pool reuses the address.
     void* lG = RDP(L, kL_lG);
-    if (lG != g_globalState) {
+    if (g_swapPending) {
+        g_swapPending = false;
+        if (g_globalState) { FlushAll(); g_flushes++; g_swapFlushes++; }
+    } else if (lG != g_globalState) {
         if (g_globalState) { FlushAll(); g_flushes++; }
-        g_globalState = lG;
     }
+    g_globalState = lG;
 
     uint64_t key = KeyOf(src, srcLen, name, nameLen);
     std::unordered_map<uint64_t, Entry>::iterator it = g_cache.find(key);
@@ -351,6 +400,17 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
         if (e.srcLen == srcLen && e.nameLen == nameLen &&
             memcmp(e.blob, src, srcLen) == 0 &&
             memcmp(e.blob + srcLen + 1, name, nameLen) == 0) {
+
+            if (!FingerprintStillHolds(e)) {
+                // Do not hand it back and do not trust anything else stored
+                // under the same state either.
+                g_stale++;
+                FlushAll();
+                Log("[ProtoCache] A kept Proto no longer looks like the one that "
+                    "was stored (\"%s\"). Everything held has been dropped; the "
+                    "client compiles this one.", name);
+                return nullptr;
+            }
 
             it->second.hits++;
             g_hits++;
@@ -494,6 +554,9 @@ int __cdecl Hooked_luaL_loadbuffer(void* L, const char* buf, size_t sz, const ch
                 e.srcLen  = (uint32_t)g_pending.srcLen;
                 e.nameLen = (uint32_t)g_pending.nameLen;
                 e.hits    = 0;
+                e.fpCode     = RD32(g_pending.proto, kP_code);
+                e.fpLineinfo = RD32(g_pending.proto, kP_lineinfo);
+                e.fpSizecode = RD32(g_pending.proto, kP_sizecode);
                 g_cache[g_pending.key] = e;
                 g_blobBytes += blobLen;
                 g_stored++;
@@ -571,9 +634,21 @@ void LogStats() {
 
     Log("[ProtoCache]   %lu reuses verified against a fresh compile; turned away: "
         "%lu over the %u KB size cap (%llu KB), %lu after the cache filled, %lu "
-        "not a flat buffer, %lu could not be anchored",
+        "not a flat buffer, %lu could not be anchored (%lu of the resets were "
+        "reported by the state-swap watcher rather than noticed here)",
         g_verified, g_tooBig, (unsigned)(kMaxChunkBytes / 1024),
-        g_bytesTooBig / 1024, g_capped, g_notBuffer, g_anchorFailed);
+        g_bytesTooBig / 1024, g_capped, g_notBuffer, g_anchorFailed,
+        g_swapFlushes);
+    if (g_stale)
+        Log("[ProtoCache]   %lu times a kept Proto had stopped looking like "
+            "itself and the cache was emptied. Anything above zero here means a "
+            "state swap went unseen.", g_stale);
+}
+
+void OnLuaStateSwapped() {
+    // Only a flag. The flush happens inside the parser hook, on the thread that
+    // owns the containers, before the next lookup can reach a stale entry.
+    g_swapPending = true;
 }
 
 } // namespace LuaProtoCache

@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "lua_optimize.h"
+#include "lua_proto_cache.h"
 // config.h is deliberately NOT included here: this file declares a file-scope
 // object called Config, and a variable cannot share a name with a namespace in
 // the same scope. These two accessors are defined in config.cpp instead.
@@ -1834,6 +1835,11 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
             g_pendingLuaStateFrames = 1;
             CrashDumper::Trace("LUA state swap (UI reload) - new VM settling");
             Log("[LuaOpt] lua_State changed (UI reload) - waiting for new VM to settle");
+
+            // This detector sees every swap; the proto cache's own l_G
+            // comparison does not, because the client's Lua memory pool hands
+            // the new global state the old one's address. Tell it here.
+            LuaProtoCache::OnLuaStateSwapped();
 
             // CRITICAL FIX: Set swapping flag BEFORE cache invalidation so inline
             // hooks (GetStrInline, RawGetIInline, LuaRawGet) bail out to original
