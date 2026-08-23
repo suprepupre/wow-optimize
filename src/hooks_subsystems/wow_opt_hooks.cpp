@@ -20,25 +20,28 @@ extern "C" void Log(const char* fmt, ...);
 // Each hook directly intercepts a hot wow.exe function and optimizes it.
 // ================================================================
 
-static volatile LONG g_w1Hits = 0, g_w1Calls = 0;
-static volatile LONG g_w2Hits = 0, g_w2Calls = 0;
-static volatile LONG g_w3Skipped = 0, g_w3Calls = 0;
-static volatile LONG g_w4Fast = 0, g_w4Calls = 0;
-static volatile LONG g_w5Cached = 0, g_w5Calls = 0;
-static volatile LONG g_w6Prefetched = 0;
-static volatile LONG g_w8Fast = 0, g_w8Calls = 0;
-static volatile LONG g_w9Skipped = 0, g_w9Calls = 0;
-static volatile LONG g_w10Cached = 0, g_w10Calls = 0;
-static volatile LONG g_w11Fast = 0, g_w11Calls = 0;
-static volatile LONG g_w12Batched = 0, g_w12Calls = 0;
-static volatile LONG g_w13Deduped = 0, g_w13Calls = 0;
-static volatile LONG g_w14Fast = 0, g_w14Calls = 0;
-static volatile LONG g_w15Cached = 0, g_w15Calls = 0;
-static volatile LONG g_w16Optimized = 0, g_w16Calls = 0;
-static volatile LONG g_w17Fast = 0, g_w17Calls = 0;
-static volatile LONG g_w18Skipped = 0, g_w18Calls = 0;
-static volatile LONG g_w19Cached = 0, g_w19Calls = 0;
-static volatile LONG g_w20Fast = 0, g_w20Calls = 0;
+// Plain, not Interlocked, for the same reason as in wow_perf_hooks.cpp: a
+// locked read-modify-write per call on every hooked client function, for
+// statistics that nothing reads for control flow.
+static long g_w1Hits = 0, g_w1Calls = 0;
+static long g_w2Hits = 0, g_w2Calls = 0;
+static long g_w3Skipped = 0, g_w3Calls = 0;
+static long g_w4Fast = 0, g_w4Calls = 0;
+static long g_w5Cached = 0, g_w5Calls = 0;
+static long g_w6Prefetched = 0;
+static long g_w8Fast = 0, g_w8Calls = 0;
+static long g_w9Skipped = 0, g_w9Calls = 0;
+static long g_w10Cached = 0, g_w10Calls = 0;
+static long g_w11Fast = 0, g_w11Calls = 0;
+static long g_w12Batched = 0, g_w12Calls = 0;
+static long g_w13Deduped = 0, g_w13Calls = 0;
+static long g_w14Fast = 0, g_w14Calls = 0;
+static long g_w15Cached = 0, g_w15Calls = 0;
+static long g_w16Optimized = 0, g_w16Calls = 0;
+static long g_w17Fast = 0, g_w17Calls = 0;
+static long g_w18Skipped = 0, g_w18Calls = 0;
+static long g_w19Cached = 0, g_w19Calls = 0;
+static long g_w20Fast = 0, g_w20Calls = 0;
 
 // ================================================================
 // W1: sub_4CFBB0 - memcpy wrapper with prefetch (called by sub_4CFD20)
@@ -48,11 +51,11 @@ typedef void (__cdecl *Memcpy680_fn)(const void*, size_t, void*);
 static Memcpy680_fn orig_Memcpy680 = nullptr;
 
 static void __cdecl Hooked_Memcpy680(const void* src, size_t len, void* dst) {
-    _InterlockedIncrement(&g_w1Calls);
+    ++g_w1Calls;
     if (src && dst && len == 680) {
         _mm_prefetch((const char*)src, _MM_HINT_T0);
         _mm_prefetch((const char*)src + 64, _MM_HINT_T0);
-        _InterlockedIncrement(&g_w1Hits);
+        ++g_w1Hits;
     }
     orig_Memcpy680(src, len, dst);
 }
@@ -69,7 +72,7 @@ volatile void* g_w4LastSrc = nullptr;
 volatile void* g_w5LastPtr = nullptr;
 
 static void __stdcall Hooked_ObjDestroy(void* obj) {
-    _InterlockedIncrement(&g_w2Calls);
+    ++g_w2Calls;
     if (obj) {
         // Invalidate recycled file handles from W4 and W5 caches
         if (obj == g_w4LastSrc) {
@@ -81,7 +84,7 @@ static void __stdcall Hooked_ObjDestroy(void* obj) {
         __try {
             // Prefetch the object's vtable and first cache line
             _mm_prefetch((const char*)obj, _MM_HINT_NTA);
-            _InterlockedIncrement(&g_w2Hits);
+            ++g_w2Hits;
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
     orig_ObjDestroy(obj);
@@ -96,7 +99,7 @@ typedef void (__stdcall *ErrorHandler_fn)(unsigned int);
 static ErrorHandler_fn orig_ErrorHandler = nullptr;
 
 static void __stdcall Hooked_ErrorHandler(unsigned int code) {
-    _InterlockedIncrement(&g_w3Calls);
+    ++g_w3Calls;
     // W3: Always call original. sub_771870 is SMemAssert used by WoW as a
     // null-guard assert (e.g. sub_4B6CB0 calls it with code 87=0x57 when
     // a1==NULL, intending to stop execution). Suppressing ANY code allows
@@ -113,12 +116,12 @@ static FileReadDispatch_fn orig_FileReadDispatch = nullptr;
 volatile int g_w4LastResult = 0;
 
 static int __stdcall Hooked_FileReadDispatch(void* src, void* dst, int a3, int Block) {
-    _InterlockedIncrement(&g_w4Calls);
+    ++g_w4Calls;
     // File read dispatch caching is unsafe: it skips writing actual data to the
     // destination buffer 'dst' on cache hits, and sequential reads from the same
     // stream expect different file offsets. Always call original.
     int result = orig_FileReadDispatch(src, dst, a3, Block);
-    if (result) _InterlockedIncrement(&g_w4Fast);
+    if (result) ++g_w4Fast;
     return result;
 }
 
@@ -131,12 +134,12 @@ static DataSizeCalc_fn orig_DataSizeCalc = nullptr;
 volatile int g_w5LastSize = 0;
 
 static int __stdcall Hooked_DataSizeCalc(void* ptr, void* out) {
-    _InterlockedIncrement(&g_w5Calls);
+    ++g_w5Calls;
     // W5: Cache-by-pointer is unsafe; same ptr can be reused after object
     // reinit/realloc, causing stale size to be written to 'out'. Always
     // call original so the output buffer is always correctly populated.
     int result = orig_DataSizeCalc(ptr, out);
-    if (result) _InterlockedIncrement(&g_w5Cached);
+    if (result) ++g_w5Cached;
     return result;
 }
 
@@ -153,7 +156,7 @@ static void __cdecl Hooked_BlockCopy(void* src, void* dst, int srcLen, void* a4,
         for (int off = 0; off < srcLen && off < 4096; off += 64) {
             _mm_prefetch((const char*)src + off, _MM_HINT_T0);
         }
-        _InterlockedIncrement(&g_w6Prefetched);
+        ++g_w6Prefetched;
     }
     orig_BlockCopy(src, dst, srcLen, a4, a5, a6);
 }
@@ -199,10 +202,10 @@ typedef int (__cdecl *AsyncReadDestroy_fn)(int);
 static AsyncReadDestroy_fn orig_AsyncReadDestroy = nullptr;
 
 static int __cdecl Hooked_AsyncReadDestroy(int handle) {
-    _InterlockedIncrement(&g_w8Calls);
+    ++g_w8Calls;
     // Fast null check - avoid entering cleanup for empty handles
     if (!handle) {
-        _InterlockedIncrement(&g_w8Fast);
+        ++g_w8Fast;
         return 0;
     }
     return orig_AsyncReadDestroy(handle);
@@ -218,12 +221,12 @@ static volatile DWORD g_w9LastMsgTick = 0;
 static volatile int g_w9LastMsg = 0;
 
 static int __cdecl Hooked_SysMsgHandler(int msg) {
-    _InterlockedIncrement(&g_w9Calls);
+    ++g_w9Calls;
     // W9: Deduplication is unsafe. World-enter, zone-change, and realm
     // messages must be processed every time they arrive; suppressing
     // duplicates within 100ms silently drops critical state transitions.
     int result = orig_SysMsgHandler(msg);
-    if (result) _InterlockedIncrement(&g_w9Skipped);
+    if (result) ++g_w9Skipped;
     return result;
 }
 
@@ -237,12 +240,12 @@ static volatile __int64 g_w10CachedContext = 0;
 static volatile DWORD g_w10CacheTick = 0;
 
 static __int64 __cdecl Hooked_ContextGetter() {
-    _InterlockedIncrement(&g_w10Calls);
+    ++g_w10Calls;
     // W10: 500ms cache is far too long during world loading — the game
     // context pointer changes rapidly across UI reloads and zone changes.
     // Returning a stale pointer causes callbacks into freed/replaced objects.
     __int64 result = orig_ContextGetter();
-    if (result) _InterlockedIncrement(&g_w10Cached);
+    if (result) ++g_w10Cached;
     return result;
 }
 
@@ -256,11 +259,11 @@ static volatile int g_w11LastItem = 0;
 static volatile int g_w11LastName = 0;
 
 static int __cdecl Hooked_ItemNameResolve(int itemPtr) {
-    _InterlockedIncrement(&g_w11Calls);
+    ++g_w11Calls;
     // W11: Item pointer reuse after allocation returns a stale item name.
     // The same pointer address can refer to a different item after realloc.
     int result = orig_ItemNameResolve(itemPtr);
-    if (result) _InterlockedIncrement(&g_w11Fast);
+    if (result) ++g_w11Fast;
     return result;
 }
 
@@ -270,16 +273,16 @@ static int __cdecl Hooked_ItemNameResolve(int itemPtr) {
 // ================================================================
 typedef void* (__stdcall *AllocWrapper_fn)(int, int);
 static AllocWrapper_fn orig_AllocWrapper = nullptr;
-static volatile LONG g_w12BatchCount = 0;
+static long g_w12BatchCount = 0;
 
 static void* __stdcall Hooked_AllocWrapper(int size, int flags) {
-    _InterlockedIncrement(&g_w12Calls);
+    ++g_w12Calls;
     // sub_47C240 is a factory constructor (Status.cpp) that calls sub_47C110
     // to initialize headers. We MUST always call the original — bypassing it
     // returns uninitialized memory that crashes in combat.
     // The underlying SMemAlloc (sub_76E540) already uses our optimized allocator.
     void* result = orig_AllocWrapper(size, flags);
-    if (result) _InterlockedIncrement(&g_w12Batched);
+    if (result) ++g_w12Batched;
     return result;
 }
 
@@ -291,13 +294,13 @@ typedef int (__thiscall *BufferValid_fn)(void*);
 static BufferValid_fn orig_BufferValid = nullptr;
 
 static int __fastcall Hooked_BufferValid(void* This, void* unused) {
-    _InterlockedIncrement(&g_w13Calls);
+    ++g_w13Calls;
     if (This) {
         __try {
             int flags = *(int*)((char*)This + 12);
             // Common case: flags has bit 0 clear AND flags != 0 → valid
             if ((flags & 1) == 0 && flags != 0) {
-                _InterlockedIncrement(&g_w13Deduped);
+                ++g_w13Deduped;
                 return 1; // Valid
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -316,12 +319,12 @@ static volatile float g_w14Cache[16] = {};
 static volatile uintptr_t g_w14Keys[16] = {};
 
 static int __fastcall Hooked_VolumeLookup(void* self, void* dummyEDX, float volume) {
-    _InterlockedIncrement(&g_w14Calls);
+    ++g_w14Calls;
     // W14: Cache hit returned '(int)self' instead of the actual return value
     // from orig_VolumeLookup, discarding the real result and corrupting
     // the sound volume state. Always call original.
     int result = orig_VolumeLookup(self, dummyEDX, volume);
-    if (result) _InterlockedIncrement(&g_w14Fast);
+    if (result) ++g_w14Fast;
     return result;
 }
 
@@ -340,11 +343,11 @@ static volatile float g_w16Cache[16] = {};
 static volatile uintptr_t g_w16Keys[16] = {};
 
 static int __fastcall Hooked_SoundMix(void* self, void* dummyEDX, float a2) {
-    _InterlockedIncrement(&g_w16Calls);
+    ++g_w16Calls;
     // W16: Same bug as W14 — returned '(int)self' on cache hit instead of
     // the actual result, silently discarding the mixer's return value.
     int result = orig_SoundMix(self, dummyEDX, a2);
-    if (result) _InterlockedIncrement(&g_w16Optimized);
+    if (result) ++g_w16Optimized;
     return result;
 }
 
@@ -356,8 +359,8 @@ typedef int (__fastcall *SoundStop_fn)(void*, void*, float, float);
 static SoundStop_fn orig_SoundStop = nullptr;
 
 static int __fastcall Hooked_SoundStop(void* self, void* dummyEDX, float f1, float f2) {
-    _InterlockedIncrement(&g_w17Calls);
-    _InterlockedIncrement(&g_w17Fast);
+    ++g_w17Calls;
+    ++g_w17Fast;
     return orig_SoundStop(self, dummyEDX, f1, f2);
 }
 
@@ -370,12 +373,12 @@ static AmbientMgr_fn orig_AmbientMgr = nullptr;
 static volatile DWORD g_w18LastAmbientTick = 0;
 
 static int __fastcall Hooked_AmbientMgr(void* self, void* dummyEDX, void* a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10) {
-    _InterlockedIncrement(&g_w18Calls);
+    ++g_w18Calls;
     // W18: Returning fake success (1) on throttle prevents the ambient manager
     // from updating internal state on zone transitions and interior/exterior
     // toggles, causing music/ambient sounds to break. Always call original.
     int result = orig_AmbientMgr(self, dummyEDX, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    if (result) _InterlockedIncrement(&g_w18Skipped);
+    if (result) ++g_w18Skipped;
     return result;
 }
 
@@ -391,12 +394,12 @@ static volatile int g_w19LastZone = 0;
 static volatile int g_w19LastTrack = 0;
 
 static int __cdecl Hooked_MusicSelect(int a1, int a2, void* a3, void* a4, int a5, int a6, int a7, int a8, int a9) {
-    _InterlockedIncrement(&g_w19Calls);
+    ++g_w19Calls;
     // W19: Cache keyed only on (a1, a2/zone) ignores args a3-a9 which
     // include combat/PvP state flags. Combat music won't trigger if zone
     // stays the same. Always call original.
     int result = orig_MusicSelect(a1, a2, a3, a4, a5, a6, a7, a8, a9);
-    if (result) _InterlockedIncrement(&g_w19Cached);
+    if (result) ++g_w19Cached;
     return result;
 }
 
@@ -457,6 +460,8 @@ namespace WowOptHooks {
     }
 
     void DumpStats() {
+        Log("[WowOpt] hits/calls below are plain counters on hooked client "
+            "functions and are lower bounds.");
         Log("[WowOpt] Memcpy680: %d/%d | ObjDestroy: %d/%d | ErrSkip: %d/%d | FileRead: %d/%d",
             g_w1Hits, g_w1Calls, g_w2Hits, g_w2Calls, g_w3Skipped, g_w3Calls, g_w4Fast, g_w4Calls);
         Log("[WowOpt] DataSize: %d/%d | BlkCopyPf: %d | AsyncDest: %d/%d",

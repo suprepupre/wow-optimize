@@ -21,26 +21,32 @@ extern "C" void Log(const char* fmt, ...);
 // These modify wow.exe code paths at runtime via MinHook.
 // ================================================================
 
-static volatile LONG g_p1Hits = 0, g_p1Calls = 0;
-static volatile LONG g_p2Hits = 0, g_p2Calls = 0;
-static volatile LONG g_p3Fast = 0, g_p3Calls = 0;
-static volatile LONG g_p4Cached = 0, g_p4Calls = 0;
-static volatile LONG g_p5Fast = 0, g_p5Calls = 0;
-static volatile LONG g_p6Prefetched = 0, g_p6Calls = 0;
-static volatile LONG g_p7Skipped = 0, g_p7Calls = 0;
-static volatile LONG g_p8Batched = 0, g_p8Calls = 0;
-static volatile LONG g_p9Inline = 0, g_p9Calls = 0;
-static volatile LONG g_p10Cached = 0, g_p10Calls = 0;
-static volatile LONG g_p11Fast = 0, g_p11Calls = 0;
-static volatile LONG g_p12Coalesced = 0, g_p12Calls = 0;
-static volatile LONG g_p13Optimized = 0, g_p13Calls = 0;
-static volatile LONG g_p14Cached = 0, g_p14Calls = 0;
-static volatile LONG g_p15Fast = 0, g_p15Calls = 0;
-static volatile LONG g_p16Deduped = 0, g_p16Calls = 0;
-static volatile LONG g_p17Prefetched = 0, g_p17Calls = 0;
-static volatile LONG g_p18Inline = 0, g_p18Calls = 0;
-static volatile LONG g_p19Cached = 0, g_p19Calls = 0;
-static volatile LONG g_p20Fast = 0, g_p20Calls = 0;
+// Plain, not Interlocked. Each of these sat at the top of a hook on a client
+// function and cost a locked read-modify-write on every call, twice per call
+// where a hit counter follows a call counter. They are statistics written by
+// one thread; a lost increment costs one count, and the report says the numbers
+// are lower bounds. None of them is read for control flow, which was checked
+// before changing them.
+static long g_p1Hits = 0, g_p1Calls = 0;
+static long g_p2Hits = 0, g_p2Calls = 0;
+static long g_p3Fast = 0, g_p3Calls = 0;
+static long g_p4Cached = 0, g_p4Calls = 0;
+static long g_p5Fast = 0, g_p5Calls = 0;
+static long g_p6Prefetched = 0, g_p6Calls = 0;
+static long g_p7Skipped = 0, g_p7Calls = 0;
+static long g_p8Batched = 0, g_p8Calls = 0;
+static long g_p9Inline = 0, g_p9Calls = 0;
+static long g_p10Cached = 0, g_p10Calls = 0;
+static long g_p11Fast = 0, g_p11Calls = 0;
+static long g_p12Coalesced = 0, g_p12Calls = 0;
+static long g_p13Optimized = 0, g_p13Calls = 0;
+static long g_p14Cached = 0, g_p14Calls = 0;
+static long g_p15Fast = 0, g_p15Calls = 0;
+static long g_p16Deduped = 0, g_p16Calls = 0;
+static long g_p17Prefetched = 0, g_p17Calls = 0;
+static long g_p18Inline = 0, g_p18Calls = 0;
+static long g_p19Cached = 0, g_p19Calls = 0;
+static long g_p20Fast = 0, g_p20Calls = 0;
 
 // ================================================================
 // P1: sub_84E350 - lua_pushstring (1008 xrefs!)
@@ -55,11 +61,11 @@ struct ShortStrEntry { uint32_t hash; const char* ptr; int result; };
 static ShortStrEntry g_shortStrCache[PUSHSTR_SHORT_CACHE] = {};
 
 static int __cdecl Hooked_LuaPushString(int L, const char* s) {
-    _InterlockedIncrement(&g_p1Calls);
+    ++g_p1Calls;
     if (s && L) {
         // Fast path: check first char for common nil/empty cases
         if (s[0] == '\0') {
-            _InterlockedIncrement(&g_p1Hits);
+            ++g_p1Hits;
             // Push empty string directly - avoid strlen call
             return orig_LuaPushString(L, s);
         }
@@ -82,7 +88,7 @@ static int __cdecl Hooked_LuaPushString(int L, const char* s) {
         if (n >= 2 && n < 32) {
             uint32_t idx = h & (PUSHSTR_SHORT_CACHE - 1);
             if (g_shortStrCache[idx].hash == h && g_shortStrCache[idx].ptr == s) {
-                _InterlockedIncrement(&g_p1Hits);
+                ++g_p1Hits;
             }
         }
     }
@@ -98,14 +104,14 @@ typedef int (__stdcall *FreeWrapper_fn)(void*, int, int, int);
 static FreeWrapper_fn orig_FreeWrapper = nullptr;
 
 static int __stdcall Hooked_FreeWrapper(void* block, int a2, int a3, int a4) {
-    _InterlockedIncrement(&g_p2Calls);
+    ++g_p2Calls;
     if (block) {
         // Skip _msize() call - mimalloc doesn't need it.
         // Original calls _msize(block) then free(block).
         // _msize is useless when using mimalloc - just free directly.
         if (mi_is_in_heap_region(block)) {
             mi_free(block);
-            _InterlockedIncrement(&g_p2Hits);
+            ++g_p2Hits;
             return 1;
         }
     }
@@ -121,7 +127,7 @@ typedef void* (__stdcall *MallocWrapper_fn)(int size, int a2, DWORD a3, char fla
 static MallocWrapper_fn orig_MallocWrapper = nullptr;
 
 static void* __stdcall Hooked_MallocWrapper(int size, int a2, DWORD a3, char flags) {
-    _InterlockedIncrement(&g_p3Calls);
+    ++g_p3Calls;
     if (size > 0) {
         // Align to 8 bytes (same as original) but use mimalloc directly
         int aligned = (size + 7) & ~7;
@@ -132,7 +138,7 @@ static void* __stdcall Hooked_MallocWrapper(int size, int a2, DWORD a3, char fla
             ptr = mi_malloc(aligned);
         }
         if (ptr) {
-            _InterlockedIncrement(&g_p3Fast);
+            ++g_p3Fast;
             return ptr;
         }
     }
@@ -152,11 +158,11 @@ thread_local unsigned char g_p4CachedData[680] = {};
 thread_local LONG g_p4CacheValid = 0;
 
 static int __fastcall Hooked_DsLookup(void* This, void* unused, int index, void* outBuf) {
-    _InterlockedIncrement(&g_p4Calls);
+    ++g_p4Calls;
     // Check cache before calling original
     if (This == (void*)g_p4LastThis && index == g_p4LastIndex && g_p4CacheValid && outBuf) {
         memcpy(outBuf, g_p4CachedData, 680);
-        _InterlockedIncrement(&g_p4Cached);
+        ++g_p4Cached;
         return 1;
     }
     int result = orig_DsLookup(This, index, outBuf);
@@ -180,7 +186,7 @@ typedef int (__cdecl *LuaType_fn)(int L, int idx);
 static LuaType_fn orig_LuaType = nullptr;
 
 static int __cdecl Hooked_LuaType(int L, int idx) {
-    _InterlockedIncrement(&g_p5Calls);
+    ++g_p5Calls;
     // Fast path: positive index, direct TValue access
     if (idx > 0 && L > 0x10000) {
         __try {
@@ -188,7 +194,7 @@ static int __cdecl Hooked_LuaType(int L, int idx) {
             int* top = *(int**)(L + 0x0C);  // L->top
             int* slot = base + (idx - 1) * 4; // TValue = 4 DWORDs
             if (slot >= base && slot < top) {
-                _InterlockedIncrement(&g_p5Fast);
+                ++g_p5Fast;
                 return slot[2]; // type tag at offset +8
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -205,7 +211,7 @@ typedef int (__stdcall *ObjDestroyChain_fn)(void* Block);
 static ObjDestroyChain_fn orig_ObjDestroyChain = nullptr;
 
 static int __stdcall Hooked_ObjDestroyChain(void* Block) {
-    _InterlockedIncrement(&g_p6Calls);
+    ++g_p6Calls;
     if (Block) {
         __try {
             // Prefetch all sub-objects that will be destroyed
@@ -217,7 +223,7 @@ static int __stdcall Hooked_ObjDestroyChain(void* Block) {
             if (sub3) _mm_prefetch((char*)sub3, _MM_HINT_NTA);
             if (sub4) _mm_prefetch((char*)sub4, _MM_HINT_NTA);
             if (sub6) _mm_prefetch((char*)sub6, _MM_HINT_NTA);
-            _InterlockedIncrement(&g_p6Prefetched);
+            ++g_p6Prefetched;
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
     return orig_ObjDestroyChain(Block);
@@ -234,13 +240,13 @@ static volatile DWORD g_p7LastSoundTick = 0;
 static volatile int g_p7LastSoundState = 0;
 
 static int __cdecl Hooked_SoundPlayDispatch(int a1, int a2, int a3, void* a4, int a5, void* a6, int a7, int a8) {
-    _InterlockedIncrement(&g_p7Calls);
+    ++g_p7Calls;
     // Quick reject: if sound disabled globally, skip entire 1.8KB function
     // Check Sound_EnableAllSound CVAR at known address
     __try {
         int* soundEnabled = (int*)0x00C5DEA0; // byte_C5DEA0 expanded
         if (soundEnabled && *soundEnabled == 0) {
-            _InterlockedIncrement(&g_p7Skipped);
+            ++g_p7Skipped;
             return 0;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -255,11 +261,11 @@ typedef void (__cdecl *MemStormDelete_fn)(void*);
 static MemStormDelete_fn orig_MemStormDelete = nullptr;
 
 static void __cdecl Hooked_MemStormDelete(void* block) {
-    _InterlockedIncrement(&g_p8Calls);
+    ++g_p8Calls;
     if (block) {
         // Prefetch next cache line before freeing
         _mm_prefetch((char*)block + 64, _MM_HINT_NTA);
-        _InterlockedIncrement(&g_p8Batched);
+        ++g_p8Batched;
     }
     orig_MemStormDelete(block);
 }
@@ -272,9 +278,9 @@ typedef int (__cdecl *MemStormBlockFree_fn)(void*);
 static MemStormBlockFree_fn orig_MemStormBlockFree = nullptr;
 
 static int __cdecl Hooked_MemStormBlockFree(void* block) {
-    _InterlockedIncrement(&g_p9Calls);
+    ++g_p9Calls;
     if (!block) {
-        _InterlockedIncrement(&g_p9Inline);
+        ++g_p9Inline;
         return 0; // Skip entirely for null
     }
     // Prefetch block header before free
@@ -291,12 +297,12 @@ static VirtualDispatch_fn orig_VirtualDispatch = nullptr;
 static volatile void* g_p10CachedVtable = nullptr;
 
 static char __cdecl Hooked_VirtualDispatch(int a1) {
-    _InterlockedIncrement(&g_p10Calls);
+    ++g_p10Calls;
     // Cache the global vtable base pointer
     __try {
         void** basePtr = *(void***)0x00AB90AC;
         if (basePtr && basePtr == (void*)g_p10CachedVtable) {
-            _InterlockedIncrement(&g_p10Cached);
+            ++g_p10Cached;
         } else if (basePtr) {
             g_p10CachedVtable = basePtr;
         }
@@ -312,10 +318,10 @@ typedef void (__cdecl *DelCSWrapper_fn)(LPCRITICAL_SECTION);
 static DelCSWrapper_fn orig_DelCSWrapper = nullptr;
 
 static void __cdecl Hooked_DelCSWrapper(LPCRITICAL_SECTION cs) {
-    _InterlockedIncrement(&g_p11Calls);
+    ++g_p11Calls;
     if (cs) {
         DeleteCriticalSection(cs);
-        _InterlockedIncrement(&g_p11Fast);
+        ++g_p11Fast;
         return; // Skip the DebugInfo=nullptr write
     }
     orig_DelCSWrapper(cs);
@@ -332,7 +338,7 @@ thread_local int g_p12VolKeys[16] = {};
 thread_local DWORD g_p12VolTick = 0;
 
 static float __cdecl Hooked_SoundVolumeLookup(int channel) {
-    _InterlockedIncrement(&g_p12Calls);
+    ++g_p12Calls;
     DWORD now = GetTickCount();
     // Invalidate cache every 1 second (volume can change via UI)
     if ((now - g_p12VolTick) > 1000) {
@@ -341,7 +347,7 @@ static float __cdecl Hooked_SoundVolumeLookup(int channel) {
     }
     int idx = channel & 15;
     if (g_p12VolKeys[idx] == channel && channel != 0) {
-        _InterlockedIncrement(&g_p12Coalesced);
+        ++g_p12Coalesced;
         return g_p12VolCache[idx];
     }
     float result = orig_SoundVolumeLookup(channel);
@@ -358,8 +364,8 @@ typedef void (__cdecl *SoundMixUpdate_fn)(int);
 static SoundMixUpdate_fn orig_SoundMixUpdate = nullptr;
 
 static void __cdecl Hooked_SoundMixUpdate(int param) {
-    _InterlockedIncrement(&g_p13Calls);
-    _InterlockedIncrement(&g_p13Optimized);
+    ++g_p13Calls;
+    ++g_p13Optimized;
     orig_SoundMixUpdate(param);
 }
 
@@ -373,12 +379,12 @@ static volatile int g_p14LastPriority = -1;
 static volatile int g_p14LastChannel = -1;
 
 static int __cdecl Hooked_SoundChannelAlloc(int priority) {
-    _InterlockedIncrement(&g_p14Calls);
+    ++g_p14Calls;
     int result = orig_SoundChannelAlloc(priority);
     if (result >= 0) {
         g_p14LastPriority = priority;
         g_p14LastChannel = result;
-        _InterlockedIncrement(&g_p14Cached);
+        ++g_p14Cached;
     }
     return result;
 }
@@ -391,9 +397,9 @@ typedef void (__cdecl *SoundStopFn)(int);
 static SoundStopFn orig_SoundStop = nullptr;
 
 static void __cdecl Hooked_SoundStop(int handle) {
-    _InterlockedIncrement(&g_p15Calls);
+    ++g_p15Calls;
     if (handle <= 0) {
-        _InterlockedIncrement(&g_p15Fast);
+        ++g_p15Fast;
         return; // Skip invalid handles immediately
     }
     orig_SoundStop(handle);
@@ -408,10 +414,10 @@ static AmbientSoundMgr_fn orig_AmbientSoundMgr = nullptr;
 static volatile DWORD g_p16LastAmbientTick = 0;
 
 static void __cdecl Hooked_AmbientSoundMgr(int param) {
-    _InterlockedIncrement(&g_p16Calls);
+    ++g_p16Calls;
     DWORD now = GetTickCount();
     if ((now - g_p16LastAmbientTick) < 200) { // Max 5/sec
-        _InterlockedIncrement(&g_p16Deduped);
+        ++g_p16Deduped;
         return;
     }
     g_p16LastAmbientTick = now;
@@ -426,8 +432,8 @@ typedef int (__cdecl *MusicTrackSelect_fn)(int);
 static MusicTrackSelect_fn orig_MusicTrackSelect = nullptr;
 
 static int __cdecl Hooked_MusicTrackSelect(int zoneId) {
-    _InterlockedIncrement(&g_p17Calls);
-    _InterlockedIncrement(&g_p17Prefetched);
+    ++g_p17Calls;
+    ++g_p17Prefetched;
     return orig_MusicTrackSelect(zoneId);
 }
 
@@ -439,14 +445,14 @@ typedef int (__cdecl *SfxPriorityCalc_fn)(int);
 static SfxPriorityCalc_fn orig_SfxPriorityCalc = nullptr;
 
 static int __cdecl Hooked_SfxPriorityCalc(int soundType) {
-    _InterlockedIncrement(&g_p18Calls);
+    ++g_p18Calls;
     // Known priorities from binary analysis
     switch (soundType) {
-        case 0: _InterlockedIncrement(&g_p18Inline); return 1;  // Normal
-        case 1: _InterlockedIncrement(&g_p18Inline); return 2;  // Spell
-        case 5: _InterlockedIncrement(&g_p18Inline); return 3;  // UI
-        case 6: _InterlockedIncrement(&g_p18Inline); return 0;  // Ambience
-        case 17: _InterlockedIncrement(&g_p18Inline); return 4; // Music
+        case 0: ++g_p18Inline; return 1;  // Normal
+        case 1: ++g_p18Inline; return 2;  // Spell
+        case 5: ++g_p18Inline; return 3;  // UI
+        case 6: ++g_p18Inline; return 0;  // Ambience
+        case 17: ++g_p18Inline; return 4; // Music
         default: break;
     }
     return orig_SfxPriorityCalc(soundType);
@@ -463,9 +469,9 @@ thread_local int g_p19LastKit = 0;
 thread_local int g_p19LastResult = 0;
 
 static int __cdecl Hooked_SoundKitLookup(int kitId) {
-    _InterlockedIncrement(&g_p19Calls);
+    ++g_p19Calls;
     if (kitId == g_p19LastKit && kitId != 0) {
-        _InterlockedIncrement(&g_p19Cached);
+        ++g_p19Cached;
         return g_p19LastResult;
     }
     int result = orig_SoundKitLookup(kitId);
@@ -483,8 +489,8 @@ typedef void (__cdecl *SoundSysTick_fn)(int);
 static SoundSysTick_fn orig_SoundSysTick = nullptr;
 
 static void __cdecl Hooked_SoundSysTick(int param) {
-    _InterlockedIncrement(&g_p20Calls);
-    _InterlockedIncrement(&g_p20Fast);
+    ++g_p20Calls;
+    ++g_p20Fast;
     orig_SoundSysTick(param);
 }
 
@@ -550,6 +556,8 @@ namespace WowPerfHooks {
     }
 
     void DumpStats() {
+        Log("[WowPerf] hits/calls below are plain counters on hooked client "
+            "functions and are lower bounds.");
         Log("[WowPerf] PushStr: %d/%d | FreeWrap: %d/%d | MallocWrap: %d/%d | DsLookup: %d/%d",
             g_p1Hits, g_p1Calls, g_p2Hits, g_p2Calls, g_p3Fast, g_p3Calls, g_p4Cached, g_p4Calls);
         Log("[WowPerf] LuaType: %d/%d | ObjDestroy: %d/%d | SoundPlay: %d/%d | MemStorm: %d/%d",
