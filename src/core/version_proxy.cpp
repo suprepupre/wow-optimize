@@ -138,8 +138,36 @@ __declspec(dllexport) DWORD WINAPI Export_VerLanguageNameW(DWORD a, LPWSTR b, DW
 // ================================================================
 // Loader thread
 // ================================================================
+// The release payload puts version.dll, wow_optimize_launcher.exe and
+// wow_loader.exe in the same folder as Wow.exe, and Windows resolves version.dll
+// out of the application directory for whatever runs there. So this proxy can
+// end up inside our own launcher or loader, and it used to load wow_optimize.dll
+// into them without asking which process it was in.
+//
+// That DLL patches absolute addresses inside Wow.exe's image. In any other
+// process those addresses are somebody else's code or nothing at all.
+//
+// The test names our own two executables rather than requiring the host to be
+// called Wow.exe, because private-server clients get renamed and refusing an
+// unfamiliar name would break them.
+static bool HostIsOneOfOurs() {
+    char exePath[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return false;
+
+    const char* leaf = strrchr(exePath, '\\');
+    leaf = leaf ? leaf + 1 : exePath;
+
+    static const char* kOurs[] = { "wow_optimize_launcher.exe", "wow_loader.exe" };
+    for (int i = 0; i < 2; i++) {
+        if (_stricmp(leaf, kOurs[i]) == 0) return true;
+    }
+    return false;
+}
+
 static DWORD WINAPI LoaderThread(LPVOID param) {
     Sleep(3000);
+
+    if (HostIsOneOfOurs()) return 0;
 
     char dllPath[MAX_PATH];
     char modulePath[MAX_PATH];
