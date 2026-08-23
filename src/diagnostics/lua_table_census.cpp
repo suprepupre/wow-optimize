@@ -70,6 +70,14 @@ static double   g_liveNode      = 0.0;
 static uint32_t g_worstCap      = 0;   // the emptiest table seen, by capacity
 static uint32_t g_worstLive     = 0;
 static uint32_t g_faults        = 0;
+// Tables too small for a compactor to help. Lua 5.1 gives an empty table a
+// single shared dummy node, so it reads as capacity 1 with nothing in it, and
+// millions of those would push the headline share of empty slots up while
+// offering nothing to reclaim. Counted apart so the number can be read
+// honestly rather than believed.
+static uint32_t g_tinyTables    = 0;
+static double   g_tinyCap       = 0.0;
+constexpr uint32_t kTinyCap     = 8;
 
 extern "C" void __cdecl LuaTableCensus_Note(uint32_t t) {
     // One table in 512. The walk below is O(capacity), the same order as the
@@ -79,9 +87,18 @@ extern "C" void __cdecl LuaTableCensus_Note(uint32_t t) {
     if (!t) return;
 
     __try {
-        // Table layout, from sub_85A960 itself: lsizenode is the byte at +11,
-        // array at +16, node at +20, sizearray at +32. TValue stride 16 with
-        // the type tag at +8; Node stride 40 with the value's tag at +8.
+        // Table layout, from sub_85A960: lsizenode is the byte at +11, array at
+        // +16, node at +20, sizearray at +32. TValue stride 16 with the type
+        // tag at +8; Node stride 40 with the value's tag at +8.
+        //
+        // Checked against a second function rather than taken from one.
+        // sub_85C430, the hash-part key lookup, computes
+        //
+        //     node = *(t + 20) + 40 * (hash & ((1 << *(BYTE*)(t + 11)) - 1))
+        //
+        // and then walks the chain through node+32 comparing the key type at
+        // node+24. Same node base, same lsizenode byte, same stride of 40, and
+        // the key tag at +24 sits where traversetable reads it. The two agree.
         uint32_t sizearray = *(const uint32_t*)(t + 32);
         uint32_t arrayPtr  = *(const uint32_t*)(t + 16);
         uint32_t nodePtr   = *(const uint32_t*)(t + 20);
@@ -102,6 +119,10 @@ extern "C" void __cdecl LuaTableCensus_Note(uint32_t t) {
         }
 
         g_tablesSeen++;
+        if (sizearray + sizenode <= kTinyCap) {
+            g_tinyTables++;
+            g_tinyCap += (double)(sizearray + sizenode);
+        }
         g_capArray  += (double)sizearray;
         g_liveArray += (double)liveA;
         g_capNode   += (double)sizenode;
@@ -180,6 +201,13 @@ void LogStats() {
     Log("[TableCensus]   array part %.0f of %.0f used, hash part %.0f of %.0f "
         "used; emptiest table seen held %u of %u slots",
         g_liveArray, g_capArray, g_liveNode, g_capNode, g_worstLive, g_worstCap);
+    Log("[TableCensus]   %u of those tables (%.1f%%) have %u slots or fewer and "
+        "hold %.0f of the capacity between them. Nothing can be reclaimed from "
+        "those, and an empty table counts as one slot because Lua gives it a "
+        "shared dummy node, so discount them before reading the share above.",
+        g_tinyTables,
+        100.0 * (double)g_tinyTables / (double)g_tablesSeen,
+        kTinyCap, g_tinyCap);
     if (g_faults)
         Log("[TableCensus]   %u samples faulted while reading a table and were "
             "discarded", g_faults);
