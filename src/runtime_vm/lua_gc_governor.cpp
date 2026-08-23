@@ -97,7 +97,9 @@ constexpr uintptr_t kSweepLo    = 0x0085B200, kSweepHi    = 0x0085B200 + 143;
 
 void LogStats() {
     if (g_gcStepCount == 0) {
-        Log("[GCGovernor] no collection steps requested this session");
+        Log("[GCGovernor] no collection steps requested this session%s",
+            Config::g_settings.OptLuaGcManual
+                ? "" : " - LuaGcManual is off, which is what stops them");
     } else {
         Log("[GCGovernor] %llu steps requested, %.1f ms total, %.3f ms average",
             (unsigned long long)g_gcStepCount, g_gcStepMsTotal,
@@ -171,14 +173,24 @@ void OnFrame(double frameMs) {
         return;
     }
 
+    // LuaGcManual is the launcher's "Lua VM: stop the automatic GC", described
+    // there as "split out because it is the part worth testing on its own". It
+    // was split in the launcher and in the config and never wired here, so
+    // until now it gated nothing and the checkbox offered an experiment that
+    // could not be run. Everything the entry describes - stopping the VM's
+    // collector and stepping it by hand - hangs off it now. The pause and
+    // stepmul pacing stays under LuaGcCoalesce, which is what that entry
+    // describes.
+    const bool manual = Config::g_settings.OptLuaGcManual;
+
     if (g_inCombat) {
         if (memKB < 256.0 * 1024.0) {
-            g_lua_gc(L, 0, 0); // LUA_GCSTOP
+            if (manual) g_lua_gc(L, 0, 0); // LUA_GCSTOP
         } else {
             g_lua_gc(L, 1, 0); // Ensure restarted
             g_lua_gc(L, LUA_GCSETPAUSE, 100);
             g_lua_gc(L, LUA_GCSETSTEPMUL, 110);
-            StepTimed(L, 16);
+            if (manual) StepTimed(L, 16);
         }
         return;
     }
@@ -188,7 +200,7 @@ void OnFrame(double frameMs) {
     if (g_isIdle && frameMs < 8.0) {
         g_lua_gc(L, LUA_GCSETPAUSE, 110);
         g_lua_gc(L, LUA_GCSETSTEPMUL, 400);
-        StepTimed(L, 1024);
+        if (manual) StepTimed(L, 1024);
     } else {
         g_lua_gc(L, LUA_GCSETPAUSE, 120);
         g_lua_gc(L, LUA_GCSETSTEPMUL, 200);
@@ -197,7 +209,7 @@ void OnFrame(double frameMs) {
         if (stepKB < 62) stepKB = 62;
         if (stepKB > 512) stepKB = 512;
         
-        StepTimed(L, stepKB);
+        if (manual) StepTimed(L, stepKB);
     }
 }
 
