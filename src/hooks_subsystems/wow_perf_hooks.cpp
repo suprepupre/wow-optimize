@@ -39,14 +39,12 @@ static long g_p9Inline = 0, g_p9Calls = 0;
 static long g_p10Cached = 0, g_p10Calls = 0;
 static long g_p11Fast = 0, g_p11Calls = 0;
 static long g_p12Coalesced = 0, g_p12Calls = 0;
-static long g_p13Optimized = 0, g_p13Calls = 0;
 static long g_p14Cached = 0, g_p14Calls = 0;
 static long g_p15Fast = 0, g_p15Calls = 0;
 static long g_p16Deduped = 0, g_p16Calls = 0;
 static long g_p17Prefetched = 0, g_p17Calls = 0;
 static long g_p18Inline = 0, g_p18Calls = 0;
 static long g_p19Cached = 0, g_p19Calls = 0;
-static long g_p20Fast = 0, g_p20Calls = 0;
 
 // ================================================================
 // P1: sub_84E350 - lua_pushstring (1008 xrefs!)
@@ -363,11 +361,6 @@ static float __cdecl Hooked_SoundVolumeLookup(int channel) {
 typedef void (__cdecl *SoundMixUpdate_fn)(int);
 static SoundMixUpdate_fn orig_SoundMixUpdate = nullptr;
 
-static void __cdecl Hooked_SoundMixUpdate(int param) {
-    ++g_p13Calls;
-    ++g_p13Optimized;
-    orig_SoundMixUpdate(param);
-}
 
 // ================================================================
 // P14: sub_8799E0 - Sound channel allocator
@@ -488,11 +481,6 @@ static int __cdecl Hooked_SoundKitLookup(int kitId) {
 typedef void (__cdecl *SoundSysTick_fn)(int);
 static SoundSysTick_fn orig_SoundSysTick = nullptr;
 
-static void __cdecl Hooked_SoundSysTick(int param) {
-    ++g_p20Calls;
-    ++g_p20Fast;
-    orig_SoundSysTick(param);
-}
 
 // ================================================================
 // Installation / Shutdown / Stats
@@ -535,7 +523,6 @@ namespace WowPerfHooks {
             // {(void*)0x004C5990, (void*)Hooked_SfxPriorityCalc,   (void**)&orig_SfxPriorityCalc,   "P18 SFX priority calc"},
             // P19 REMOVED: sub_879A60 is actually __thiscall, hooking it as __cdecl causes crashes.
             // {(void*)0x00879A60, (void*)Hooked_SoundKitLookup,    (void**)&orig_SoundKitLookup,    "P19 sound kit lookup"},
-            {(void*)0x00878590, (void*)Hooked_SoundSysTick,      (void**)&orig_SoundSysTick,      "P20 sound sys tick"},
         };
 
         for (auto& h : hooks) {
@@ -556,6 +543,10 @@ namespace WowPerfHooks {
     }
 
     void DumpStats() {
+        // Several entries below are commented out of the install table above,
+        // so their counters can only ever read 0/0. A zero here means "not
+        // hooked" and not "hooked and idle"; the ACTIVE lines at startup say
+        // which ones were installed.
         Log("[WowPerf] hits/calls below are plain counters on hooked client "
             "functions and are lower bounds.");
         Log("[WowPerf] PushStr: %d/%d | FreeWrap: %d/%d | MallocWrap: %d/%d | DsLookup: %d/%d",
@@ -564,9 +555,9 @@ namespace WowPerfHooks {
             g_p5Fast, g_p5Calls, g_p6Prefetched, g_p6Calls, g_p7Skipped, g_p7Calls, g_p8Batched, g_p8Calls);
         Log("[WowPerf] BlockFree: %d/%d | VirtDisp: %d/%d | DelCS: %d/%d | VolLookup: %d/%d",
             g_p9Inline, g_p9Calls, g_p10Cached, g_p10Calls, g_p11Fast, g_p11Calls, g_p12Coalesced, g_p12Calls);
-        Log("[WowPerf] MixUpdate: %d/%d | ChanAlloc: %d/%d | Stop: %d/%d | Ambient: %d/%d",
-            g_p13Optimized, g_p13Calls, g_p14Cached, g_p14Calls, g_p15Fast, g_p15Calls, g_p16Deduped, g_p16Calls);
-        Log("[WowPerf] MusicSel: %d/%d | SfxPrio: %d/%d | KitLookup: %d/%d | SysTick: %d/%d",
-            g_p17Prefetched, g_p17Calls, g_p18Inline, g_p18Calls, g_p19Cached, g_p19Calls, g_p20Fast, g_p20Calls);
+        Log("[WowPerf] ChanAlloc: %d/%d | Stop: %d/%d | Ambient: %d/%d",
+            g_p14Cached, g_p14Calls, g_p15Fast, g_p15Calls, g_p16Deduped, g_p16Calls);
+        Log("[WowPerf] MusicSel: %d/%d | SfxPrio: %d/%d | KitLookup: %d/%d",
+            g_p17Prefetched, g_p17Calls, g_p18Inline, g_p18Calls, g_p19Cached, g_p19Calls);
     }
 }

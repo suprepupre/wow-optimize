@@ -38,7 +38,6 @@ static long g_w13Deduped = 0, g_w13Calls = 0;
 static long g_w14Fast = 0, g_w14Calls = 0;
 static long g_w15Cached = 0, g_w15Calls = 0;
 static long g_w16Optimized = 0, g_w16Calls = 0;
-static long g_w17Fast = 0, g_w17Calls = 0;
 static long g_w18Skipped = 0, g_w18Calls = 0;
 static long g_w19Cached = 0, g_w19Calls = 0;
 static long g_w20Fast = 0, g_w20Calls = 0;
@@ -358,11 +357,6 @@ static int __fastcall Hooked_SoundMix(void* self, void* dummyEDX, float a2) {
 typedef int (__fastcall *SoundStop_fn)(void*, void*, float, float);
 static SoundStop_fn orig_SoundStop = nullptr;
 
-static int __fastcall Hooked_SoundStop(void* self, void* dummyEDX, float f1, float f2) {
-    ++g_w17Calls;
-    ++g_w17Fast;
-    return orig_SoundStop(self, dummyEDX, f1, f2);
-}
 
 // ================================================================
 // W18: sub_87F7A0 - Ambient sound manager (called every frame)
@@ -436,7 +430,6 @@ namespace WowOptHooks {
             {(void*)0x00878760, (void*)Hooked_VolumeLookup,    (void**)&orig_VolumeLookup,    "W14 volume cache"},
             // W15 skipped - channel deallocator function (skipping it causes channel leak)
             {(void*)0x00878610, (void*)Hooked_SoundMix,        (void**)&orig_SoundMix,        "W16 sound mix opt"},
-            {(void*)0x00879390, (void*)Hooked_SoundStop,       (void**)&orig_SoundStop,       "W17 sound stop batch"},
             {(void*)0x0087F7A0, (void*)Hooked_AmbientMgr,      (void**)&orig_AmbientMgr,      "W18 ambient throttle"},
             {(void*)0x004CB580, (void*)Hooked_MusicSelect,     (void**)&orig_MusicSelect,     "W19 music select cache"},
             // W20 skipped - 0x004C5990 is camera constructor, not SFX priority
@@ -470,7 +463,7 @@ namespace WowOptHooks {
             g_w9Skipped, g_w9Calls, g_w10Cached, g_w10Calls, g_w11Fast, g_w11Calls, g_w12Batched, g_w12Calls);
         Log("[WowOpt] BufValid: %d/%d | Volume: %d/%d | Channel: %d/%d | MixOpt: %d/%d",
             g_w13Deduped, g_w13Calls, g_w14Fast, g_w14Calls, g_w15Cached, g_w15Calls, g_w16Optimized, g_w16Calls);
-        Log("[WowOpt] StopBatch: %d/%d | AmbientThr: %d/%d | MusicCache: %d/%d | SfxFast: %d/%d",
-            g_w17Fast, g_w17Calls, g_w18Skipped, g_w18Calls, g_w19Cached, g_w19Calls, g_w20Fast, g_w20Calls);
+        Log("[WowOpt] AmbientThr: %d/%d | MusicCache: %d/%d | SfxFast: %d/%d",
+            g_w18Skipped, g_w18Calls, g_w19Cached, g_w19Calls, g_w20Fast, g_w20Calls);
     }
 }

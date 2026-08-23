@@ -132,11 +132,6 @@ static void* __cdecl Hooked_TableGet(int table, void* key, int fieldIdx) {
 typedef void* (__cdecl *LuaHGetN_fn)(int table, char flag, int tstring);
 static LuaHGetN_fn orig_LuaHGetN = nullptr;
 
-static void* __cdecl Hooked_LuaHGetN(int table, char flag, int tstring) {
-    ++g_c[5];
-    ++g_h[5];
-    return orig_LuaHGetN(table, flag, tstring);
-}
 
 // C7 skipped (__usercall)
 // C8 skipped (duplicate of W12)
@@ -164,7 +159,6 @@ namespace WowExtendedHooks {
             {(void*)0x0084E300, (void*)Hooked_PushStringImpl,  (void**)&orig_PushStringImpl,  "C4 pushstring impl (36 xrefs)"},
             // C5 table get hook disabled to prevent stale/wild pointer crashes when Lua tables modify/grow
             // {(void*)0x0085BC10, (void*)Hooked_TableGet,        (void**)&orig_TableGet,        "C5 table get (17 xrefs)"},
-            {(void*)0x0085BBE0, (void*)Hooked_LuaHGetN,        (void**)&orig_LuaHGetN,        "C6 luaH_getn (7 xrefs)"},
             // C7 skipped - __usercall convention
             // C8 skipped - duplicate of W12
         };
@@ -190,11 +184,15 @@ namespace WowExtendedHooks {
     }
 
     void DumpStats() {
+        // Several entries below are commented out of the install table above,
+        // so their counters can only ever read 0/0. A zero here means "not
+        // hooked" and not "hooked and idle"; the ACTIVE lines at startup say
+        // which ones were installed.
         Log("[EXTENDED] hits/calls, lower bounds - Strcpy: %d/%d | SFile: %d/%d | "
             "PushImpl: %d/%d | TableGet: %d/%d",
             g_h[0], g_c[0], g_h[1], g_c[1], g_h[3], g_c[3], g_h[4], g_c[4]);
-        Log("[EXTENDED] GetN: %d/%d | TexInit: %d/%d | Status: %d/%d",
-            g_h[5], g_c[5], g_h[6], g_c[6], g_h[7], g_c[7]);
+        Log("[EXTENDED] TexInit: %d/%d | Status: %d/%d",
+            g_h[6], g_c[6], g_h[7], g_c[7]);
         // C9-C40 are not printed any more. They were empty functions.
     }
 }
