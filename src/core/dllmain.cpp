@@ -4712,6 +4712,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     TickListPrefetch::LogStats();
     LuaTableCensus::LogStats();
     D3D9StateManager_LogStats();
+    SimdHooks_LogStats();
     DeviceCallbackGuard::LogStats();
     LayoutRelinkFast::LogStats();
     HorizonOcclusion::LogStats();

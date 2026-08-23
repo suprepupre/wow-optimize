@@ -386,12 +386,21 @@ void SSE2_Vec3Cross(const float* __restrict a,
 // ================================================================
 // Statistics & Active State
 // ================================================================
-static volatile long g_matMulCalls    = 0;
-static volatile long g_quatNormCalls  = 0;
-static volatile long g_frustumCalls   = 0;
-static volatile long g_frustumCulled  = 0;
-static volatile long g_rayTriangleCalls = 0;
-static volatile long g_rayTriangleIntersects = 0;
+// Plain, not Interlocked. By this file's own comment the frustum test takes
+// boxes "by the thousand a frame", and a locked read-modify-write sat at the top
+// of it and of the matrix, quaternion and ray-triangle hooks. They are
+// statistics, nothing reads them for control flow, and a lost increment costs
+// one count. Lower bounds, and the report says so.
+//
+// The four counters that drive the arm-after-N verification keep their
+// Interlocked form: their return value is the thing being tested, and they stop
+// being touched once each hook is trusted.
+static long g_matMulCalls    = 0;
+static long g_quatNormCalls  = 0;
+static long g_frustumCalls   = 0;
+static long g_frustumCulled  = 0;
+static long g_rayTriangleCalls = 0;
+static long g_rayTriangleIntersects = 0;
 
 // ================================================================
 // Public APIs
@@ -761,7 +770,7 @@ static bool          g_rayTrusted   = false;
 static bool          g_rayAbandoned = false;
 
 static char __cdecl Hooked_RayTriangle32(const float* ray, const float* vertices, const uint32_t* indices, float* outT, float* outUV, float margin) {
-    InterlockedIncrement(&g_rayTriangleCalls);
+    ++g_rayTriangleCalls;
 
     if (g_rayAbandoned && orig_RayTriangle32) {
         return orig_RayTriangle32(ray, vertices, indices, outT, outUV, margin);
@@ -792,7 +801,7 @@ static char __cdecl Hooked_RayTriangle32(const float* ray, const float* vertices
     }
 
     if (res) {
-        InterlockedIncrement(&g_rayTriangleIntersects);
+        ++g_rayTriangleIntersects;
     }
     return res;
 }
@@ -802,7 +811,7 @@ static RayTriangle16_t orig_RayTriangle16 = nullptr;
 
 
 static char __cdecl Hooked_RayTriangle16(const float* ray, const float* vertices, const uint16_t* indices, float* outT, float* outUV, float margin) {
-    InterlockedIncrement(&g_rayTriangleCalls);
+    ++g_rayTriangleCalls;
 
     if (g_rayAbandoned && orig_RayTriangle16) {
         return orig_RayTriangle16(ray, vertices, indices, outT, outUV, margin);
@@ -831,7 +840,7 @@ static char __cdecl Hooked_RayTriangle16(const float* ray, const float* vertices
     }
 
     if (res) {
-        InterlockedIncrement(&g_rayTriangleIntersects);
+        ++g_rayTriangleIntersects;
     }
     return res;
 }
@@ -848,7 +857,7 @@ typedef float* (__cdecl *MatrixMultiply_t)(float* out, float* lhs, float* rhs);
 static MatrixMultiply_t orig_MatrixMultiply = nullptr;
 
 static float* __cdecl Hooked_MatrixMultiply(float* out, float* lhs, float* rhs) {
-    InterlockedIncrement(&g_matMulCalls);
+    ++g_matMulCalls;
     SSE2_MatrixMultiply(lhs, rhs, out);
     return out;
 }
@@ -859,7 +868,7 @@ static QuatNormalize_t orig_QuatNormalize = nullptr;
 
 
 static void __fastcall Hooked_QuatNormalize(float* ecx, void* edx) {
-    InterlockedIncrement(&g_quatNormCalls);
+    ++g_quatNormCalls;
     uintptr_t p = (uintptr_t)ecx;
     if (p > 0x10000 && p < 0xFFE00000) {
         __try {
@@ -894,13 +903,13 @@ static IsAABBVisible_t orig_IsAABBVisible = nullptr;
 // failure that says nothing about the code. Real frustums and real bounding
 // boxes arrive by the thousand a frame at no cost but running both for a while.
 static volatile long g_frustumChecked   = 0;
-static volatile long g_frustumMismatch  = 0;
+static long g_frustumMismatch  = 0;
 static bool          g_frustumTrusted   = false;   // stop double-running once proven
 static bool          g_frustumAbandoned = false;   // disagreed: original from here on
 
 
 static int __fastcall Hooked_IsAABBVisible(void* ecx, void* edx, const float* bounds) {
-    InterlockedIncrement(&g_frustumCalls);
+    ++g_frustumCalls;
 
     if (g_frustumAbandoned) {
         return orig_IsAABBVisible(ecx, edx, bounds);
@@ -912,7 +921,7 @@ static int __fastcall Hooked_IsAABBVisible(void* ecx, void* edx, const float* bo
         int theirs = orig_IsAABBVisible(ecx, edx, bounds);
         long n = InterlockedIncrement(&g_frustumChecked);
         if (theirs != res) {
-            InterlockedIncrement(&g_frustumMismatch);
+            ++g_frustumMismatch;
             g_frustumAbandoned = true;
             Log("[SimdHooks] Frustum cull disagreed with the client on call %ld "
                 "(client %d, ours %d) - handing every call back to the original",
@@ -927,7 +936,7 @@ static int __fastcall Hooked_IsAABBVisible(void* ecx, void* edx, const float* bo
     }
 
     if (res == 0) {
-        InterlockedIncrement(&g_frustumCulled);
+        ++g_frustumCulled;
     }
     return res;
 }
@@ -943,7 +952,7 @@ static bool          g_frustum2Trusted   = false;
 static bool          g_frustum2Abandoned = false;
 
 static int __fastcall Hooked_IsAABBVisibleType2(void* ecx, void* edx, const float* bounds) {
-    InterlockedIncrement(&g_frustumCalls);
+    ++g_frustumCalls;
 
     if (g_frustum2Abandoned) {
         return orig_IsAABBVisibleType2(ecx, edx, bounds);
@@ -969,7 +978,7 @@ static int __fastcall Hooked_IsAABBVisibleType2(void* ecx, void* edx, const floa
     }
 
     if (res == 0) {
-        InterlockedIncrement(&g_frustumCulled);
+        ++g_frustumCulled;
     }
     return res;
 }
@@ -985,7 +994,7 @@ static bool          g_pointTrusted   = false;
 static bool          g_pointAbandoned = false;
 
 static void __fastcall Hooked_IsPointVisible(void* ecx, void* edx, const float* point, uint8_t* outMask) {
-    InterlockedIncrement(&g_frustumCalls);
+    ++g_frustumCalls;
 
     if (g_pointAbandoned) {
         orig_IsPointVisible(ecx, edx, point, outMask);
@@ -1015,7 +1024,7 @@ static void __fastcall Hooked_IsPointVisible(void* ecx, void* edx, const float* 
     }
 
     if (outMask && *outMask != 0) {
-        InterlockedIncrement(&g_frustumCulled);
+        ++g_frustumCulled;
     }
 }
 #endif
@@ -1505,6 +1514,30 @@ bool InstallSimdHooks(void) {
     return true;
 }
 
+// These used to print only from ShutdownSimdHooks, which this process never
+// reaches: it leaves through TerminateProcess and the exit path skips past it.
+// So the call counts of the matrix, frustum and ray-triangle hooks have never
+// appeared in a log, the same way the D3D9 hook counts had not. Called from the
+// periodic report now.
+void SimdHooks_LogStats(void) {
+    if (!g_matMulCalls && !g_quatNormCalls && !g_frustumCalls && !g_rayTriangleCalls) {
+        Log("[SimdHooks] no hooked call was seen this session");
+        return;
+    }
+    Log("[SimdHooks] calls, all lower bounds: matMul=%ld quatNorm=%ld "
+        "frustum=%ld (culled %ld, %.1f%%) rayTri=%ld (hit %ld, %.1f%%)",
+        g_matMulCalls, g_quatNormCalls,
+        g_frustumCalls, g_frustumCulled,
+        g_frustumCalls ? 100.0 * g_frustumCulled / g_frustumCalls : 0.0,
+        g_rayTriangleCalls, g_rayTriangleIntersects,
+        g_rayTriangleCalls ? 100.0 * g_rayTriangleIntersects / g_rayTriangleCalls : 0.0);
+#if !TEST_DISABLE_FRUSTUM_CULL
+    if (g_frustumMismatch)
+        Log("[SimdHooks]   the frustum test disagreed with the client %ld time(s) "
+            "and handed the work back", g_frustumMismatch);
+#endif
+}
+
 void ShutdownSimdHooks(void) {
     MH_DisableHook((void*)0x005FEC70);
     MH_DisableHook((void*)0x00983D20);
@@ -1513,10 +1546,5 @@ void ShutdownSimdHooks(void) {
 #if !TEST_DISABLE_MATRIX_TRANSFORM_SSE2
     MH_DisableHook((void*)0x005FED20);
 #endif
-    Log("[SimdHooks] Stats: matMul=%ld, ... frustum=%ld (culled=%ld, %.1f%%), rayTri=%ld (hit=%ld, %.1f%%)",
-        g_matMulCalls,
-        g_frustumCalls, g_frustumCulled,
-        g_frustumCalls ? 100.0 * g_frustumCulled / g_frustumCalls : 0.0,
-        g_rayTriangleCalls, g_rayTriangleIntersects,
-        g_rayTriangleCalls ? 100.0 * g_rayTriangleIntersects / g_rayTriangleCalls : 0.0);
+    SimdHooks_LogStats();
 }

@@ -18,6 +18,10 @@
 bool InstallSimdHooks(void);
 void ShutdownSimdHooks(void);
 
+// Call and cull counts for the SIMD hooks. Printed from the periodic report
+// rather than from shutdown, which this process does not reach.
+void SimdHooks_LogStats(void);
+
 // SSE2 quaternion multiply: result = a * b (Hamilton product)
 // All pointers are float[4] (x,y,z,w). Safe for aliasing.
 void SSE2_QuatMultiply(const float* __restrict a, const float* __restrict b, float* __restrict result);
