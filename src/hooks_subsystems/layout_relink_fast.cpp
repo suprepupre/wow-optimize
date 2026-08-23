@@ -138,15 +138,61 @@ constexpr unsigned  kStateByteOff  = 0x40;        // set to 6 by both tails
 constexpr long kLearnCalls   = 20000;
 constexpr long kResampleMask = 1023;   // one in 1024
 
+// What the deferred scan costs, measured rather than assumed.
+unsigned long g_scanSample   = 0;
+unsigned long g_scansSeen    = 0;
+double        g_nodesToMatch = 0.0;   // nodes walked before the first match
+double        g_nodesTotal   = 0.0;   // whole list length
+unsigned long g_scanNoMatch  = 0;     // walked it all and found nothing
+unsigned long g_scanLongest  = 0;
+
+// Read-only replay of sub_489710's search: the first node in list order with an
+// anchor slot pointing at `self` and without 0x800 set. Nothing is written.
+void MeasureScan(uintptr_t self) {
+    __try {
+        uint32_t linkOff = *(const uint32_t*)kNodeOffsetVar;
+        uint32_t node    = *(const uint32_t*)(kListRoot + 4);   // AC1020
+        uint32_t walked  = 0;
+        uint32_t matchAt = 0;
+        bool     found   = false;
+
+        while (node && (node & 1) == 0 && walked < 100000) {
+            ++walked;
+            if (!found) {
+                for (unsigned s = 0; s < 9; s++) {
+                    uint32_t fn = *(const uint32_t*)(node + 12 + s * 4);
+                    if (!fn) continue;
+                    if (*(const uint32_t*)(fn + 12) & 0x800) continue;
+                    if (*(const uint32_t*)(fn + 8) == (uint32_t)self) {
+                        found = true; matchAt = walked; break;
+                    }
+                }
+            }
+            node = *(const uint32_t*)(linkOff + node + 4);
+        }
+
+        g_scansSeen++;
+        g_nodesTotal += (double)walked;
+        if (found) g_nodesToMatch += (double)matchAt;
+        else       g_scanNoMatch++;
+        if (walked > g_scanLongest) g_scanLongest = walked;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 typedef uint32_t* (__fastcall* Relink_fn)(void* self, void* edx);
 Relink_fn orig_Relink = nullptr;
 
-volatile LONG g_calls        = 0;
-volatile LONG g_agreements   = 0;
-volatile LONG g_fastTaken    = 0;
-volatile LONG g_deferred     = 0;
-volatile LONG g_disagreed    = 0;
-volatile LONG g_pessimistic  = 0;   // predicted found, client found nothing
+// Plain, not Interlocked. This is the most expensive function in the client and
+// it ran 16.9 million times in one session; every one of these was a locked
+// read-modify-write on that path. They are statistics, one thread writes them,
+// and a lost increment costs one count. Lower bounds, and the report says so.
+long g_calls        = 0;
+long g_agreements   = 0;
+long g_fastTaken    = 0;
+long g_deferred     = 0;
+long g_disagreed    = 0;
+long g_pessimistic  = 0;   // predicted found, client found nothing
 // Every entry into the hook. g_calls below counts only those that get past the
 // client's own early-out and reach the scan - the ones that cost anything - and
 // it stops entirely once the module retires. This one never stops, so a log can
@@ -251,7 +297,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         return orig_Relink(self, edx);
     }
 
-    LONG n = InterlockedIncrement(&g_calls);
+    LONG n = ++g_calls;
     bool verifying = (g_armed == 0) || ((n & kResampleMask) == 0);
 
     if (verifying) {
@@ -277,7 +323,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         // the client found a match for. This is the only one that invalidates
         // the optimisation.
         if (predictNotFound && !actualNotFound) {
-            InterlockedIncrement(&g_disagreed);
+            ++g_disagreed;
             Log("[LayoutRelink] Prediction was wrong: frame 0x%08X had nothing at "
                 "+0x38 but the client took the found path. An empty dependants "
                 "list does not imply the scan finds nothing, so this optimisation "
@@ -291,7 +337,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         // correct - this is a skipped shortcut, not an error. Log the first one
         // so the asymmetry is visible in a session log, then just count them.
         if (!predictNotFound && actualNotFound) {
-            if (InterlockedIncrement(&g_pessimistic) == 1) {
+            if (++g_pessimistic == 1) {
                 Log("[LayoutRelink] Frame 0x%08X had something at +0x38 but the "
                     "client found nothing. Correct either way - we defer on "
                     "non-empty - so this is a missed shortcut, not a divergence. "
@@ -300,7 +346,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
             return r;
         }
 
-        LONG ok = InterlockedIncrement(&g_agreements);
+        LONG ok = ++g_agreements;
         if (g_armed == 0 && ok >= kLearnCalls) {
             InterlockedExchange(&g_armed, 1);
             Log("[LayoutRelink] %ld calls verified, no disagreement. Taking the "
@@ -311,7 +357,13 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     }
 
     if (!predictNotFound) {
-        InterlockedIncrement(&g_deferred);
+        ++g_deferred;
+        // Nobody has measured the number the whole model rests on: how long the
+        // list the client scans actually is, and how far into it the match
+        // sits. If it is short, the scan cannot be where the time goes and this
+        // module is aimed at the wrong thing. Sampled, because measuring means
+        // walking the list a second time.
+        if ((++g_scanSample & 255u) == 0) MeasureScan(This);
         return orig_Relink(self, edx);
     }
 
@@ -321,7 +373,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         Retire("the transcribed tail faulted");
         return orig_Relink(self, edx);
     }
-    InterlockedIncrement(&g_fastTaken);
+    ++g_fastTaken;
     return result;
 }
 
@@ -377,6 +429,20 @@ void LogStats() {
             examined, 100.0 * (double)g_earlyOut / (double)examined,
             g_dead ? "; the remaining invocations came after this module retired"
                    : "");
+    }
+    if (g_scansSeen > 0) {
+        double avgLen   = g_nodesTotal / (double)g_scansSeen;
+        unsigned long matched = g_scansSeen - g_scanNoMatch;
+        Log("[LayoutRelink] the scan itself, sampled one deferred call in 256 "
+            "over %lu of them: the list averages %.1f nodes and its longest was "
+            "%lu. %lu found a match after %.1f nodes on average, %lu walked the "
+            "whole list and found nothing.",
+            g_scansSeen, avgLen, g_scanLongest, matched,
+            matched ? g_nodesToMatch / (double)matched : 0.0, g_scanNoMatch);
+        Log("[LayoutRelink]   this is the number the module rests on. A short "
+            "list means the scan cannot be where the time goes and the target "
+            "is wrong; a long one with the match near the end is what an index "
+            "would be worth.");
     }
     if (g_pessimistic > 0) {
         Log("[LayoutRelink] %ld of the deferred calls had a non-empty +0x38 but "
