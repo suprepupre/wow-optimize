@@ -88,8 +88,17 @@ static WinMutex g_vtableMutex;
 // ================================================================
 // Per-frame statistics
 // ================================================================
-static volatile LONG64 g_statCalls[NUM_HOOKS]   = {};
-static volatile LONG64 g_statSkipped[NUM_HOOKS] = {};
+// Plain 32-bit, not LONG64 with InterlockedIncrement64. There was one of those
+// at the top of every one of these sixteen hooks, so SetRenderState, SetTexture
+// and DrawPrimitive each carried a lock cmpxchg8b retry loop on 32-bit x86, on
+// the hottest calls in the frame. The 3.19.0 pass that removed nine of these
+// fixed the state cache next door and never opened this file.
+//
+// Plain 32-bit and never plain 64-bit: add/adc across two words can tear a
+// value where a 32-bit increment can only lose one. These are lower bounds and
+// the report says so.
+static unsigned long g_statCalls[NUM_HOOKS]   = {};
+static unsigned long g_statSkipped[NUM_HOOKS] = {};
 static const char* g_statNames[NUM_HOOKS] = {
     "SetRenderState", "SetTextureStageState", "SetSamplerState",
     "SetTexture", "SetTransform", "SetMaterial",
@@ -99,7 +108,7 @@ static const char* g_statNames[NUM_HOOKS] = {
     "Present"
 };
 
-static volatile LONG64 g_totalFrames = 0;
+static unsigned long g_totalFrames = 0;
 
 // ================================================================
 // State caches
@@ -246,7 +255,7 @@ typedef HRESULT (__stdcall *PresentFn)(void* dev, const RECT* src, const RECT* d
 
 static HRESULT __stdcall Hooked_SetRenderState(void* dev, DWORD state, DWORD value) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[0]);
+    ++g_statCalls[0];
     
     bool isCriticalState = (state == D3DRS_ALPHABLENDENABLE || state == D3DRS_SRCBLEND || 
                            state == D3DRS_DESTBLEND || state == D3DRS_ALPHATESTENABLE || 
@@ -254,7 +263,7 @@ static HRESULT __stdcall Hooked_SetRenderState(void* dev, DWORD state, DWORD val
                            state == D3DRS_ZWRITEENABLE || state == D3DRS_ZENABLE);
 
     if (state < 256 && !isCriticalState && g_rsValid[state] && g_rsCache[state] == value) {
-        InterlockedIncrement64(&g_statSkipped[0]);
+        ++g_statSkipped[0];
         return 0;
     }
     HRESULT hr = g_orig_SetRenderState(dev, state, value);
@@ -267,11 +276,11 @@ static HRESULT __stdcall Hooked_SetRenderState(void* dev, DWORD state, DWORD val
 
 static HRESULT __stdcall Hooked_SetTextureStageState(void* dev, DWORD stage, DWORD type, DWORD value) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[1]);
+    ++g_statCalls[1];
 
     DWORD idx = (stage & 7) * 32 + (type & 31);
     if (idx < 256 && g_tssValid[idx] && g_tssCache[idx] == value) {
-        InterlockedIncrement64(&g_statSkipped[1]);
+        ++g_statSkipped[1];
         return 0;
     }
     HRESULT hr = g_orig_SetTextureStageState(dev, stage, type, value);
@@ -284,11 +293,11 @@ static HRESULT __stdcall Hooked_SetTextureStageState(void* dev, DWORD stage, DWO
 
 static HRESULT __stdcall Hooked_SetSamplerState(void* dev, DWORD sampler, DWORD type, DWORD value) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[2]);
+    ++g_statCalls[2];
 
     DWORD idx = (sampler & 15) * 16 + (type & 15);
     if (idx < 256 && g_ssValid[idx] && g_ssCache[idx] == value) {
-        InterlockedIncrement64(&g_statSkipped[2]);
+        ++g_statSkipped[2];
         return 0;
     }
     HRESULT hr = g_orig_SetSamplerState(dev, sampler, type, value);
@@ -301,21 +310,21 @@ static HRESULT __stdcall Hooked_SetSamplerState(void* dev, DWORD sampler, DWORD 
 
 static HRESULT __stdcall Hooked_SetTexture(void* dev, DWORD stage, void* tex) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[3]);
+    ++g_statCalls[3];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetTexture(dev, stage, tex);
 }
 
 static HRESULT __stdcall Hooked_SetTransform(void* dev, DWORD state, const void* matrix) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[4]);
+    ++g_statCalls[4];
     // Always call original transform setter to guarantee 100% world matrix accuracy on weapon sub-meshes
     return g_orig_SetTransform(dev, state, matrix);
 }
 
 static HRESULT __stdcall Hooked_SetMaterial(void* dev, const void* material) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[5]);
+    ++g_statCalls[5];
 
     if (!material) {
         g_materialValid = false;
@@ -324,7 +333,7 @@ static HRESULT __stdcall Hooked_SetMaterial(void* dev, const void* material) {
 
     uint32_t hash = HashMaterial((const DWORD*)material);
     if (g_materialValid && g_materialHash == hash) {
-        InterlockedIncrement64(&g_statSkipped[5]);
+        ++g_statSkipped[5];
         return 0;
     }
     HRESULT hr = g_orig_SetMaterial(dev, material);
@@ -337,7 +346,7 @@ static HRESULT __stdcall Hooked_SetMaterial(void* dev, const void* material) {
 
 static HRESULT __stdcall Hooked_SetViewport(void* dev, const DWORD* vp) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[6]);
+    ++g_statCalls[6];
 
     if (!vp) {
         g_viewportValid = false;
@@ -345,7 +354,7 @@ static HRESULT __stdcall Hooked_SetViewport(void* dev, const DWORD* vp) {
     }
 
     if (g_viewportValid && memcmp(g_viewportData, vp, sizeof(g_viewportData)) == 0) {
-        InterlockedIncrement64(&g_statSkipped[6]);
+        ++g_statSkipped[6];
         return 0;
     }
     HRESULT hr = g_orig_SetViewport(dev, vp);
@@ -358,7 +367,7 @@ static HRESULT __stdcall Hooked_SetViewport(void* dev, const DWORD* vp) {
 
 static HRESULT __stdcall Hooked_SetScissorRect(void* dev, const RECT* rect) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[7]);
+    ++g_statCalls[7];
 
     if (!rect) {
         g_scissorValid = false;
@@ -370,7 +379,7 @@ static HRESULT __stdcall Hooked_SetScissorRect(void* dev, const RECT* rect) {
         && g_scissorData[1] == rect->top
         && g_scissorData[2] == rect->right
         && g_scissorData[3] == rect->bottom) {
-        InterlockedIncrement64(&g_statSkipped[7]);
+        ++g_statSkipped[7];
         return 0;
     }
     HRESULT hr = g_orig_SetScissorRect(dev, rect);
@@ -386,31 +395,31 @@ static HRESULT __stdcall Hooked_SetScissorRect(void* dev, const RECT* rect) {
 
 static HRESULT __stdcall Hooked_SetStreamSource(void* dev, UINT stream, void* vb, UINT offset, UINT stride) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[8]);
+    ++g_statCalls[8];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetStreamSource(dev, stream, vb, offset, stride);
 }
 
 static HRESULT __stdcall Hooked_SetIndices(void* dev, void* ib) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[9]);
+    ++g_statCalls[9];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetIndices(dev, ib);
 }
 
 static HRESULT __stdcall Hooked_SetVertexDeclaration(void* dev, void* decl) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[10]);
+    ++g_statCalls[10];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetVertexDeclaration(dev, decl);
 }
 
 static HRESULT __stdcall Hooked_SetFVF(void* dev, DWORD fvf) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[11]);
+    ++g_statCalls[11];
 
     if (g_fvfValid && g_fvf == fvf) {
-        InterlockedIncrement64(&g_statSkipped[11]);
+        ++g_statSkipped[11];
         return 0;
     }
     HRESULT hr = g_orig_SetFVF(dev, fvf);
@@ -423,21 +432,21 @@ static HRESULT __stdcall Hooked_SetFVF(void* dev, DWORD fvf) {
 
 static HRESULT __stdcall Hooked_SetVertexShader(void* dev, void* vs) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[12]);
+    ++g_statCalls[12];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetVertexShader(dev, vs);
 }
 
 static HRESULT __stdcall Hooked_SetPixelShader(void* dev, void* ps) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[13]);
+    ++g_statCalls[13];
     // Caching resource pointers is unsafe due to address recycling. Always call original.
     return g_orig_SetPixelShader(dev, ps);
 }
 
 static HRESULT __stdcall Hooked_Reset(void* dev, D3DPRESENT_PARAMETERS* params) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[14]);
+    ++g_statCalls[14];
     CrashDumper::Trace("D3D9 device Reset (dev=%p)", dev);
     Log("[D3D9State] Device Reset detected! Invalidating all caches and flushing delayed textures...");
     InvalidateAllCaches();
@@ -480,7 +489,7 @@ static PresentFn g_orig_Present = nullptr;
 static HRESULT __stdcall Hooked_Present(void* dev, const RECT* src, const RECT* dst,
                                         HWND hOverride, const RGNDATA* dirty) {
     CheckDeviceChange(dev);
-    InterlockedIncrement64(&g_statCalls[15]);
+    ++g_statCalls[15];
     FrameBench::OnPresent(FrameBench::Source::D3D9Present);
     WowOpt_OnFrameBoundary();
 
@@ -767,10 +776,11 @@ void ShutdownD3D9StateManagerAtProcessExit(void) {
 void ShutdownD3D9StateManager(void) {
     UnpatchDeviceVTable();
 
-    Log("[D3D9State] ===== Final Statistics (%lld frames) =====", g_totalFrames);
+    Log("[D3D9State] ===== Final Statistics (%lu frames, counts are lower "
+        "bounds) =====", g_totalFrames);
     if (g_totalFrames > 0) {
         for (int i = 0; i < NUM_HOOKS; i++) {
-            Log("[D3D9State]   %-22s: calls=%lld skipped=%lld (%.1f%%)",
+            Log("[D3D9State]   %-22s: calls=%lu skipped=%lu (%.1f%%)",
                 g_statNames[i], g_statCalls[i], g_statSkipped[i],
                 g_statCalls[i] > 0 ? (double)g_statSkipped[i] * 100.0 / g_statCalls[i] : 0.0);
         }

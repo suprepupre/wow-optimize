@@ -16,9 +16,9 @@ extern "C" void Log(const char* fmt, ...);
 #if !TEST_DISABLE_CRT_CHAR_SSE2
 
 // Stats defined in dllmain.cpp
-extern volatile LONG64 g_memchrHits, g_memchrFallbacks;
-extern volatile LONG64 g_strchrHits, g_strchrFallbacks;
-extern volatile LONG64 g_strcpyHits, g_strcpyFallbacks;
+extern long g_memchrHits, g_memchrFallbacks;
+extern long g_strchrHits, g_strchrFallbacks;
+extern long g_strcpyHits, g_strcpyFallbacks;
 
 // ====== memchr ======
 typedef void* (__cdecl *memchr_fn)(const void*, int, size_t);
@@ -31,25 +31,25 @@ static void* __cdecl Hooked_memchr(const void* ptr, int value, size_t num) {
         const unsigned char* p = (const unsigned char*)ptr;
         unsigned char c = (unsigned char)value;
         while (((uintptr_t)p & 15) && num > 0) {
-            if (*p == c) { InterlockedIncrement64(&g_memchrHits); return (void*)p; }
+            if (*p == c) { ++g_memchrHits; return (void*)p; }
             p++; num--;
         }
-        if (num == 0) { InterlockedIncrement64(&g_memchrHits); return nullptr; }
+        if (num == 0) { ++g_memchrHits; return nullptr; }
         __m128i cmpv = _mm_set1_epi8((char)c);
         while (num >= 16) {
             __m128i v = _mm_loadu_si128((const __m128i*)p);
             int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v, cmpv));
             if (mask) {
                 unsigned long idx; _BitScanForward(&idx, mask);
-                InterlockedIncrement64(&g_memchrHits); return (void*)(p + idx);
+                ++g_memchrHits; return (void*)(p + idx);
             }
             p += 16; num -= 16;
         }
-        while (num--) { if (*p == c) { InterlockedIncrement64(&g_memchrHits); return (void*)p; } p++; }
-        InterlockedIncrement64(&g_memchrHits); return nullptr;
+        while (num--) { if (*p == c) { ++g_memchrHits; return (void*)p; } p++; }
+        ++g_memchrHits; return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 fallback:
-    InterlockedIncrement64(&g_memchrFallbacks);
+    ++g_memchrFallbacks;
     return orig_memchr(ptr, value, num);
 }
 
@@ -65,9 +65,9 @@ static char* __cdecl Hooked_strchr(const char* str, int value) {
         uintptr_t addr = (uintptr_t)p;
         size_t prefix = (16 - (addr & 15)) & 15;
         for (size_t i = 0; i < prefix; i++) {
-            if ((unsigned char)*p == c) { InterlockedIncrement64(&g_strchrHits); return (char*)p; }
+            if ((unsigned char)*p == c) { ++g_strchrHits; return (char*)p; }
             if (*p == '\0') {
-                InterlockedIncrement64(&g_strchrHits);
+                ++g_strchrHits;
                 return (c == 0) ? (char*)p : nullptr;
             }
             p++;
@@ -83,7 +83,7 @@ static char* __cdecl Hooked_strchr(const char* str, int value) {
             if (mask) {
                 unsigned long idx; _BitScanForward(&idx, mask);
                 unsigned char found = (unsigned char)p[idx];
-                InterlockedIncrement64(&g_strchrHits);
+                ++g_strchrHits;
                 if (found == c) return (char*)(p + idx);
                 return (c == 0 && found == 0) ? (char*)(p + idx) : nullptr;
             }
@@ -91,7 +91,7 @@ static char* __cdecl Hooked_strchr(const char* str, int value) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 fallback:
-    InterlockedIncrement64(&g_strchrFallbacks);
+    ++g_strchrFallbacks;
     return orig_strchr(str, value);
 }
 
@@ -119,7 +119,7 @@ static char* __cdecl Hooked_strcpy(char* dst, const char* src) {
                 for (unsigned long j = 0; j <= idx; j++) {
                     dst[j] = src[j];
                 }
-                InterlockedIncrement64(&g_strcpyHits);
+                ++g_strcpyHits;
                 return ret;
             }
             _mm_storeu_si128((__m128i*)dst, v);
@@ -127,7 +127,7 @@ static char* __cdecl Hooked_strcpy(char* dst, const char* src) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 fallback:
-    InterlockedIncrement64(&g_strcpyFallbacks);
+    ++g_strcpyFallbacks;
     return orig_strcpy(dst, src);
 }
 
@@ -166,7 +166,7 @@ static char* __cdecl Hooked_strcat(char* dst, const char* src) {
                 for (unsigned long j = 0; j <= idx; j++) {
                     d[j] = src[j];
                 }
-                InterlockedIncrement64(&g_strcpyHits);
+                ++g_strcpyHits;
                 return dst;
             }
             _mm_storeu_si128((__m128i*)d, v);
@@ -174,7 +174,7 @@ static char* __cdecl Hooked_strcat(char* dst, const char* src) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 fallback:
-    InterlockedIncrement64(&g_strcpyFallbacks);
+    ++g_strcpyFallbacks;
     return orig_strcat(dst, src);
 }
 

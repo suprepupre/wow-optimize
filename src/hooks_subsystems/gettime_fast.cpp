@@ -13,8 +13,9 @@
 extern "C" void Log(const char* fmt, ...);
 
 // Statistics
-static volatile LONG64 g_gettime_calls = 0;
-static volatile LONG64 g_gettime_hits = 0;
+// Plain 32-bit: this is on the client's clock read, which Lua calls every frame.
+static long g_gettime_calls = 0;
+static long g_gettime_hits = 0;
 
 // Frame-cached tick count
 static volatile DWORD g_cachedTickCount = 0;
@@ -26,11 +27,11 @@ static GetTickCount_fn g_orig_GetTickCount = nullptr;
 
 // Hooked GetTickCount - returns cached value within same frame
 static DWORD WINAPI Hooked_GetTickCount(void) {
-    InterlockedIncrement64(&g_gettime_calls);
+    ++g_gettime_calls;
     
     DWORD cached = g_cachedTickCount;
     if (cached != 0 && cached == g_lastFrameTick) {
-        InterlockedIncrement64(&g_gettime_hits);
+        ++g_gettime_hits;
         return cached;
     }
     
@@ -61,10 +62,10 @@ void ShutdownGetTimeFast(void) {
         MH_DisableHook((void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetTickCount"));
     }
     
-    LONG64 calls = g_gettime_calls;
-    LONG64 hits = g_gettime_hits;
+    long calls = g_gettime_calls;
+    long hits = g_gettime_hits;
     if (calls > 0) {
-        Log("[GetTimeFast] Stats: %lld calls, %lld cached (%.1f%%)",
+        Log("[GetTimeFast] Stats: %ld calls, %ld cached (%.1f%%, lower bound)",
             calls, hits, 100.0 * hits / calls);
     }
 }

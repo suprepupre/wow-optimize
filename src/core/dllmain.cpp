@@ -990,9 +990,14 @@ long g_crtStrcmpHits = 0, g_crtStrcmpFallbacks = 0;
 long g_crtMemcmpHits = 0, g_crtMemcmpFallbacks = 0;
 long g_crtMemcpyHits = 0, g_crtMemcpyFallbacks = 0;
 long g_crtMemsetHits = 0, g_crtMemsetFallbacks = 0;
-volatile LONG64 g_memchrHits = 0, g_memchrFallbacks = 0;
-volatile LONG64 g_strchrHits = 0, g_strchrFallbacks = 0;
-volatile LONG64 g_strcpyHits = 0, g_strcpyFallbacks = 0;
+// Plain 32-bit. These were LONG64 bumped with InterlockedIncrement64 from
+// crt_char_fast.cpp, which meant every memchr, strchr and strcpy the client
+// made paid a lock cmpxchg8b retry loop on 32-bit x86 - on the fast-path return
+// as well, which is the path those replacements exist to reach. Lower bounds
+// now, and the lines below say so.
+long g_memchrHits = 0, g_memchrFallbacks = 0;
+long g_strchrHits = 0, g_strchrFallbacks = 0;
+long g_strcpyHits = 0, g_strcpyFallbacks = 0;
 static uint64_t g_tableReshapeHits = 0;
 static uint64_t g_getstrHits = 0, g_getstrFallbacks = 0;
 static uint64_t g_combatLogCacheHits = 0, g_combatLogCacheMisses = 0;
@@ -4504,15 +4509,15 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
             g_crtMemsetHits, g_crtMemsetFallbacks,
            (double)g_crtMemsetHits / (g_crtMemsetHits + g_crtMemsetFallbacks) * 100.0);
     if (g_memchrHits + g_memchrFallbacks > 0)
-        Log("[Stats] CRT memchr: %lld fast, %lld fallback (%.1f%%)",
+        Log("[Stats] CRT memchr: %ld fast, %ld fallback (%.1f%%, lower bound)",
             g_memchrHits, g_memchrFallbacks,
            (double)g_memchrHits / (g_memchrHits + g_memchrFallbacks) * 100.0);
     if (g_strchrHits + g_strchrFallbacks > 0)
-        Log("[Stats] CRT strchr: %lld fast, %lld fallback (%.1f%%)",
+        Log("[Stats] CRT strchr: %ld fast, %ld fallback (%.1f%%, lower bound)",
             g_strchrHits, g_strchrFallbacks,
            (double)g_strchrHits / (g_strchrHits + g_strchrFallbacks) * 100.0);
     if (g_strcpyHits + g_strcpyFallbacks > 0)
-        Log("[Stats] CRT strcpy: %lld fast, %lld fallback (%.1f%%)",
+        Log("[Stats] CRT strcpy: %ld fast, %ld fallback (%.1f%%, lower bound)",
             g_strcpyHits, g_strcpyFallbacks,
            (double)g_strcpyHits / (g_strcpyHits + g_strcpyFallbacks) * 100.0);
 
