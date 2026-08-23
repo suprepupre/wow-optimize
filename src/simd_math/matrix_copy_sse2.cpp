@@ -1043,32 +1043,58 @@ static float* __cdecl Hooked_MatScalarMul(float* out, float* src, float scalar) 
 // sub_4C2210: row-major affine 3D point transform  __cdecl(out3, mat16, pt3)  (6 xrefs)
 // ================================================================
 // out_i = mat[4i]*p.x + mat[4i+1]*p.y + mat[4i+2]*p.z + mat[4i+3], i=0..2.
-// (Row-vector form: each output row dotted with the homogeneous point (p,1).)
-// Transposing the three matrix rows with a zeroed 4th yields column vectors whose
-// linear combination px*c0 + py*c1 + pz*c2 + c3 reproduces exactly those products;
-// lane3 stays 0 and is never stored. Reads only mat[0..11] + pt[0..2]; writes 3
-// floats. Same four products as the FPU original (summation order sub-ULP).
+//
+// This used to say "same four products as the FPU original (summation order
+// sub-ULP)". That was asserted and it was false, which is what CLAUDE.md records
+// about every "sub-ULP" comment written here. Measured over 2000000 random
+// transforms with the translation at map scale, against a reference in Python
+// doubles rounding to single only where the client stores:
+//
+//     packed single, one association for all three lanes
+//         73.272% of components exact, 26.084% off by one ULP,
+//         0.53% off by two or more, worst absolute 1.953e-03
+//     scalar double, the client's own per-row association
+//         100.0000% exact, worst 0.000e+00
+//
+// Two millimetres in world units at the extreme, and the ULP tail runs to five
+// figures where the result lands near zero and cancellation makes an ULP tiny.
+//
+// The association is not one association. Read off sub_4C2210: row 0 computes
+// ((M0*px) + ((M1*py) + (M2*pz))) + M3, and rows 1 and 2 compute
+// ((M5*py) + ((M4*px) + (M6*pz))) + M7 - the row-0 lane leads with px and the
+// other two lead with py. A packed form has to give all three lanes the same
+// order, so it cannot match, and the transpose that made the vector version
+// possible is what made it wrong.
+//
+// Scalar double per row instead. x87 under MSVC carries 53 bits and so does a
+// double, so each row reproduces the client operation for operation and the
+// single rounding on store lands where the client's fstp does. No speed gain is
+// claimed: this is 18 scalar SSE2 operations against about 15 x87 ones with
+// stack shuffling between them, and sub_4C2210 has four callers. What changes
+// is that the answer is the client's answer.
 static float* __cdecl Hooked_RowAffinePoint(float* out, float* mat, float* pt) {
     ++g_matscalarmul_calls;  // shared misc-ops counter
     uintptr_t o = (uintptr_t)out, m = (uintptr_t)mat, p = (uintptr_t)pt;
     if (o > 0x10000 && o < 0xFFE00000 && m > 0x10000 && m < 0xFFE00000 &&
         p > 0x10000 && p < 0xFFE00000) {
         __try {
-            __m128 r0 = _mm_loadu_ps(mat);       // M0..M3
-            __m128 r1 = _mm_loadu_ps(mat + 4);   // M4..M7
-            __m128 r2 = _mm_loadu_ps(mat + 8);   // M8..M11
-            __m128 r3 = _mm_setzero_ps();
-            float px = pt[0], py = pt[1], pz = pt[2];
-            // r0=(M0,M4,M8,0)=col0  r1=(M1,M5,M9,0)=col1  r2=(M2,M6,M10,0)=col2
-            //                                              r3=(M3,M7,M11,0)=col3
-            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
-            __m128 res = _mm_add_ps(
-                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(px), r0),
-                           _mm_mul_ps(_mm_set1_ps(py), r1)),
-                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(pz), r2), r3));  // (out0,out1,out2,0)
-            _mm_store_ss(out,     res);
-            _mm_store_ss(out + 1, _mm_shuffle_ps(res, res, _MM_SHUFFLE(1, 1, 1, 1)));
-            _mm_store_ss(out + 2, _mm_shuffle_ps(res, res, _MM_SHUFFLE(2, 2, 2, 2)));
+            const double px = (double)pt[0];
+            const double py = (double)pt[1];
+            const double pz = (double)pt[2];
+            const double m0 = (double)mat[0],  m1 = (double)mat[1];
+            const double m2 = (double)mat[2],  m3 = (double)mat[3];
+            const double m4 = (double)mat[4],  m5 = (double)mat[5];
+            const double m6 = (double)mat[6],  m7 = (double)mat[7];
+            const double m8 = (double)mat[8],  m9 = (double)mat[9];
+            const double mA = (double)mat[10], mB = (double)mat[11];
+
+            // Row 0 leads with px; rows 1 and 2 lead with py. That is what the
+            // x87 stack does at 0x4C2219, 0x4C2235 and 0x4C2250 respectively,
+            // and the difference between the two shapes is why one packed
+            // expression cannot serve all three.
+            out[0] = (float)(((m0 * px) + ((m1 * py) + (m2 * pz))) + m3);
+            out[1] = (float)(((m5 * py) + ((m4 * px) + (m6 * pz))) + m7);
+            out[2] = (float)(((m9 * py) + ((m8 * px) + (mA * pz))) + mB);
             return out;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
