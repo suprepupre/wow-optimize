@@ -463,6 +463,7 @@ static void StopFreezeWatchdog() {
 #include "script_handler_cache.h"
 #include "dbc_lookup_cache.h"
 #include "../hooks_subsystems/tick_list_prefetch.h"
+#include "../diagnostics/lua_table_census.h"
 #include "event_dispatch_cache.h"
 #include "lua_getstr_inline.h"
 #include "lua_rawgeti_inline.h"
@@ -4709,6 +4710,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     AnimCensus::LogStats();
     PredictivePrefetch::LogStats();
     TickListPrefetch::LogStats();
+    LuaTableCensus::LogStats();
     D3D9StateManager_LogStats();
     DeviceCallbackGuard::LogStats();
     LayoutRelinkFast::LogStats();
@@ -8209,6 +8211,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // compile-time switch - and the linker then dropped Init and the thunk as
     // unreferenced, leaving only a LogStats that said "not installed".
     TickListPrefetch::Init();
+    LuaTableCensus::Init();
 
     Log("");
     Log("--- Parallel M2 Geometry SIMD Skinning ---");

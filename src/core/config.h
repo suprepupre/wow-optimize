@@ -206,6 +206,10 @@ namespace Config {
         // stop stepping it by hand, so the pace it normally sets can be
         // measured against doing nothing. Off, because on is what ships today.
         bool OptLuaGcStockPace = false;
+        // Diagnostic. Samples the tables the collector walks and reports how
+        // many of their slots are empty, which is the number a table compactor
+        // would have to justify itself against.
+        bool OptLuaTableCensus = false;
         // The lua_type fast path in hot_patch.cpp, which resolves a positive
         // stack index inline instead of calling the engine's index2adr. It was
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc
