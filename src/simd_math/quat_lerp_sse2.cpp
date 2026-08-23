@@ -28,21 +28,34 @@
 // x87 under MSVC carries 53 bits through the intermediate steps and rounds once
 // on store; packed single rounds at every operation.
 //
-// So the error was measured rather than asserted, over 12 million components of
-// randomised near-unit quaternions, against a reference reproducing the client's
-// own scheme at double precision:
+// The conclusion drawn from that used to be that a vector replacement here can
+// only ever be approximate, and this file shipped one: packed single throughout,
+// worst absolute error 2.980e-07.
 //
-//     all-single : bit-exact 39.27%, worst absolute error 2.980e-07
-//     mixed      : bit-exact 62.98%, worst absolute error 2.682e-07
+// That conclusion had a gap in it. SSE2 does not only have packed single. x87
+// under MSVC runs at 53-bit precision control, and 53 bits is exactly what a
+// packed double lane carries, so a sequence of packed double operations in the
+// client's own order reproduces the client's arithmetic step for step. Two
+// lanes instead of four, and bit-exact instead of close.
 //
-// A component lives in [-1, 1] where the float epsilon is 1.2e-07, so the worst
-// case is under three epsilon. Carried into a bone rotation that is an angular
-// error near 6e-07 radians - under a micrometre at the end of a metre-long bone,
-// and the result is renormalised immediately afterwards.
+// Measured on 3000000 randomised near-unit quaternion pairs, against a
+// reference in Python doubles rounding to single only where the client
+// executes `fstp dword`:
 //
-// It is not bit-exact and this file does not claim it is. The single-precision
-// form is the one used: the mixed form buys 0.3e-07 for a round trip through
-// double on every component, which is most of the reason to vectorise at all.
+//     packed double  bit-exact 100.0000%   worst 0.000e+00
+//     packed single  bit-exact   6.4893%   worst 2.980e-07
+//
+// The single-precision row reproduces the 2.980e-07 recorded by the earlier
+// measurement, which is what says the reference is the same reference. Its
+// bit-exact share is lower than the 39.27% recorded then because this reference
+// also models the two things that measurement did not: the four squares summed
+// as a shuffle tree rather than left to right, and the step schedule evaluated
+// in float rather than in x87 registers.
+//
+// The harness proves the scheme. It cannot prove the transcription or that this
+// machine's x87 precision control really is 53, so the module compares its
+// output with the client's as bit patterns in the running game, with no
+// tolerance, and disables itself on the first differing bit.
 // ---------------------------------------------------------------------------
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -51,6 +64,7 @@
 #include <windows.h>
 #include <emmintrin.h>
 #include <cstdint>
+#include <cstring>
 
 #include "quat_lerp_sse2.h"
 #include "MinHook.h"
@@ -66,44 +80,71 @@ namespace {
 constexpr uintptr_t kQuatLerp = 0x00982630;
 
 // The client's constants, read out of sub_982570.
-constexpr float kC0 = 1.021435f;
-constexpr float kC1 = 0.95906597f;
-constexpr float kC2 = 0.532516f;
-constexpr float kT1 = 0.91521198f;   // one Newton step is enough above this
-constexpr float kT2 = 0.6521197f;    // two above this, three below
+// Read back out of the image as exact bit patterns rather than typed in:
+// 3F82BE62, 3F0852F8, 3F758559, 3F26F151, 3F6A4B55 at 0x00AA2E5C upwards. They
+// are float constants in the client, so each widens to double exactly.
+constexpr double kC0 = 1.02143502235412598;   // flt_AA2E5C
+constexpr double kC1 = 0.959065973758697510;  // flt_AA2E64
+constexpr double kC2 = 0.532516002655029297;  // flt_AA2E60
+constexpr double kT1 = 0.915211975574493408;  // flt_AA2E6C, one step above this
+constexpr double kT2 = 0.652119696140289307;  // flt_AA2E68, two above, three below
 
 typedef float* (__cdecl* QuatLerp_fn)(float* out, float t, const float* a, const float* b);
 QuatLerp_fn orig_QuatLerp = nullptr;
 
-// How far the two results may stand apart. The measured worst case is 2.98e-07;
-// this sits an order of magnitude above it, so it catches a real divergence -
-// swapped operands, a misread constant - without tripping on rounding.
-constexpr float kTolerance = 4.0e-06f;
+// No tolerance. Every operation here is the client's operation at the client's
+// width in the client's order, so the only correct outcome is the same four
+// bit patterns. A tolerance would hide exactly the thing worth catching: if
+// this client's x87 precision control is not 53 bits, or a constant is
+// misread, or an operand is swapped, the first comparison says so and the
+// module retires itself.
 
 constexpr long kLearnCalls   = 20000;
 constexpr long kResampleMask = 1023;
 
 unsigned long g_calls      = 0;
 unsigned long g_agreements = 0;
-float         g_worstSeen  = 0.0f;
 volatile LONG g_armed      = 0;
 volatile LONG g_dead       = 0;
 bool          g_installed  = false;
 
 inline void LerpNormalise(float* out, float t, const float* a, const float* b) {
-    __m128 va = _mm_loadu_ps(a);
-    __m128 vb = _mm_loadu_ps(b);
-    __m128 q  = _mm_add_ps(_mm_mul_ps(_mm_sub_ps(vb, va), _mm_set1_ps(t)), va);
+    // --- the lerp, sub_982630 ---
+    // Four components at once, in double, then rounded to float exactly where
+    // the client rounds: it computes each component in x87 and ends the
+    // sequence with `fstp dword`, so the interpolated quaternion is single
+    // precision before anything else touches it.
+    __m128  va  = _mm_loadu_ps(a);
+    __m128  vb  = _mm_loadu_ps(b);
+    __m128d a01 = _mm_cvtps_pd(va);
+    __m128d a23 = _mm_cvtps_pd(_mm_movehl_ps(va, va));
+    __m128d b01 = _mm_cvtps_pd(vb);
+    __m128d b23 = _mm_cvtps_pd(_mm_movehl_ps(vb, vb));
+    __m128d td  = _mm_set1_pd((double)t);
 
-    // |q|^2, summed across the register.
-    __m128 sq = _mm_mul_ps(q, q);
-    sq = _mm_add_ps(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 0, 3, 2)));
-    sq = _mm_add_ps(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 3, 0, 1)));
-    float v1 = _mm_cvtss_f32(sq);
+    __m128d q01 = _mm_add_pd(_mm_mul_pd(_mm_sub_pd(b01, a01), td), a01);
+    __m128d q23 = _mm_add_pd(_mm_mul_pd(_mm_sub_pd(b23, a23), td), a23);
 
-    // The client's step schedule, unchanged.
-    float v2 = kC0 - (v1 - kC1) * kC2;
-    float v3;
+    float q[4];
+    _mm_storeu_ps(q, _mm_movelh_ps(_mm_cvtpd_ps(q01), _mm_cvtpd_ps(q23)));
+
+    // --- the normalise, sub_982570 ---
+    // Left to right, which is what the x87 stack does: x*x, then y*y and add,
+    // then z*z and add, then w*w and add. The version this replaces summed the
+    // four squares as a shuffle tree, (x2+z2)+(y2+w2), which is a different
+    // association and therefore a different number however wide the lanes are.
+    double x = q[0], y = q[1], z = q[2], w = q[3];
+    double v1 = x * x;
+    v1 = v1 + y * y;
+    v1 = v1 + z * z;
+    v1 = v1 + w * w;
+
+    // The client's step schedule. In double, because the client keeps every one
+    // of these in an x87 register at 53-bit precision and never stores one to
+    // float. Doing it in float, as this used to, rounds five times to 24 bits
+    // where the client rounds to 53.
+    double v2 = kC0 - (v1 - kC1) * kC2;
+    double v3;
     if (v1 > kT1) {
         v3 = v2;
     } else {
@@ -112,7 +153,13 @@ inline void LerpNormalise(float* out, float t, const float* a, const float* b) {
         else          v3 = (kC0 - (v1 * (v2 * v2) - kC1) * kC2) * v2;
     }
 
-    _mm_storeu_ps(out, _mm_mul_ps(q, _mm_set1_ps(v3)));
+    // `fld dword [q]; fmul st,st(1); fstp dword [out]` - the float component is
+    // widened, multiplied at 53 bits, and rounded once on store.
+    __m128d v3d = _mm_set1_pd(v3);
+    __m128  qf  = _mm_loadu_ps(q);
+    __m128d p01 = _mm_mul_pd(_mm_cvtps_pd(qf), v3d);
+    __m128d p23 = _mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(qf, qf)), v3d);
+    _mm_storeu_ps(out, _mm_movelh_ps(_mm_cvtpd_ps(p01), _mm_cvtpd_ps(p23)));
 }
 
 void Retire(const char* why) {
@@ -152,29 +199,34 @@ float* __cdecl Hooked_QuatLerp(float* out, float t, const float* a, const float*
         return out;
     }
 
-    float worst = 0.0f;
+    // Compared as bit patterns, not as numbers. Two floats that differ in the
+    // last bit are not equal here, and -0.0 does not pass for 0.0.
+    bool same = true;
     for (int i = 0; i < 4; i++) {
-        float d = theirs[i] - mine[i];
-        if (d < 0.0f) d = -d;
-        if (d > worst) worst = d;
+        uint32_t bt, bm;
+        memcpy(&bt, &theirs[i], 4);
+        memcpy(&bm, &mine[i], 4);
+        if (bt != bm) { same = false; break; }
     }
-    if (worst > g_worstSeen) g_worstSeen = worst;
 
-    if (worst > kTolerance) {
-        Log("[QuatLerp] Diverged by %.3e at t=%.6f, past what rounding explains. "
-            "client=(%.7f %.7f %.7f %.7f) ours=(%.7f %.7f %.7f %.7f)",
-            worst, t, theirs[0], theirs[1], theirs[2], theirs[3],
-            mine[0], mine[1], mine[2], mine[3]);
-        Retire("a result differed by more than rounding can explain");
+    if (!same) {
+        Log("[QuatLerp] Differed from the client at t=%.9g. "
+            "client=(%08X %08X %08X %08X) ours=(%08X %08X %08X %08X)",
+            t,
+            *(const uint32_t*)&theirs[0], *(const uint32_t*)&theirs[1],
+            *(const uint32_t*)&theirs[2], *(const uint32_t*)&theirs[3],
+            *(const uint32_t*)&mine[0], *(const uint32_t*)&mine[1],
+            *(const uint32_t*)&mine[2], *(const uint32_t*)&mine[3]);
+        Retire("a result was not bit-identical to the client's");
         return out;
     }
 
     unsigned long ok = ++g_agreements;
     if (g_armed == 0 && ok >= kLearnCalls) {
         InterlockedExchange(&g_armed, 1);
-        Log("[QuatLerp] %lu interpolations matched the client within %.1e "
-            "(worst seen %.3e). Using the vector path from here; one call in %d "
-            "stays checked.", ok, kTolerance, g_worstSeen, (int)(kResampleMask + 1));
+        Log("[QuatLerp] %lu interpolations were bit-identical to the client. "
+            "Using the vector path from here; one call in %d stays checked.",
+            ok, (int)(kResampleMask + 1));
     }
     return out;
 }
@@ -202,10 +254,13 @@ bool Init() {
 
     g_installed = true;
     Log("[QuatLerp] ACTIVE on sub_982630, the per-bone quaternion interpolation. "
-        "Four components at once instead of one at a time on the x87 stack. "
-        "Verifying against the client for the first %ld calls; worst divergence "
-        "measured outside the game is 2.98e-07, tolerance here is %.1e.",
-        kLearnCalls, kTolerance);
+        "Two components at a time in double rather than one at a time on the "
+        "x87 stack, which makes it bit-identical to the client rather than "
+        "close to it: x87 under MSVC carries 53 bits and so does a packed "
+        "double lane. The first %ld results are compared with the client's as "
+        "bit patterns, with no tolerance, and one in %d stays checked after "
+        "that. A single differing bit disables it for the session.",
+        kLearnCalls, (int)(kResampleMask + 1));
     return true;
 }
 
@@ -213,8 +268,9 @@ void LogStats() {
     if (!Config::g_settings.OptQuatLerpSse2) return;
     if (!g_installed) { Log("[QuatLerp] not installed - nothing measured"); return; }
     if (g_calls == 0) { Log("[QuatLerp] installed but never called"); return; }
-    Log("[QuatLerp] %lu interpolations, %lu verified, worst divergence %.3e%s",
-        g_calls, g_agreements, g_worstSeen,
+    Log("[QuatLerp] %lu interpolations, %lu of them compared with the client "
+        "and bit-identical%s",
+        g_calls, g_agreements,
         g_dead ? " - DISABLED" : (g_armed ? "" : " (still verifying)"));
 }
 
