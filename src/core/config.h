@@ -210,6 +210,18 @@ namespace Config {
         // many of their slots are empty, which is the number a table compactor
         // would have to justify itself against.
         bool OptLuaTableCensus = false;
+        // UIFrameBatch reads as gating four things. Two of them, the message
+        // pump hook and the deferred field updates, are compiled out by
+        // CRASH_TEST_DISABLE_MSGPUMP_RC1 and TEST_DISABLE_DEFERRED_FIELD_UPDATES
+        // and have never run. What it really controls is these two. Issue #36,
+        // the artifacting that made it default off for everyone, can therefore
+        // only have come from one of them, and splitting makes that answerable
+        // in two runs instead of never.
+        //
+        // Both inherit UIFrameBatch, so no install changes behaviour until its
+        // owner sets one of them deliberately.
+        bool OptUiScriptHandlerCache = false;
+        bool OptUnitApiFastPath      = false;
         // The lua_type fast path in hot_patch.cpp, which resolves a positive
         // stack index inline instead of calling the engine's index2adr. It was
         // gated on OptDbcLookupCache as well and has nothing to do with .dbc

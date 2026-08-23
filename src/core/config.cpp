@@ -110,6 +110,8 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "TickListPrefetch", &Settings::OptTickListPrefetch },
     { "UI_Lua", "LuaGcStockPace", &Settings::OptLuaGcStockPace },
     { "UI_Lua", "LuaTableCensus", &Settings::OptLuaTableCensus },
+    { "UI_Lua", "UiScriptHandlerCache", &Settings::OptUiScriptHandlerCache },
+    { "UI_Lua", "UnitApiFastPath", &Settings::OptUnitApiFastPath },
     { "UI_Lua", "LuaTypeFast", &Settings::OptLuaTypeFast },
     { "General", "Win32ApiCaches", &Settings::OptWin32ApiCaches },
     { "General", "DebugApiHooks", &Settings::OptDebugApiHooks },
@@ -554,6 +556,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptTickListPrefetch    = GetPrivateProfileIntA("Graphics_Sound", "TickListPrefetch", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaGcStockPace      = GetPrivateProfileIntA("UI_Lua", "LuaGcStockPace", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaTableCensus      = GetPrivateProfileIntA("UI_Lua", "LuaTableCensus", 0, iniPath.c_str()) != 0;
+        // Inherit UIFrameBatch when absent, which is what these two were
+        // gated on before they had switches of their own.
+        g_settings.OptUiScriptHandlerCache = GetPrivateProfileIntA("UI_Lua", "UiScriptHandlerCache", g_settings.OptUIFrameBatch ? 1 : 0, iniPath.c_str()) != 0;
+        g_settings.OptUnitApiFastPath      = GetPrivateProfileIntA("UI_Lua", "UnitApiFastPath", g_settings.OptUIFrameBatch ? 1 : 0, iniPath.c_str()) != 0;
         // Same inheritance rule as FileIoHooks: each takes the switch it used to
         // hang off as its default, so an existing wow_opt.ini keeps behaving the
         // way it did until its owner writes the new key.

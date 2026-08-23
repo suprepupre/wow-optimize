@@ -7222,6 +7222,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool profOk = Config::g_settings.OptWin32ApiCaches && InstallGetPrivateProfileCache();
 
     Log("--- Message Pump ---");
+    // Both of the remaining UIFrameBatch uses gate code that is compiled out:
+    // this one by CRASH_TEST_DISABLE_MSGPUMP_RC1, which its own note calls
+    // CONFIRMED BROKEN with an infinite freeze, and the deferred field updates
+    // below by TEST_DISABLE_DEFERRED_FIELD_UPDATES. Neither has ever run, so
+    // the switch reads as gating four things and controls two.
     bool msgPumpOk = Config::g_settings.OptUIFrameBatch && InstallMsgPumpHook();
 
     Log("--- Swap/Present ---");
@@ -7413,7 +7418,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool strcpyOk = Config::g_settings.OptStrCatFast && InstallStrcatFast();
 
     Log("--- Script Handler Cache ---");
-    bool scriptHandlerOk = Config::g_settings.OptUIFrameBatch && InstallScriptHandlerCache();
+    bool scriptHandlerOk = Config::g_settings.OptUiScriptHandlerCache && InstallScriptHandlerCache();
 
     Log("--- DBC Lookup Cache ---");
     bool dbcLookupOk = Config::g_settings.OptDbcLookupCache && InstallDbcLookupCache();
@@ -8129,7 +8134,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("");
     Log("--- Logic Hooks (combat text, UI cache, heartbeat) ---");
 #if !TEST_DISABLE_UNIT_API_FASTPATH
-    bool logicHooksOk = Config::g_settings.OptUIFrameBatch && InstallLogicHooks();
+    bool logicHooksOk = Config::g_settings.OptUnitApiFastPath && InstallLogicHooks();
 #else
     bool logicHooksOk = false;
     Log("[LogicHooks] DISABLED via TEST_DISABLE_UNIT_API_FASTPATH");
