@@ -46,11 +46,22 @@
 //     packed single  bit-exact   6.4893%   worst 2.980e-07
 //
 // The single-precision row reproduces the 2.980e-07 recorded by the earlier
-// measurement, which is what says the reference is the same reference. Its
-// bit-exact share is lower than the 39.27% recorded then because this reference
-// also models the two things that measurement did not: the four squares summed
-// as a shuffle tree rather than left to right, and the step schedule evaluated
-// in float rather than in x87 registers.
+// measurement, which is what says the reference is the same reference.
+//
+// Width is the whole of it, and the summation order is not. The four squares
+// are now summed left to right, x2 then +y2 then +z2 then +w2, because that is
+// what the x87 stack does, and the version this replaces summed them as a
+// shuffle tree. That change was measured on its own and makes no difference:
+// in double, tree association and the client's order agreed on every one of
+// 2000000 randomised quaternions, worst 0.000e+00, even carried through the
+// nonlinear step schedule. It is written the client's way because that is
+// easier to check against the disassembly, not because it was the defect.
+//
+// The same question in the matrix-vector hook next door has the same answer,
+// and there the reason is plainer: the products of two floats are exact in
+// double and the sum is rounded to float immediately, so association cannot
+// survive to the result. Four million adversarial samples with the translation
+// twenty binary orders above the products found no disagreement either.
 //
 // The harness proves the scheme. It cannot prove the transcription or that this
 // machine's x87 precision control really is 53, so the module compares its
