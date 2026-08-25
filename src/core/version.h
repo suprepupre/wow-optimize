@@ -10,7 +10,7 @@
 
 #define WOW_OPTIMIZE_VERSION_MAJOR  3
 #define WOW_OPTIMIZE_VERSION_MINOR  19
-#define WOW_OPTIMIZE_VERSION_PATCH  0
+#define WOW_OPTIMIZE_VERSION_PATCH  1
 #define WOW_OPTIMIZE_VERSION_BUILD  0
 
 #define WOW_OPTIMIZE_VERSION_STR    "3.19.1"
@@ -758,6 +758,11 @@
 // ================================================================
 #ifndef WOWOPT_ISWINE_DEFINED
 #define WOWOPT_ISWINE_DEFINED
+// Everything from here down is C and C++ that the resource compiler cannot
+// parse. version.rc includes this file so the version numbers have one home
+// instead of five, and RC_INVOKED is what lets it stop reading at this line.
+#ifndef RC_INVOKED
+
 #include <windows.h>
 static inline bool IsWine() {
     static int cached = -1;
@@ -981,3 +986,4 @@ enum LogLevel {
 
 extern "C" void LogEx(LogLevel level, const char* context, const char* fmt, ...);
 
+#endif  // RC_INVOKED
