@@ -19,6 +19,7 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
+* [What's New in v3.19.1](#whats-new-in-v3191)
 * [What's New in v3.19.0](#whats-new-in-v3190)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
@@ -30,6 +31,143 @@ The current public build is focused on real frametime stability, long-session sm
 * [Building](#building)
 * [Core Architecture](#core-architecture)
 * [Troubleshooting & Diagnostics](#troubleshooting)
+
+---
+
+## What's New in v3.19.1
+
+A bugfix release. Two of these were reported by testers and reproduced in their
+logs; the rest came from reading our own numbers and finding they were wrong.
+
+### The glowing models
+
+Reported by [txtsd](https://github.com/txtsd): characters glowing, sometimes only
+the shoulder pads and the weapon, then snapping back. Turning Spread Model
+Animation off stopped it.
+
+The function that feature skips does not only pose bone skeletons. Its last
+instructions also animate materials, writing colour, alpha and emissive, and then
+walk the model's attachment list and animate each attached model. Weapons and
+shoulder pads are attached models, so skipping a character froze its colour
+tracks and skipped its whole attached chain with it.
+
+It now refuses to skip any model where either of those would have run. On the
+first session measured with the fix that turned out to be 94% of models, so the
+feature currently skips almost nothing. The report says so rather than implying
+a saving, and says which of the two halves is responsible.
+
+### A crash, and the same defect caught in another log
+
+One tester's dump ends inside the game's own error formatter, reading a line
+number out of a compiled script object that had already been freed. Another
+tester's log has the same defect caught earlier and more gently: Reuse Compiled
+Scripts noticed a cached chunk no longer matched a fresh compile and switched
+itself off.
+
+The cache decided a new Lua state had started by comparing one address. The game
+runs its own memory pool for Lua, so a new state is routinely allocated where the
+old one was and the comparison saw nothing. In the crashing session the tool's
+own log recorded six state changes and the cache reported two.
+
+It now hears about every state change directly from the part of the tool that
+detects them, and each kept script carries three fields read when it was stored
+and checked again before it is handed back.
+
+### The tool could be loaded into its own launcher
+
+`version.dll` sits in the same folder as the launcher and the loader, and Windows
+resolves it out of the application directory for anything that runs there. The
+loader thread called LoadLibrary without ever asking which process it was in, so
+a DLL that patches addresses inside the game could end up inside the launcher.
+It checks now.
+
+### Settings that did not do what they said
+
+* **Lua VM: stop the automatic GC** was read, written to the file and shown in
+  the launcher, and gated nothing at all. The collector was driven entirely by
+  the Adaptive GC Governor tickbox. Both now mean what they say.
+* **UI Frame Batch** had no launcher entry at all and could only be changed by
+  editing the ini by hand. It also looked like it controlled four things and
+  controlled two: the other two have been compiled out of the build for as long
+  as anyone can tell. Split into **Cache Script Handlers** and **Unit API Fast
+  Path**, each inheriting the old setting so nothing changes for anyone, which
+  makes the flickering reported in issue #36 answerable in two runs instead of
+  never.
+* **Terrain Read-Ahead** was compiled out of every build while appearing to be a
+  setting, and read its position from an address the game never writes. Both
+  fixed. It is off by default and what it does when it works has still never
+  been tested by anyone.
+
+### Numbers that were not true
+
+Six of these, and every one of them was in logs people have been reading.
+
+* **"98/100 SUBSYSTEM performance features installed"** and **"34/40 EXTENDED
+  performance features installed"**. Three and five were installed. A loop added
+  the rest to the count so the line would say so, beside 127 empty functions that
+  nothing called. All gone.
+* **The CVar watchdog reported a corrupted client in every log ever collected**,
+  on sessions that then played for five hours without a fault. Two of its entries
+  did not describe what they pointed at and two more treated a value of zero as
+  damage when the game simply had not filled that global in yet.
+* **Three modules read a world position from an address the game never writes.**
+  Every model distance the animation census has ever printed is a distance from
+  the map origin, and the terrain read-ahead silently did nothing on every frame
+  of every session because of it. The real one is the point the game itself
+  streams terrain around.
+* **The feature summary mixed three different units in one column.** Features on
+  hot paths report one hit per few thousand calls, and those counts sat beside
+  ones that count every call. One entry read as the smallest of five and is
+  really the largest by an order of magnitude.
+* **A short session printed one report, taken thirty seconds in.** The periodic
+  dump fires at 30 seconds and then every 300, and nothing but the frame times
+  was printed at exit, so a five-minute session reporting a visual defect
+  produced no evidence covering it. Every session ends with a full report now.
+* **The freeze watchdog dismissed the very stall people report.** It captures
+  where the main thread is stuck only past 45 seconds, so blocks of eleven to
+  fourteen seconds during a load were noted on one line and never diagnosed.
+  Eight seconds is enough now, once per stall.
+
+### Faster
+
+* **Roughly 120 locked instructions removed from hot paths.** Every call to
+  every hooked game function was paying one or two of them to keep a counter.
+  On 32-bit that is a locked read-modify-write, and they sat on the CRT string
+  functions, the Direct3D state hooks, the frustum test, the clock read and the
+  most expensive function in the whole client. The counts they keep are lower
+  bounds now and the reports say so.
+* **The bone rotation blend is exact.** It shipped approximate, with a measured
+  worst error of 2.98e-07 and only 6.5% of results identical to the game's. The
+  vector unit has double precision as well as single, and double is exactly what
+  the game's floating point stack carries, so the same operations in the same
+  order reproduce it perfectly. Measured over three million interpolations:
+  100.0000% identical, worst difference zero. The in-game check compares bit
+  patterns with no tolerance and switches the feature off on the first
+  difference.
+* **The point transform is exact too**, and was two millimetres out. Its comment
+  claimed otherwise; the claim had never been measured.
+
+### New, all off by default
+
+* **Spread Model Animation** now decides by distance from the camera rather than
+  by how crowded the scene is, after proving at runtime which field carries the
+  position. Models within 40 yards are never throttled.
+* **Object Tick Prefetch** — the game walks a list of objects every frame and
+  pokes each one, and the two fields it touches are in different cache lines.
+  1.39% of main-thread time in a measured session, spent waiting. It changes
+  nothing the game computes and refuses to install unless the function is
+  byte-for-byte the one it was written against.
+* **Table Emptiness Census** and **Leave Lua Garbage Collection Alone** are
+  diagnostics, not optimizations. Garbage collection is the most expensive Lua
+  work in every profile taken here, ahead of running scripts, and neither how
+  much of it is wasted nor how much of it this tool causes has ever been
+  measured. These two answer that.
+
+### Still not claimed
+
+No feature here has a measured frame-rate gain. The sizes of what they target
+are measured and their correctness is verified, two of them now bit for bit
+against the game's own answer, but no before-and-after frame time exists yet.
 
 ---
 
