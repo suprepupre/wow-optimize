@@ -294,6 +294,7 @@ namespace PerfDiagnostics { void LogPerformanceSnapshot(double elapsedMs); }
 
 static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
     bool escalatedThisStall = false;   // reset once the main thread ticks again
+    bool locatedThisStall   = false;   // one location per stall, see below
     while (g_freezeWatchdogActive) {
         Sleep(5000);
         if (!g_freezeWatchdogActive) break;
@@ -302,7 +303,7 @@ static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
         if (lastTick == 0) continue;
 
         DWORD elapsed = GetTickCount() - lastTick;
-        if (elapsed <= 10000) escalatedThisStall = false;
+        if (elapsed <= 10000) { escalatedThisStall = false; locatedThisStall = false; }
         if (elapsed > 10000) {
             // Loading screens, UI reloads and lua_State swaps legitimately block
             // the main thread (cold MPQ asset loads + addon (re)load). That is NOT
@@ -327,6 +328,30 @@ static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
                     "loading/transition -- this is no longer a normal load", elapsed);
                 CaptureFreezeLocation(g_mainThreadId);
                 PerfDiagnostics::LogPerformanceSnapshot((double)elapsed);
+            }
+
+            // One stack, once, for a block this long even when it is expected.
+            //
+            // Issue #57 is a loading screen that stayed up for ten to twelve
+            // seconds after the world was audibly and playably loaded. This
+            // watchdog saw it: the same session recorded main-thread blocks of
+            // 14103, 11265 and 11792 ms, and dismissed all three on this line
+            // because a transition was in progress. The escalation above only
+            // fires past 45 seconds, so nothing captured where the thread was,
+            // and the one instrument that could have answered the report said
+            // nothing by design.
+            //
+            // Eleven seconds is not a cold zone load on a machine that loads the
+            // same zone in two. Capturing the location costs a handful of lines
+            // once per stall and turns the next report into an answerable one.
+            // The 45-second escalation keeps its full snapshot; this adds only
+            // the location.
+            if (expected && elapsed > 8000 && !locatedThisStall) {
+                locatedThisStall = true;
+                Log("[FreezeWatchdog] blocked %u ms and flagged as loading/transition. "
+                    "That is long enough to be worth a location even though it may "
+                    "be a legitimate load:", elapsed);
+                CaptureFreezeLocation(g_mainThreadId);
             }
 
             if (expected) {
