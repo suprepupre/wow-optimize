@@ -8507,20 +8507,31 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Batch 24 kernel caches",        batch30Ok    ? " OK " : "SKIP");
     Log("  [%s] Batch 35 kernel caches",        batch35Ok    ? " OK " : "SKIP");
     Log("  [%s] Batch 38 kernel caches",        batch38Ok    ? " OK " : "SKIP");    
-    Log("  [%s] OutputDebugString (no-op)",    debugOk     ? " OK " : "FAIL");
-    Log("  [%s] CriticalSection (spin+try)",   csOk        ? " OK " : "FAIL");
-    Log("  [%s] Network (NODELAY+ACK+QoS+KA)", netOk      ? " OK " : "FAIL");
-    Log("  [%s] CreateFile (sequential I/O)",  fileOk      ? " OK " : "FAIL");
-    Log("  [%s] ReadFile (adaptive MPQ cache)", readOk     ? " OK " : "FAIL");
+    // Three states, not two. Every one of these lines used to print FAIL when
+    // its flag was false, and most of the flags are "switch && Install()", so a
+    // setting the user had simply turned off was reported as a failure of the
+    // tool. A Warmane player chasing a login error was sent straight at
+    // "[FAIL] Network" by this, and that line meant nothing except that
+    // PacketOffload was unticked.
+    auto HookState = [](bool enabled, bool ok) -> const char* {
+        if (!enabled) return " off";
+        return ok ? " OK " : "FAIL";
+    };
+
+    Log("  [%s] OutputDebugString (no-op)",    HookState(Config::g_settings.OptDebugApiHooks, debugOk));
+    Log("  [%s] CriticalSection (spin+try)",   HookState(Config::g_settings.OptLockSpinHooks, csOk));
+    Log("  [%s] Network (NODELAY+ACK+QoS+KA)", HookState(Config::g_settings.OptPacketOffload, netOk));
+    Log("  [%s] CreateFile (sequential I/O)",  HookState(Config::g_settings.OptFileIoHooks, fileOk));
+    Log("  [%s] ReadFile (adaptive MPQ cache)", HookState(Config::g_settings.OptFileIoHooks, readOk));
     #if !CRASH_TEST_DISABLE_MPQ_MMAP
         Log("  [ OK ] MPQ memory mapping (1-256MB files)");
     #else
         Log("  [SKIP] MPQ memory mapping (disabled - stability)");
     #endif  
-    Log("  [%s] CloseHandle (cache cleanup)",  closeOk     ? " OK " : "FAIL");
-    Log("  [%s] FlushFileBuffers (MPQ skip)",  flushOk     ? " OK " : "FAIL");
-    Log("  [%s] GetFileAttributesA (cache)",   faOk        ? " OK " : "FAIL");
-    Log("  [%s] SetFilePointer (64-bit)",      sfpOk       ? " OK " : "FAIL");
+    Log("  [%s] CloseHandle (cache cleanup)",  HookState(Config::g_settings.OptFileIoHooks, closeOk));
+    Log("  [%s] FlushFileBuffers (MPQ skip)",  HookState(Config::g_settings.OptFileIoHooks, flushOk));
+    Log("  [%s] GetFileAttributesA (cache)",   HookState(Config::g_settings.OptFileIoHooks, faOk));
+    Log("  [%s] SetFilePointer (64-bit)",      HookState(Config::g_settings.OptFileIoHooks, sfpOk));
     Log("  [%s] GlobalAlloc (mimalloc GMEM_FIXED)", gaOk      ? " OK " : "FAIL");
     // Reported here because it was reported nowhere, and its absence let a
     // "hits=0 misses=0" line stand in for "this was never built in".
