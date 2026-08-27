@@ -213,6 +213,9 @@ static void BuildKnownFuncTable() {
         { 0x00494A10,   214, "Hot_494A10" },
         { 0x007A50C0,   384, "Hot_7A50C0" },
         { 0x007C6D50,  1166, "Collision_ClipVertsToBox" },
+        // Seventeen callers, once per scene node per culling pass. Its samples
+        // used to be attributed to whichever named function preceded it.
+        { 0x0078F370,    97, "AABB_Overlap" },
         // Classifies every vertex of a collision model against the query box
         // as a six-bit outcode, four vertices per unrolled pass, then tests
         // each triangle by ANDing its three. Called once per line-of-sight or

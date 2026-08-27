@@ -308,6 +308,13 @@ namespace Config {
         // applied, so this is bit-exact rather than close. Opt-in, and it
         // predicts the client's whole output and compares before trusting itself.
         bool OptCollisionOutcode = false;
+        // The box-overlap predicate (sub_78F370) that seventeen culling and
+        // pick functions call once per scene node per pass. Six x87 compares,
+        // each leaving the FPU through fnstsw and a data-dependent branch,
+        // become two packed compares and one movemask. No arithmetic in it at
+        // all, so bit-exact rather than close. Opt-in, and it checks itself
+        // against the client before it stops calling it.
+        bool OptAabbOverlap = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
