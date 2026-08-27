@@ -139,6 +139,11 @@ constexpr long kLearnCalls   = 20000;
 constexpr long kResampleMask = 1023;   // one in 1024
 
 // What the deferred scan costs, measured rather than assumed.
+// Shortcuts taken on the second predicate rather than on an empty list, and
+// how many dependants were examined to reach them.
+unsigned long g_rejectShortcut = 0;
+double        g_rejectWalked   = 0.0;
+
 unsigned long g_scanSample   = 0;
 unsigned long g_scansSeen    = 0;
 double        g_nodesToMatch = 0.0;   // nodes walked before the first match
@@ -212,6 +217,44 @@ inline void     Wr(uintptr_t p, uint32_t v) { *(volatile uint32_t*)p = v; }
 // Empty is encoded two ways throughout this cluster: null, or a tagged sentinel
 // with the low bit set.
 inline bool IsEmptyLink(uint32_t v) { return v == 0 || (v & 1) != 0; }
+
+// Anchors the scan refuses to match on. sub_489710 tests each of the nine slots
+// with `!(*(a + 0x0C) & 0x800)` before comparing the frame, so an anchor with
+// that bit set can never satisfy it. sub_489C30 registers a dependant whatever
+// the bit says, because the point mask it ORs into the same word lives in the
+// low bits, and a dependants list holding only rejected anchors is therefore a
+// real and common state.
+constexpr unsigned kFN_flags   = 0x0C;   // the word the scan masks with 0x800
+constexpr unsigned kFN_next    = 0x04;   // dependants are chained through here
+constexpr unsigned kScanReject = 0x800;
+
+// How far to walk a dependants list before giving up and deferring. The list is
+// short in practice; the cap is only there so a corrupted chain cannot turn a
+// shortcut into an unbounded walk.
+constexpr unsigned kMaxDependants = 64;
+
+// True when every dependant carries 0x800, so the client's scan cannot match
+// any of them and will walk the whole list for nothing.
+//
+// This is what the measurement said was worth doing. On the deferred path the
+// client averages 73 to 93 nodes at nine dereferences each and finds nothing
+// 91.6% of the time, sampled one call in 256 over 154566 of them. The module's
+// own verification agrees independently: 43398 of 48265 checked calls, 89.9%,
+// had something at +0x38 and the client still found nothing.
+//
+// Read-only, bounded, and inside the caller's SEH. Anything unreadable or
+// longer than the cap answers false, which defers exactly as before.
+bool AllDependantsRejected(uint32_t head, unsigned* outCount) {
+    unsigned n = 0;
+    uint32_t e = head;
+    while (!IsEmptyLink(e)) {
+        if (++n > kMaxDependants) return false;
+        if ((Rd(e + kFN_flags) & kScanReject) == 0) { *outCount = n; return false; }
+        e = Rd(e + kFN_next);
+    }
+    *outCount = n;
+    return n > 0;
+}
 
 // The not-found tail of sub_489710, transcribed from 0x004897CE to 0x0048983D.
 // `result` is eax, `self` is ecx. There are no calls in it.
@@ -292,7 +335,16 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
         // is false it does nothing at all, so there is nothing to be clever
         // about and the original is the cheapest correct answer.
         if (result[1] != 0) { g_earlyOut++; return orig_Relink(self, edx); }
-        predictNotFound = IsEmptyLink(Rd(This + kDependentsOff));
+        uint32_t head = Rd(This + kDependentsOff);
+        if (IsEmptyLink(head)) {
+            predictNotFound = true;
+        } else {
+            // The list is not empty, which used to end the matter. Ask whether
+            // any of it could match instead.
+            unsigned k = 0;
+            predictNotFound = AllDependantsRejected(head, &k);
+            if (predictNotFound) { ++g_rejectShortcut; g_rejectWalked += k; }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return orig_Relink(self, edx);
     }
@@ -429,6 +481,14 @@ void LogStats() {
             examined, 100.0 * (double)g_earlyOut / (double)examined,
             g_dead ? "; the remaining invocations came after this module retired"
                    : "");
+    }
+    if (g_rejectShortcut > 0) {
+        Log("[LayoutRelink] %lu shortcuts came from the second test - a dependants "
+            "list where every entry carries 0x800, so the scan could not have "
+            "matched any of them - after looking at %.1f entries on average. "
+            "Before this test those all deferred and the client walked the whole "
+            "list for nothing.",
+            g_rejectShortcut, g_rejectWalked / (double)g_rejectShortcut);
     }
     if (g_scansSeen > 0) {
         double avgLen   = g_nodesTotal / (double)g_scansSeen;
