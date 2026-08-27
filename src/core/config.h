@@ -315,6 +315,14 @@ namespace Config {
         // all, so bit-exact rather than close. Opt-in, and it checks itself
         // against the client before it stops calling it.
         bool OptAabbOverlap = false;
+        // The bone rotation track (sub_828680), run once per animated bone per
+        // frame from the largest entry in the main-thread profile. Keyframes are
+        // four uint16 expanded as v * K - 1.0, and x86 has no register path from
+        // an integer to the x87 stack, so the client spills and reloads every
+        // component - up to sixteen times a call. Packed double rounds where the
+        // client rounds, so this is bit-exact. Opt-in, and it compares all
+        // twenty-four output bytes against the client before trusting itself.
+        bool OptAnimQuatUnpack = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
