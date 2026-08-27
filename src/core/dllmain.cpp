@@ -242,6 +242,66 @@ static void FreezeDumpOtherThreads(DWORD mainTid) {
 // return addresses tell us who called it: d3d9.dll/vulkan = DXVK GPU/pipeline
 // wait, wow_optimize.dll = our fault, Wow.exe = engine/addon. This is what turns
 // a useless "SleepHook 10s ago" into an actual diagnosis.
+// A burst of EIP samples from the frozen thread, and what they say.
+//
+// CaptureFreezeLocation takes one. For a thread that is genuinely blocked one is
+// enough - every sample would be the same address anyway. For a thread that is
+// spinning it is close to useless: it names whichever instruction the loop
+// happened to be on, and a reader reasonably concludes the thread is stuck
+// there. A user chasing dead freezes in raids and battlegrounds got
+// "STUCK AT: EIP=wow.exe+0x44E2B2" out of this, which is lua_pushnumber, a
+// twelve-instruction leaf that cannot hang. The thread was running Lua the
+// whole time.
+//
+// Two hundred samples tell the two apart on their own. All landing in one place
+// means blocked. Spread across a range means spinning, and the spread names the
+// loop. Neither needs a debugger, which is what makes it useful to hand to
+// someone who cannot get symbols for the client.
+static void SampleFrozenThread(DWORD mainTid) {
+    if (mainTid == 0) return;
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, mainTid);
+    if (!h) return;
+
+    constexpr int kSamples = 200;
+    uintptr_t eips[kSamples];
+    int got = 0;
+    for (int i = 0; i < kSamples; i++) {
+        if (SuspendThread(h) == (DWORD)-1) break;
+        CONTEXT ctx; ctx.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(h, &ctx)) eips[got++] = ctx.Eip;
+        ResumeThread(h);
+        Sleep(5);                       // one second of wall clock in total
+    }
+    CloseHandle(h);
+    if (got < 8) return;
+
+    // Distinct addresses first: that number alone answers the question.
+    uintptr_t uniq[kSamples]; int uniqN = 0, counts[kSamples] = {};
+    for (int i = 0; i < got; i++) {
+        int j = 0;
+        for (; j < uniqN; j++) if (uniq[j] == eips[i]) { counts[j]++; break; }
+        if (j == uniqN) { uniq[uniqN] = eips[i]; counts[uniqN] = 1; uniqN++; }
+    }
+
+    Log("!!! %d samples over one second landed on %d distinct addresses. %s",
+        got, uniqN,
+        uniqN <= 2 ? "That is a blocked thread: it is not executing."
+                   : "That is a running thread: it is spinning, not blocked, and "
+                     "the addresses below are the loop.");
+
+    // Top five, largest first.
+    for (int shown = 0; shown < 5; shown++) {
+        int best = -1;
+        for (int j = 0; j < uniqN; j++)
+            if (counts[j] > 0 && (best < 0 || counts[j] > counts[best])) best = j;
+        if (best < 0 || counts[best] == 0) break;
+        char buf[MAX_PATH + 32];
+        FreezeClassifyAddr(uniq[best], buf);
+        Log("!!!     %5.1f%%  %s", 100.0 * (double)counts[best] / (double)got, buf);
+        counts[best] = 0;
+    }
+}
+
 static void CaptureFreezeLocation(DWORD mainTid) {
     if (mainTid == 0) return;
     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
@@ -327,6 +387,7 @@ static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
                 Log("!!! LOADING STALL !!! Main thread blocked %u ms and still flagged as "
                     "loading/transition -- this is no longer a normal load", elapsed);
                 CaptureFreezeLocation(g_mainThreadId);
+                SampleFrozenThread(g_mainThreadId);
                 PerfDiagnostics::LogPerformanceSnapshot((double)elapsed);
             }
 
@@ -360,6 +421,10 @@ static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
                 Log("!!! FREEZE DETECTED !!! Main thread silent for %u ms (no loading/transition active)", elapsed);
                 Log("!!! Last main thread tick: %u, current: %u", lastTick, GetTickCount());
                 CaptureFreezeLocation(g_mainThreadId);
+                // One address cannot tell a blocked thread from a spinning one,
+                // and the difference decides whether a debugger or a profiler is
+                // the right tool next.
+                SampleFrozenThread(g_mainThreadId);
 
                 // Concise suspect list only: features that logged an error or were
                 // active right up to the stall. The old full dump printed 100+
