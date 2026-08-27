@@ -8483,18 +8483,28 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("  [ -- ] mimalloc CRT redirect (REMOVED)");  // destabilized Winsock
+    // Three states, not two. Every one of these lines used to print FAIL when
+    // its flag was false, and most of the flags are "switch && Install()", so a
+    // setting the user had simply turned off was reported as a failure of the
+    // tool. A Warmane player chasing a login error was sent straight at
+    // "[FAIL] Network" by this, and that line meant nothing except that
+    // PacketOffload was unticked.
+    auto HookState = [](bool enabled, bool ok) -> const char* {
+        if (!enabled) return " off";
+        return ok ? " OK " : "FAIL";
+    };
     Log("  [%s] Sleep hook (PreciseSleep)",    sleepOk     ? " OK " : "FAIL");
-    Log("  [%s] GetTickCount (QPC)",           tickOk      ? " OK " : "FAIL");
-    Log("  [%s] timeGetTime (QPC sync)",       tgtOk       ? " OK " : "FAIL");
+    Log("  [%s] GetTickCount (QPC)",           HookState(Config::g_settings.OptTimingFix, tickOk));
+    Log("  [%s] timeGetTime (QPC sync)",       HookState(Config::g_settings.OptTimingFix, tgtOk));
     Log("  [%s] Heap optimization (LFH)",      heapOk      ? " OK " : "FAIL");
-    Log("  [%s] ThreadId cache (TLS)",         tidOk       ? " OK " : "FAIL");
+    Log("  [%s] ThreadId cache (TLS)",         HookState(Config::g_settings.OptThreadIdCache, tidOk));
     #if !CRASH_TEST_DISABLE_QPC_CACHE
-        Log("  [%s] QPC cache (50us coalesce)",    qpcOk       ? " OK " : "FAIL");
+        Log("  [%s] QPC cache (50us coalesce)",    HookState(Config::g_settings.OptTimingFix, qpcOk));
     #else
         Log("  [SKIP] QPC cache (crash isolation)");
     #endif        
-    Log("  [%s] IsBadPtr (fast VirtualQuery)", bpOk        ? " OK " : "FAIL");    
-    Log("  [%s] CompareStringA (ASCII fast)",  cmpOk       ? " OK " : "FAIL");
+    Log("  [%s] IsBadPtr (fast VirtualQuery)", HookState(Config::g_settings.OptDebugApiHooks, bpOk));    
+    Log("  [%s] CompareStringA (ASCII fast)",  HookState(Config::g_settings.OptStrStrSse2, cmpOk));
     Log("  [%s] MBT/WCT (SSE2 ASCII fast)",    mbwcOk      ? " OK " : "SKIP");
     Log("  [%s] CRT mem/str fast paths",        crtOk       ? " OK " : "SKIP");
     Log("  [%s] GetSystemInfo cache",            sysInfoOk    ? " OK " : "SKIP");
@@ -8507,16 +8517,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] Batch 24 kernel caches",        batch30Ok    ? " OK " : "SKIP");
     Log("  [%s] Batch 35 kernel caches",        batch35Ok    ? " OK " : "SKIP");
     Log("  [%s] Batch 38 kernel caches",        batch38Ok    ? " OK " : "SKIP");    
-    // Three states, not two. Every one of these lines used to print FAIL when
-    // its flag was false, and most of the flags are "switch && Install()", so a
-    // setting the user had simply turned off was reported as a failure of the
-    // tool. A Warmane player chasing a login error was sent straight at
-    // "[FAIL] Network" by this, and that line meant nothing except that
-    // PacketOffload was unticked.
-    auto HookState = [](bool enabled, bool ok) -> const char* {
-        if (!enabled) return " off";
-        return ok ? " OK " : "FAIL";
-    };
 
     Log("  [%s] OutputDebugString (no-op)",    HookState(Config::g_settings.OptDebugApiHooks, debugOk));
     Log("  [%s] CriticalSection (spin+try)",   HookState(Config::g_settings.OptLockSpinHooks, csOk));
