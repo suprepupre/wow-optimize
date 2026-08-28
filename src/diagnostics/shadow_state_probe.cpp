@@ -103,6 +103,28 @@ uint32_t g_nullMask     = 0;
 int      g_prevQuality  = -1;
 uint32_t g_windows      = 0;
 
+// The second argument, and the reason it is now counted.
+//
+// Every other input to the pass has been measured and is constant: quality 4 on
+// every one of 1205674 entries in a five-hour session, no null pointer, the
+// suppress flag set once at startup. The pass runs on every frame. So whatever
+// makes shadows flicker is not whether the pass runs, and a2 is the only input
+// left that can differ frame to frame.
+//
+// It matters because it gates a second shadow draw. sub_875F80 does its main
+// draw unconditionally and then, under `if (a2)`, sets a mode word - 13 above
+// quality 4, 5 above quality 2, otherwise 1 - and draws again through
+// dword_D43160 and dword_D43164 with a different source texture. At quality 4
+// that second draw uses mode 5. A second layer that appears and disappears from
+// frame to frame is what flicker looks like.
+//
+// Its caller computes it as `flt_ADF59C >= 0.0 || dword_CD8778 != 0`, and
+// sub_79A870 resets flt_ADF59C to -1.0 early in each frame, so it is genuinely a
+// per-frame decision rather than a setting.
+uint32_t g_a2Set        = 0;   // entries where the second draw was asked for
+uint32_t g_a2Flips      = 0;   // times it differed from the previous entry
+int      g_prevA2       = -1;
+
 // Whole session, so a window that never fires still has something behind it.
 uint32_t g_totalEntries = 0;
 uint32_t g_totalRan     = 0;
@@ -112,7 +134,7 @@ uint32_t g_totalRan     = 0;
 // At file scope: the naked thunk reaches it from inline assembly.
 static void* g_origPass = nullptr;
 
-extern "C" void __cdecl ShadowProbe_NoteEntry() {
+extern "C" void __cdecl ShadowProbe_NoteEntry(uint32_t a2) {
     uint32_t suppress, quality, f0, f1, f2, f3;
     __try {
         suppress = *(volatile uint32_t*)ADDR_Suppress;
@@ -142,6 +164,11 @@ extern "C" void __cdecl ShadowProbe_NoteEntry() {
     g_ran++;
     g_totalRan++;
 
+    int a2Now = a2 ? 1 : 0;
+    if (a2Now) g_a2Set++;
+    if (g_prevA2 >= 0 && a2Now != g_prevA2) g_a2Flips++;
+    g_prevA2 = a2Now;
+
     if (g_prevQuality >= 0 && (int)quality != g_prevQuality) {
         Log("[ShadowProbe] extShadowQuality changed %d -> %d", g_prevQuality, (int)quality);
     }
@@ -152,9 +179,12 @@ extern "C" void __cdecl ShadowProbe_NoteEntry() {
 // preserved and the client's own code runs unchanged.
 __declspec(naked) static void HookedShadowPass() {
     __asm {
-        pushad
-        pushfd
+        pushad                        ; 32 bytes
+        pushfd                        ; 4 more, so 0x24 below the entry stack
+        mov  eax, [esp+2Ch]           ; a2: entry [esp+8], now [esp+0x24+8]
+        push eax
         call ShadowProbe_NoteEntry
+        add  esp, 4
         popfd
         popad
         jmp  dword ptr [g_origPass]
@@ -217,6 +247,14 @@ void OnFrame() {
         100.0 * (double)g_ran / (double)g_entries,
         g_blockedNull, g_blockedQual, g_reinit);
 
+    if (g_ran) {
+        Log("[ShadowProbe]   the second shadow draw was asked for on %u of those "
+            "%u runs (%.1f%%) and changed between consecutive frames %u time(s). "
+            "It is the only input to the pass that varies, so if it is flipping, "
+            "that is a shadow layer appearing and disappearing.",
+            g_a2Set, g_ran, 100.0 * (double)g_a2Set / (double)g_ran, g_a2Flips);
+    }
+
     if (g_blockedNull) {
         Log("[ShadowProbe]   a null function pointer (mask %u) returns before the "
             "suppress flag is cleared, so shadows stay off until something sets "
@@ -229,6 +267,7 @@ void OnFrame() {
     }
 
     g_entries = g_ran = g_blockedNull = g_blockedQual = g_reinit = 0;
+    g_a2Set = g_a2Flips = 0;
     g_nullMask = 0;
 }
 
