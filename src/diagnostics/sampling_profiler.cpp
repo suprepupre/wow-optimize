@@ -639,7 +639,10 @@ static uintptr_t g_selfEnd  = 0;
 // name instead of an offset nobody can resolve without the matching .map.
 // Every Lua fast path registers itself, which alone is 55 names, plus the
 // allocator hooks and the caches. 64 was exactly enough to overflow.
-static constexpr int MAX_SELF_SYMBOLS = 128;
+// Raised from 128 when every detour in the project started registering itself.
+// The DLL installs a few hundred, and a table that fills up silently leaves the
+// hot code it would have named indistinguishable from code nobody registered.
+static constexpr int MAX_SELF_SYMBOLS = 512;
 struct SelfSymbol { uintptr_t addr; const char* name; };
 static SelfSymbol g_selfSymbols[MAX_SELF_SYMBOLS] = {};
 static int        g_selfSymbolCount = 0;
@@ -698,6 +701,25 @@ void RegisterSelfSymbol(const char* name, const void* addr) {
     g_selfSymbols[g_selfSymbolCount].addr = (uintptr_t)addr;
     g_selfSymbols[g_selfSymbolCount].name = name;
     g_selfSymbolCount++;
+}
+
+// Called from the one wrapper every hook in this project passes through, so a
+// detour installed anywhere gets a name without its module having to remember.
+//
+// The name is the address being hooked, which is what a reader wants: seeing
+// "hook@00489710" beside a hot offset says the time is in our detour on the UI
+// layout relink, and no linker map is needed to know it. RegisterSelfSymbol
+// keeps the pointer rather than a copy, so the text has to outlive the call -
+// hence the fixed pool rather than a local buffer.
+extern "C" void WowOpt_NoteDetour(uintptr_t target, const void* detour) {
+    if (!detour) return;
+    static char  s_names[MAX_SELF_SYMBOLS][16];
+    static int   s_used = 0;
+    if (s_used >= MAX_SELF_SYMBOLS) return;
+    char* n = s_names[s_used];
+    wsprintfA(n, "hook@%08X", (unsigned)target);
+    s_used++;
+    RegisterSelfSymbol(n, detour);
 }
 
 // Nearest registered symbol at or below addr, within a sane distance. The bound
@@ -813,6 +835,14 @@ static uintptr_t HottestAddressInPage(uintptr_t pageBase) {
 // is the difference between a number a reader can act on and a number they can
 // only stare at. It costs a handful of lines, once per report.
 static void DumpSelfSymbolTable() {
+    // Once per session, not once per report. Every detour in the project
+    // registers itself now, so this is a few hundred lines; repeating it in each
+    // periodic profile would bury the profile itself. The addresses do not move
+    // during a run, so one printing serves every report in the log.
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+
     if (g_selfSymbolCount == 0 || !g_selfBase) {
         Log("[SamplingProfiler] === no self-symbols registered - every wowopt+0x "
             "entry below is unresolvable without this build's linker map ===");

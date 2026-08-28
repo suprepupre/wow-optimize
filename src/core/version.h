@@ -826,6 +826,9 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 // every translation unit that installs a hook.
 extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte);
 extern "C" void WowOpt_LogDuplicateHook(void* target);
+// Records a detour's address with the sampling profiler under a name made from
+// the function it hooks. Cheap and silent; safe before the profiler has started.
+extern "C" void WowOpt_NoteDetour(uintptr_t target, const void* detour);
 
 static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, void** original) {
 #if ALLOW_WOW_INTERNAL_HOOKS_ON_WINE == 0
@@ -895,7 +898,16 @@ static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, voi
         return MH_ERROR_UNSUPPORTED_FUNCTION;
     }
 
-    return MH_CreateHook(target, detour, original);
+    MH_STATUS st = MH_CreateHook(target, detour, original);
+    // Name the detour to the profiler. Fifty-nine files install hooks and only
+    // fourteen register a symbol, which is why about nine percent of executing
+    // time in a tester's profile appeared as bare "wowopt+0x" offsets that need
+    // this exact build's linker map to resolve. This is the one wrapper every
+    // hook in the project passes through, so registering here names all of them
+    // at once, and the name it makes - the address being hooked - is the thing a
+    // reader actually wants to know.
+    if (st == MH_OK) WowOpt_NoteDetour((uintptr_t)target, detour);
+    return st;
 }
 
 // Every direct MH_CreateHook in this project now goes through the same check.
