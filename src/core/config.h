@@ -329,6 +329,11 @@ namespace Config {
         // on the compare inside that loop. Opt-in, and it predicts against the
         // client before it skips anything.
         bool OptLuaPoolFast = false;
+        // The vector animation track (sub_82B0A0). Eight call sites, six of
+        // them inside the largest entry in the main-thread profile, against one
+        // for the quaternion track. Opt-in, and it compares all twenty output
+        // bytes against the client before trusting itself.
+        bool OptAnimVec3Track = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
