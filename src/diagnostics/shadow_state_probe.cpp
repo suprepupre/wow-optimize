@@ -63,15 +63,41 @@ static DWORD g_lastReport = 0;
 static constexpr DWORD REPORT_MS = 10000;
 
 // Per window.
-static uint32_t g_frames        = 0;
-static uint32_t g_suppressed    = 0;   // frames with the flag set
+//
+// These count SAMPLES, not frames, and the first version of this file called
+// them frames. It is called from MainThreadPump, which is not the render loop:
+// in the log that prompted the fix it took 135163 samples while the client
+// presented 305208 frames, so it saw 44.3% of them and a reader dividing by ten
+// seconds got a frame rate that was wrong by more than half.
+//
+// What that does and does not cost is worth stating, because the answer differs
+// per counter. g_passAdvanced watches a byte the client bumps once per shadow
+// pass; under-sampling can only make it miss a change, never invent one, so a
+// window reporting zero really is a window where the pass did not run.
+// g_suppressed and g_flips are shares of samples: a flag toggling faster than
+// the sample rate could alias, though a per-frame toggle would still show up as
+// roughly half the samples suppressed rather than none of them.
+static uint32_t g_samples       = 0;
+static uint32_t g_suppressed    = 0;   // samples with the flag set
 static uint32_t g_flips         = 0;   // transitions either way
-static uint32_t g_passAdvanced  = 0;   // frames where the pass counter moved
-static uint32_t g_nullPtrFrames = 0;   // frames with any of the four null
+static uint32_t g_passAdvanced  = 0;   // samples where the pass counter moved
+static uint32_t g_nullPtrFrames = 0;   // samples with any of the four null
+static DWORD    g_windowStart   = 0;
 static int      g_prevSuppress  = -1;
 static uint32_t g_prevTick      = 0xFFFFFFFF;
 static int      g_prevQuality   = -1;
 static uint32_t g_nullMask      = 0;   // which pointers were seen null
+
+// A ten-second window can say the pass did not run; it cannot say when it
+// stopped, and the moment is what identifies the cause. In the log that prompted
+// this, the pass died 17 seconds after a PLAYER_LEAVING_WORLD loading screen and
+// stayed dead for three and a half minutes - which is only visible by lining two
+// timestamps up by hand. So the transition is logged as it happens, and the next
+// log answers "stopped right after what" by itself.
+static bool     g_passStalled   = false;
+static uint32_t g_stillSamples  = 0;
+static DWORD    g_lastMoveAt    = 0;
+static constexpr uint32_t kStallSamples = 60;   // about a second at the observed rate
 
 // Whole session.
 static uint32_t g_windows = 0;
@@ -79,9 +105,12 @@ static uint32_t g_windows = 0;
 bool Init() {
     if (!Config::g_settings.OptShadowStateProbe) return true;
     g_active = true;
-    g_lastReport = GetTickCount();
+    g_lastReport = g_windowStart = GetTickCount();
     Log("[ShadowProbe] Watching the client's shadow state (suppress flag 0x%08X, "
-        "quality 0x%08X). Read-only; reports every %lu seconds.",
+        "quality 0x%08X). Read-only; reports every %lu seconds. It samples from "
+        "the main-thread pump, NOT from the render loop, so the counts below are "
+        "samples and the report says how many per second - do not read a frame "
+        "rate out of them.",
         (unsigned)ADDR_Suppress, (unsigned)ADDR_Quality,
         (unsigned long)(REPORT_MS / 1000));
     return true;
@@ -105,7 +134,7 @@ void OnFrame() {
         return;
     }
 
-    ++g_frames;
+    ++g_samples;
     if (suppress) ++g_suppressed;
     if (nulls) { ++g_nullPtrFrames; g_nullMask |= nulls; }
 
@@ -113,7 +142,29 @@ void OnFrame() {
     if (g_prevSuppress >= 0 && s != g_prevSuppress) ++g_flips;
     g_prevSuppress = s;
 
-    if (g_prevTick != 0xFFFFFFFF && tick != g_prevTick) ++g_passAdvanced;
+    DWORD now = GetTickCount();
+    if (g_lastMoveAt == 0) g_lastMoveAt = now;
+
+    if (g_prevTick != 0xFFFFFFFF && tick != g_prevTick) {
+        ++g_passAdvanced;
+        if (g_passStalled) {
+            Log("[ShadowProbe] the shadow pass STARTED advancing again after %lu ms "
+                "stopped", (unsigned long)(now - g_lastMoveAt));
+            g_passStalled = false;
+        }
+        g_stillSamples = 0;
+        g_lastMoveAt = now;
+    } else if (g_prevTick != 0xFFFFFFFF && !g_passStalled) {
+        if (++g_stillSamples >= kStallSamples) {
+            g_passStalled = true;
+            Log("[ShadowProbe] the shadow pass STOPPED advancing - the byte at "
+                "0x%08X has not moved for %lu ms, while the suppress flag reads %u "
+                "and quality reads %d. Whatever is in the log just above this line "
+                "is what it stopped after.",
+                (unsigned)ADDR_PassTick, (unsigned long)(now - g_lastMoveAt),
+                suppress, g_prevQuality);
+        }
+    }
     g_prevTick = tick;
 
     // A quality change is the moment worth naming, since it is the trigger.
@@ -123,22 +174,26 @@ void OnFrame() {
     }
     g_prevQuality = (int)quality;
 
-    DWORD now = GetTickCount();
     if (now - g_lastReport < REPORT_MS) return;
     g_lastReport = now;
     ++g_windows;
 
-    if (g_frames == 0) return;
+    if (g_samples == 0) return;
 
-    Log("[ShadowProbe] #%u  quality=%d  %u frames: suppressed %u (%.1f%%), "
-        "flag flipped %u time(s), shadow pass ran on %u",
-        g_windows, g_prevQuality, g_frames, g_suppressed,
-        100.0 * (double)g_suppressed / (double)g_frames,
+    DWORD windowMs = now - g_windowStart;
+    g_windowStart = now;
+
+    Log("[ShadowProbe] #%u  quality=%d  %u samples over %lu ms (%.0f/s): flag said "
+        "suppressed on %u (%.1f%%), flipped %u time(s), the shadow pass advanced "
+        "on %u",
+        g_windows, g_prevQuality, g_samples, (unsigned long)windowMs,
+        windowMs ? 1000.0 * (double)g_samples / (double)windowMs : 0.0,
+        g_suppressed, 100.0 * (double)g_suppressed / (double)g_samples,
         g_flips, g_passAdvanced);
 
     if (g_nullPtrFrames) {
         Log("[ShadowProbe]   one of the four shadow function pointers was null on "
-            "%u frames (mask %u) - the pass returns before clearing the flag when "
+            "%u samples (mask %u) - the pass returns before clearing the flag when "
             "that happens, which would wedge shadows off",
             g_nullPtrFrames, g_nullMask);
     }
@@ -148,13 +203,17 @@ void OnFrame() {
     if (g_flips > 2) {
         Log("[ShadowProbe]   the flag is oscillating - that is the flicker, and it "
             "is the client turning its own shadows off and on");
-    } else if (g_suppressed == g_frames) {
-        Log("[ShadowProbe]   shadows are suppressed for every frame in this window");
+    } else if (g_suppressed == g_samples) {
+        Log("[ShadowProbe]   the flag said suppressed on every sample in this window");
     } else if (g_passAdvanced == 0 && g_prevQuality > 0) {
-        Log("[ShadowProbe]   the shadow pass did not run at all in this window");
+        Log("[ShadowProbe]   the shadow pass did not run at all in this window, "
+            "while the flag said shadows were on and quality stayed at %d. Those "
+            "two disagree, and the pass is the one that decides what you see - "
+            "this is the state to catch, not a suppressed one",
+            g_prevQuality);
     }
 
-    g_frames = g_suppressed = g_flips = g_passAdvanced = g_nullPtrFrames = 0;
+    g_samples = g_suppressed = g_flips = g_passAdvanced = g_nullPtrFrames = 0;
     g_nullMask = 0;
 }
 
