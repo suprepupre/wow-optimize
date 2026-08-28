@@ -835,7 +835,7 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 // Defined in dllmain.cpp; declared here because this header is included from
 // every translation unit that installs a hook.
 extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte);
-extern "C" void WowOpt_LogDuplicateHook(void* target);
+extern "C" void WowOpt_LogDuplicateHook(void* target, void* loser);
 // Records a detour's address with the sampling profiler under a name made from
 // the function it hooks. Cheap and silent; safe before the profiler has started.
 extern "C" void WowOpt_NoteDetour(uintptr_t target, const void* detour);
@@ -898,7 +898,7 @@ static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, voi
             // maintained was the half that silently lost the race. The caller
             // usually logs this as "hook FAILED", which reads like a defect in
             // the target rather than a collision between two of ours.
-            WowOpt_LogDuplicateHook(target);
+            WowOpt_LogDuplicateHook(target, detour);
             return probe;
         }
         if (probe == MH_OK) {

@@ -129,12 +129,24 @@ extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte) {
 // ours, and the two want different fixes.
 static volatile long g_duplicateHooks = 0;
 
-extern "C" void WowOpt_LogDuplicateHook(void* target) {
+// A cap of eight was hiding the size of this. A tester's session reported 271
+// addresses claimed twice, and named eight of them - not enough to tell which
+// feature was quietly losing, and 271 is not a rounding error: it is 271 places
+// where a switch a tester ticked may install nothing.
+//
+// Naming the loser is what makes the list actionable. The address alone says a
+// collision happened; the detour that lost says which of our modules it was,
+// and every detour registers itself with the profiler now, so the symbol table
+// printed with the profile places it.
+extern "C" void WowOpt_LogDuplicateHook(void* target, void* loser) {
     long n = InterlockedIncrement(&g_duplicateHooks);
-    if (n <= 8) {
-        Log("[Hooks] 0x%08X is already hooked by another module of ours - two "
-            "implementations aimed at one function, and only one of them runs",
-            (unsigned)(uintptr_t)target);
+    if (n <= 48) {
+        Log("[Hooks] 0x%08X is already hooked by another module of ours - the "
+            "detour that lost is at %p, and only the first one installed runs",
+            (unsigned)(uintptr_t)target, loser);
+    } else if (n == 49) {
+        Log("[Hooks] ... more collisions follow; only the first 48 are named. "
+            "The count at the end of init is the real number.");
     }
 }
 
@@ -143,7 +155,9 @@ extern "C" void WowOpt_ReportForeignDetours() {
     if (dup > 0) {
         Log("[Hooks] %ld address%s targeted by more than one of our own modules. "
             "Whichever installs first wins, which is not decided anywhere on "
-            "purpose.", dup, dup == 1 ? "" : "es");
+            "purpose - so a switch a tester ticked can install nothing and say "
+            "nothing. Each line above names the detour that lost; place it with "
+            "the symbol table the profiler prints.", dup, dup == 1 ? "" : "es");
     }
 
     long n = g_foreignDetours;

@@ -499,7 +499,18 @@ namespace WowPerfHooks {
             // {(void*)0x0076E5A0, (void*)Hooked_FreeWrapper,       (void**)&orig_FreeWrapper,       "P2 free wrapper (2901 xrefs)"},
             // {(void*)0x0076E540, (void*)Hooked_MallocWrapper,     (void**)&orig_MallocWrapper,     "P3 malloc wrapper (1764 xrefs)"},
             // P4 data store lookup — safe: original sub_4CFD20 always copies exactly 680 (0x2A8) bytes
-            {(void*)0x004CFD20, (void*)Hooked_DsLookup,          (void**)&orig_DsLookup,          "P4 data store lookup (345 xrefs)"},
+            // P4 REMOVED: 0x4CFD20 is DbcLookupCache's function, and a tester's
+            // log shows the two colliding for it - "0x004CFD20 is already hooked
+            // by another module of ours". Whichever installed first won, and
+            // that was decided nowhere.
+            //
+            // This is the worse of the two and reintroduces a bug the other
+            // already fixed. It caches one entry against 4096, and it has no
+            // check on byte_C5DEA0 - the byte that decides whether the client
+            // would RLE-decode 680 bytes or simply memcpy them. Caching a memcpy
+            // is slower than the memcpy, which is what put this function at
+            // 3.76% of executing time before DbcLookupCache learned to bypass.
+            // {(void*)0x004CFD20, (void*)Hooked_DsLookup,          (void**)&orig_DsLookup,          "P4 data store lookup (345 xrefs)"},
             {(void*)0x0084DEB0, (void*)Hooked_LuaType,           (void**)&orig_LuaType,           "P5 lua_type (229 xrefs)"},
             // P6 REMOVED: 0x422910 already hooked by W2 (wow_opt_hooks). Duplicate = MH_ERROR_ALREADY_CREATED, orig_ stays null.
             // {(void*)0x00422910, (void*)Hooked_ObjDestroyChain,   (void**)&orig_ObjDestroyChain,   "P6 obj destroy chain (513 xrefs)"},
