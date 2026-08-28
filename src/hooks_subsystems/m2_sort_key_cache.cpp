@@ -46,16 +46,13 @@
 // A wrong key does not crash; it changes the sort order, and a wrong render
 // order shows up as transparency drawn in the wrong sequence. That is the kind
 // of defect nobody reports precisely, so the cache is bounded by something that
-// cannot drift: a generation number bumped every frame from the main-thread
-// pump. An entry from an earlier frame is not stale, it is invisible.
+// cannot drift: a generation number bumped on the frame boundary, from
+// WowOpt_OnFrameBoundary, which both present paths reach exactly once per
+// presented frame. An entry from an earlier frame is not stale, it is invisible.
 //
 // Within a single frame the material a submesh points at does not move - the
 // animation pass has finished before the render sort begins - so a hit inside
 // the generation is answering with data derived this frame.
-//
-// The pump is called twice per frame, so the generation advances twice. That
-// costs hits and cannot cost correctness, and it is left alone rather than
-// worked around.
 //
 // ---------------------------------------------------------------------------
 // Verification

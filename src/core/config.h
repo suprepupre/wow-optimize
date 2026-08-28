@@ -339,6 +339,11 @@ namespace Config {
         // dependent loads on every comparison inside a sort. Opt-in; the
         // comparator is pure, so both answers are simply compared.
         bool OptM2SortKey = false;
+        // CFrustum::IsAABBVisible (sub_9839E0), 0.82% of executing time. Most
+        // of it is eighteen sign tests and eighteen dependent loads to pick box
+        // corners, which SSE2 does as a blend. Opt-in; the function is pure so
+        // both answers are simply compared.
+        bool OptFrustumAabb = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

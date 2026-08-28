@@ -40,6 +40,7 @@
 #include "anim_quat_unpack_sse2.h"
 #include "anim_vec3_track_sse2.h"
 #include "m2_sort_key_cache.h"
+#include "frustum_aabb_sse2.h"
 #include "runtime_vm/lua_pool_fast.h"
 #include "anim_census.h"
 #include "net_diag.h"
@@ -1755,11 +1756,6 @@ static void MainThreadPump() {
 
     // Six reads, and only when the probe is switched on.
     ShadowStateProbe::OnFrame();
-
-    // Retires the render-sort key cache from the previous frame. A bump, not a
-    // clear - see the module. This pump runs twice per frame, so the generation
-    // advances twice, which costs cache hits and cannot cost correctness.
-    M2SortKey::NewFrame();
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -4840,6 +4836,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     AnimQuatUnpack::LogStats();
     AnimVec3Track::LogStats();
     M2SortKey::LogStats();
+    FrustumAabb::LogStats();
     LuaPoolFast::LogStats();
     CombatLogFilter::LogStats();
     LuaThisCache_LogStats();
@@ -5099,6 +5096,13 @@ static SwapPresentTiming_fn orig_SwapPresentTiming = nullptr;
 // hooked_Sleep tick, which is gated to fire at most once every 8ms - i.e. it
 // stops tracking frames at all above ~125fps.
 extern "C" void WowOpt_OnFrameBoundary() {
+    // Retires the render-sort key cache. It was bumped from MainThreadPump,
+    // which is reached from hooked_Sleep and from the frame limiter and so runs
+    // twice per frame - halving the cache's life for no reason. This is the
+    // boundary a presented frame actually marks, and the render sort that fills
+    // the cache happens before it, so one generation now spans exactly one pass.
+    M2SortKey::NewFrame();
+
     // Deferred unit field writes and coalesced world states must be applied on a
     // real frame boundary. Addons read unit state the moment an event arrives, so
     // a descriptor write that is still sitting in a queue is read as stale, and no
@@ -7419,6 +7423,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     AnimQuatUnpack::Init();
     AnimVec3Track::Init();
     M2SortKey::Init();
+    FrustumAabb::Init();
     LuaPoolFast::Init();
 
     Log("--- UnitAura Fast Path ---");
