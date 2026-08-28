@@ -334,6 +334,11 @@ namespace Config {
         // for the quaternion track. Opt-in, and it compares all twenty output
         // bytes against the client before trusting itself.
         bool OptAnimVec3Track = false;
+        // The render batch comparator (sub_824B70), 2.44% of executing time in
+        // an uncapped tester profile. It derives one 16-bit key through five
+        // dependent loads on every comparison inside a sort. Opt-in; the
+        // comparator is pure, so both answers are simply compared.
+        bool OptM2SortKey = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

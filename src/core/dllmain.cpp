@@ -39,6 +39,7 @@
 #include "aabb_overlap_sse2.h"
 #include "anim_quat_unpack_sse2.h"
 #include "anim_vec3_track_sse2.h"
+#include "m2_sort_key_cache.h"
 #include "runtime_vm/lua_pool_fast.h"
 #include "anim_census.h"
 #include "net_diag.h"
@@ -1754,6 +1755,11 @@ static void MainThreadPump() {
 
     // Six reads, and only when the probe is switched on.
     ShadowStateProbe::OnFrame();
+
+    // Retires the render-sort key cache from the previous frame. A bump, not a
+    // clear - see the module. This pump runs twice per frame, so the generation
+    // advances twice, which costs cache hits and cannot cost correctness.
+    M2SortKey::NewFrame();
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -4833,6 +4839,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     AabbOverlap::LogStats();
     AnimQuatUnpack::LogStats();
     AnimVec3Track::LogStats();
+    M2SortKey::LogStats();
     LuaPoolFast::LogStats();
     CombatLogFilter::LogStats();
     LuaThisCache_LogStats();
@@ -7411,6 +7418,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     AabbOverlap::Init();
     AnimQuatUnpack::Init();
     AnimVec3Track::Init();
+    M2SortKey::Init();
     LuaPoolFast::Init();
 
     Log("--- UnitAura Fast Path ---");
