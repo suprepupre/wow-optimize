@@ -390,6 +390,16 @@
 // SSE2 6-plane frustum culling (sub_9839E0, CFrustum::IsAABBVisible).
 // Vectorized check using transposed SSE2 dot products.
 // Set to 1 to revert to original FPU scalar implementation.
+//
+// It has been 1 for as long as the history records and nobody wrote down why,
+// so the client's own version is what runs and what the profile measures -
+// between 0.45% and 1.56% of executing time across a tester's reports.
+//
+// The FrustumAabb module now hooks that same address, under its own switch and
+// with its own verification. Turning this flag back to 0 would put two of our
+// modules on one function; the guard in WowOpt_CreateHookGuarded would catch it
+// and log a duplicate, but the second one to try would look like a defect in the
+// target instead of a collision. Retire one before enabling the other.
 #define TEST_DISABLE_FRUSTUM_CULL        1
 
 // SSE2 Ray-Triangle Intersection (sub_9836B0 / sub_983490).

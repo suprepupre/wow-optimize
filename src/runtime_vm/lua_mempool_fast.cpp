@@ -96,6 +96,7 @@ unsigned long long g_hintMisses   = 0;   // scan from the hint found nothing
 unsigned long long g_scanSteps    = 0;   // chunks examined, hinted path only
 unsigned long long g_iterBuckets[8];     // 0,1,2,3-4,5-8,9-16,17-32,33+
 unsigned long long g_maxCount     = 0;   // largest chunk count seen
+unsigned long long g_hintLowered  = 0;   // times a free pulled the hint back
 
 inline int Bucket(unsigned n) {
     if (n == 0) return 0;
@@ -168,6 +169,24 @@ bool g_installed = false;
 
 } // namespace
 
+void NoteFreeIntoChunk(unsigned pool, unsigned index) {
+    if (!g_installed) return;
+    int slot = (int)((pool >> 4) & (kHintSlots - 1));
+    if (g_hints[slot].pool != (uint32_t)pool) {
+        // A different pool owns this slot. Claiming it is still correct - the
+        // allocator checks the pool pointer before trusting the index - and it
+        // is what the allocator itself does on a miss.
+        g_hints[slot].pool  = (uint32_t)pool;
+        g_hints[slot].index = (uint32_t)index;
+        ++g_hintLowered;
+        return;
+    }
+    if ((uint32_t)index < g_hints[slot].index) {
+        g_hints[slot].index = (uint32_t)index;
+        ++g_hintLowered;
+    }
+}
+
 bool Init() {
     if (!Config::g_settings.OptLuaMemPoolFast) return true;
 
@@ -216,6 +235,20 @@ void LogStats() {
         Log("[LuaMemPool] %.2f chunks examined per served call on average.",
             (double)g_scanSteps / (double)g_hintHits);
     }
+
+    // The tail this was measured against: with the hint alone, 74.3% of calls
+    // found a block in the first chunk they looked at and 18.9% still walked 33
+    // or more, because a block freed into a chunk below the hint stays invisible.
+    // LuaPoolFast's free hook now says when that happens. Zero here with that
+    // feature on would mean the wiring is not reaching, which is a different
+    // fact from the tail not existing.
+    if (g_hintLowered)
+        Log("[LuaMemPool] the hint was pulled back %llu times by a free landing "
+            "below it - compare the histogram's 33+ bucket against a run without "
+            "LuaPoolFast to see what that bought", g_hintLowered);
+    else
+        Log("[LuaMemPool] no free ever pulled the hint back. Either LuaPoolFast "
+            "is off, or nothing was freed into a chunk below the hint.");
 
     static const char* kLabels[8] = {
         "0 (first chunk had one)", "1", "2", "3-4", "5-8", "9-16", "17-32", "33+"
