@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <d3d9.h>
 #include "d3d9_state_manager.h"
+#include "sampling_profiler.h"
 #include "font_glyph_cache.h"
 #include "texture_unload_delay.h"
 #include "d3d9_state_cache.h"
@@ -621,6 +622,15 @@ static bool PatchDeviceVTable(void* pDevice) {
     g_deviceHooked = true;
     InterlockedIncrement(&g_deviceResetCounter);
     Log("[D3D9State] Device vtable patched: %d/%d state hooks installed (vtable: %p, resetCounter: %ld)", patched, NUM_HOOKS, vtable, g_deviceResetCounter);
+
+    // Name these to the profiler. Sixteen detours on the device vtable are among
+    // the most frequently entered code this DLL owns - a tester's session put
+    // 43.7 million calls through SetVertexShader alone - and without a name they
+    // land in the profile as bare "wowopt+0x" offsets that need this exact
+    // build's linker map to resolve.
+    for (int i = 0; i < NUM_HOOKS; i++)
+        SamplingProfiler::RegisterSelfSymbol(g_statNames[i], g_hookFuncs[i]);
+
     return true;
 }
 
@@ -795,6 +805,19 @@ void D3D9StateManager_LogStats(void) {
     bool anySkip = false;
     for (int i = 0; i < NUM_HOOKS; i++) {
         if (g_statCalls[i] == 0) continue;
+        // Indices 12 and 13 are SetVertexShader and SetPixelShader, which never
+        // attempt a skip: caching a resource pointer is unsafe because the
+        // address can be recycled, so those two detours only count. Reporting
+        // them as "skipped=0 (0.0%)" beside hooks that genuinely tried and
+        // failed invites the reader to think the dedup was tested here and lost.
+        // It was never run.
+        if (i == 12 || i == 13) {
+            Log("[D3D9State]   %-22s: calls=%lu, no skip attempted - this detour "
+                "only counts, because caching a shader pointer is unsafe when the "
+                "address can be recycled",
+                g_statNames[i], g_statCalls[i]);
+            continue;
+        }
         Log("[D3D9State]   %-22s: calls=%lu skipped=%lu (%.1f%%)",
             g_statNames[i], g_statCalls[i], g_statSkipped[i],
             (double)g_statSkipped[i] * 100.0 / (double)g_statCalls[i]);

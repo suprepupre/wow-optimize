@@ -799,6 +799,48 @@ static uintptr_t HottestAddressInPage(uintptr_t pageBase) {
     return at;
 }
 
+// Where our own registered symbols sit, as offsets from the module base.
+//
+// Nine percent of executing time in a tester's uncapped session was inside this
+// DLL, spread over entries like "wowopt+0x11300" that name nothing. Resolving
+// those needs the linker map for that exact build, which nobody has when they
+// are reading a log - and guessing with a map from a different build is how this
+// project has already produced three wrong conclusions in a day, because a
+// nearest-symbol name reaches past the end of its own function.
+//
+// So the table goes in the log. An offset between two entries below is inside
+// the first of them, and one past the last is code nobody has registered. That
+// is the difference between a number a reader can act on and a number they can
+// only stare at. It costs a handful of lines, once per report.
+static void DumpSelfSymbolTable() {
+    if (g_selfSymbolCount == 0 || !g_selfBase) {
+        Log("[SamplingProfiler] === no self-symbols registered - every wowopt+0x "
+            "entry below is unresolvable without this build's linker map ===");
+        return;
+    }
+
+    // Insertion sort by offset; the table is small and this runs once a report.
+    int order[MAX_SELF_SYMBOLS];
+    for (int i = 0; i < g_selfSymbolCount; i++) order[i] = i;
+    for (int i = 1; i < g_selfSymbolCount; i++) {
+        int k = order[i], j = i - 1;
+        while (j >= 0 && g_selfSymbols[order[j]].addr > g_selfSymbols[k].addr) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = k;
+    }
+
+    Log("[SamplingProfiler] === wow_optimize.dll SYMBOLS (%d registered, offsets "
+        "from the module base) - use these to place any wowopt+0x entry below; an "
+        "offset between two of them is inside the first ===", g_selfSymbolCount);
+    for (int i = 0; i < g_selfSymbolCount; i++) {
+        const SelfSymbol& s = g_selfSymbols[order[i]];
+        Log("[SamplingProfiler]   +0x%05X  %s",
+            (unsigned)(s.addr - g_selfBase), s.name);
+    }
+}
+
 static void DumpFineHistogram(const uint32_t* counts, int slots, int shift,
                               uint64_t total, const char* title,
                               const char* addrFormat, uintptr_t addrBase) {
@@ -1336,6 +1378,7 @@ static void DumpResults() {
     // Our own hot spots at 256-byte resolution, then the client's at 512-byte.
     // Both are narrow enough to land on a single function, which the 4KB page
     // buckets in the ranking above cannot do.
+    DumpSelfSymbolTable();
     DumpFineHistogram(g_selfFineCounts, SELF_FINE_SLOTS, SELF_FINE_SHIFT, n,
                       "wow_optimize.dll HOT SPOTS (256-byte resolution)", "wowopt+0x%05X", 0);
     DumpFineHistogram(g_wowFineCounts, WOW_FINE_SLOTS, WOW_FINE_SHIFT, n,
