@@ -344,6 +344,10 @@ namespace Config {
         // corners, which SSE2 does as a blend. Opt-in; the function is pure so
         // both answers are simply compared.
         bool OptFrustumAabb = false;
+        // The segment/box test (sub_7F9480), 0.88% of executing time. The
+        // profile's weight is on a `test ah` waiting for an `fnstsw ax` - the
+        // x87 way of branching on a float compare, ten times over. Opt-in.
+        bool OptSegmentAabb = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
