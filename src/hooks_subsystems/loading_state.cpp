@@ -26,6 +26,7 @@
 
 #include "loading_state.h"
 #include "event_coalescer.h"
+#include "combat_log_filter.h"
 #include "runtime_vm/lua_gc_governor.h"
 #include "diagnostics/crash_dumper.h"
 
@@ -210,6 +211,14 @@ extern "C" bool __fastcall LoadingState_OnSignalEvent(int eventId, const char* f
         // Out-of-range ids are vanishingly rare; classify without caching.
         ApplyEventKind(ClassifyEvent(eventId));
     }
+
+    // Combat log filtering has its own switch and used to be reachable only from
+    // inside the coalescer's queue, below the IsActive() gate - so with the
+    // coalescer off, which is its default and which it stays because of the
+    // buffs-and-countdowns defect, the filter's own switch did nothing. It is
+    // asked here, before that gate.
+    if (CombatLogFilter::IsActive() &&
+        CombatLogFilter::ShouldDrop(eventId, format, vaStart)) return true;
 
     if (!EventCoalescer::IsActive()) return false;
     return EventCoalescer::TryQueue(eventId, format, vaStart);

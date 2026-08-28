@@ -126,12 +126,10 @@ static void DispatchSingle(const QueuedEvent* ev) {
 static bool TryQueueEvent(int eventId, const char* format, void* vaStart) {
     if (g_isReplaying) return false;
 
+    // Combat log filtering used to happen here, which made it reachable only when
+    // this feature was on. It has its own switch, so it now runs from the detour
+    // in LoadingState before this is ever called, and nothing is done twice.
     const char* eventName = GetEventName(eventId);
-    if (eventName && strcmp(eventName, "COMBAT_LOG_EVENT_UNFILTERED") == 0) {
-        if (CombatLogFilter::ShouldFilterEvent(eventId, format, (va_list)vaStart)) {
-            return true; // Drop (filter) the event
-        }
-    }
 
     static bool s_coalesceCache[4096] = {};
     static bool s_coalesceChecked[4096] = {};
@@ -243,6 +241,8 @@ extern "C" void EventCoalescer_Flush() {
 }
 
 namespace EventCoalescer {
+    const char* EventName(int eventId) { return GetEventName(eventId); }
+
     bool Init() {
         if (!Config::g_settings.OptEventCoalescer) return false;
 

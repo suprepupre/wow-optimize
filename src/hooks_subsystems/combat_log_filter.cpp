@@ -25,20 +25,73 @@
 // ============================================================================
 
 #include "combat_log_filter.h"
+#include "event_coalescer.h"
+#include "config.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
 
+extern "C" void Log(const char* fmt, ...);
+
 namespace CombatLogFilter {
+    bool g_active = false;
     static bool g_enabled = true;
     static unsigned int g_filteredCount = 0;
+    static unsigned int g_seenCount     = 0;
+
+    // Which event ids are COMBAT_LOG_EVENT_UNFILTERED. The client hands out ids
+    // per session, so this is resolved by name on first sight and remembered:
+    // 0 unknown, 1 yes, -1 no.
+    static signed char g_isCombatEvent[2048] = { 0 };
 
     bool Init() {
+        if (!Config::g_settings.OptCombatLogFilter) {
+            g_active = false;
+            return true;
+        }
+        g_active = true;
+        Log("[CombatLogFilter] ACTIVE. Drops COMBAT_LOG_EVENT_UNFILTERED unless the "
+            "source or the target is you, your party or your raid. This runs from "
+            "the FrameScript_SignalEvent detour and no longer needs the event "
+            "coalescer, which is where it used to live - with that feature off, "
+            "which is its default, ticking this box did nothing at all. It is a "
+            "behaviour change, not a free saving: arena and battleground opponents "
+            "fighting each other, boss abilities aimed at other NPCs and anything "
+            "between two units outside your group stop reaching addons.");
         return true;
     }
 
     void Shutdown() {
-        // No-op
+        g_active = false;
+    }
+
+    void LogStats() {
+        if (!Config::g_settings.OptCombatLogFilter) return;
+        if (!g_active)       { Log("[CombatLogFilter] not active - nothing filtered"); return; }
+        if (g_seenCount == 0) {
+            Log("[CombatLogFilter] active, but no combat log event has been seen yet");
+            return;
+        }
+        Log("[CombatLogFilter] %u combat log events seen, %u dropped (%.1f%%) as "
+            "involving neither you nor your group. Counts are lower bounds.",
+            g_seenCount, g_filteredCount,
+            100.0 * (double)g_filteredCount / (double)g_seenCount);
+    }
+
+    bool ShouldDrop(int eventId, const char* format, void* vaStart) {
+        if (!g_active) return false;
+        if (eventId < 0 || eventId >= 2048) return false;
+
+        if (g_isCombatEvent[eventId] == 0) {
+            const char* name = EventCoalescer::EventName(eventId);
+            if (!name) return false;   // unresolved; try again next time
+            g_isCombatEvent[eventId] =
+                (strcmp(name, "COMBAT_LOG_EVENT_UNFILTERED") == 0) ? 1 : -1;
+        }
+        if (g_isCombatEvent[eventId] != 1) return false;
+
+        g_seenCount++;
+        return ShouldFilterEvent(eventId, format, (va_list)vaStart);
     }
 
     bool ShouldFilterEvent(int eventId, const char* format, va_list args) {

@@ -4782,6 +4782,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     CollisionOutcode::LogStats();
     AabbOverlap::LogStats();
     AnimQuatUnpack::LogStats();
+    CombatLogFilter::LogStats();
     LuaThisCache_LogStats();
     LuaAllocCensus::LogStats();
     ReportCrtFreeStats();
@@ -8376,7 +8377,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     if (Config::g_settings.OptMouseClipRelease) MouseClipRelease::Init();
 
     Log("--- 10 More New Performance & Stability Features ---");
-    if (Config::g_settings.OptCombatLogFilter) CombatLogFilter::Init();
+    CombatLogFilter::Init();   // reads its own switch, and reports which way
     if (Config::g_settings.OptSoundVolumeLimit) SoundVolumeLimit::Init();
     if (Config::g_settings.OptTerrainHeightCache) TerrainHeightCache::Init();
 
