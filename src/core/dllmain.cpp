@@ -38,6 +38,7 @@
 #include "collision_outcode_sse2.h"
 #include "aabb_overlap_sse2.h"
 #include "anim_quat_unpack_sse2.h"
+#include "runtime_vm/lua_pool_free_fast.h"
 #include "anim_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
@@ -4830,6 +4831,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     CollisionOutcode::LogStats();
     AabbOverlap::LogStats();
     AnimQuatUnpack::LogStats();
+    LuaPoolFreeFast::LogStats();
     CombatLogFilter::LogStats();
     LuaThisCache_LogStats();
     LuaAllocCensus::LogStats();
@@ -7406,6 +7408,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CollisionOutcode::Init();
     AabbOverlap::Init();
     AnimQuatUnpack::Init();
+    LuaPoolFreeFast::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST

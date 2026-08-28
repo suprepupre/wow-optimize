@@ -323,6 +323,12 @@ namespace Config {
         // client rounds, so this is bit-exact. Opt-in, and it compares all
         // twenty-four output bytes against the client before trusting itself.
         bool OptAnimQuatUnpack = false;
+        // The Lua pool free (sub_855670). Every block returned to the client's
+        // own Lua pool makes it walk that pool's chunks, two dependent loads
+        // each, until one contains the pointer. Two tester freeze samples landed
+        // on the compare inside that loop. Opt-in, and it predicts against the
+        // client before it skips anything.
+        bool OptLuaPoolFreeFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

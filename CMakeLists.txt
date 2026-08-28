@@ -107,6 +107,7 @@ add_library(wow_optimize SHARED
     src/simd_math/collision_outcode_sse2.cpp
     src/simd_math/aabb_overlap_sse2.cpp
     src/simd_math/anim_quat_unpack_sse2.cpp
+    src/runtime_vm/lua_pool_free_fast.cpp
     src/runtime_vm/lua_proto_cache.cpp
     src/simd_math/quat_lerp_sse2.cpp
     src/hooks_subsystems/render_null_guard.cpp
