@@ -138,26 +138,86 @@ static volatile long g_duplicateHooks = 0;
 // collision happened; the detour that lost says which of our modules it was,
 // and every detour registers itself with the profiler now, so the symbol table
 // printed with the profile places it.
+// Which detour owns each address we successfully hooked. Filled on success,
+// consulted when MinHook says a target is already taken.
+//
+// This exists because the count was being read as something it was not. It said
+// "271 addresses targeted by more than one of our own modules", and it was
+// counting attempts. LuaFastPath rediscovers and re-hooks its fifty-five
+// functions after every UI reload, so each reload added fifty-five to a number
+// labelled "addresses" - the figure climbed 55, 163, 271 through one session
+// while the set of addresses never changed. Reading the disassembly of our own
+// build finds three genuine cross-module overlaps, not two hundred.
+//
+// A module re-attempting its own hook is harmless and expected. Two different
+// modules aiming at one function is the thing worth reporting, so the two are
+// now told apart by whether the detour is the same one that already won.
+namespace {
+constexpr int kOwnerSlots = 1024;              // power of two, open addressed
+struct HookOwner { uintptr_t target; uintptr_t detour; };
+HookOwner g_hookOwners[kOwnerSlots] = {};
+volatile long g_reattempts = 0;
+
+inline int OwnerSlot(uintptr_t target) {
+    return (int)(((target >> 4) * 2654435761u) & (kOwnerSlots - 1));
+}
+}  // namespace
+
+extern "C" void WowOpt_RecordHookOwner(uintptr_t target, const void* detour) {
+    int i = OwnerSlot(target);
+    for (int n = 0; n < kOwnerSlots; n++) {
+        HookOwner& s = g_hookOwners[i];
+        if (s.target == 0) { s.target = target; s.detour = (uintptr_t)detour; return; }
+        if (s.target == target) return;         // first owner keeps the slot
+        i = (i + 1) & (kOwnerSlots - 1);
+    }
+}
+
 extern "C" void WowOpt_LogDuplicateHook(void* target, void* loser) {
+    uintptr_t t = (uintptr_t)target;
+    int i = OwnerSlot(t);
+    for (int n = 0; n < kOwnerSlots; n++) {
+        HookOwner& s = g_hookOwners[i];
+        if (s.target == 0) break;
+        if (s.target == t) {
+            if (s.detour == (uintptr_t)loser) {
+                // The same module asking again, which several do after a UI
+                // reload. Counted so its absence is not mistaken for silence.
+                InterlockedIncrement(&g_reattempts);
+                return;
+            }
+            break;
+        }
+        i = (i + 1) & (kOwnerSlots - 1);
+    }
+
     long n = InterlockedIncrement(&g_duplicateHooks);
     if (n <= 48) {
-        Log("[Hooks] 0x%08X is already hooked by another module of ours - the "
+        Log("[Hooks] 0x%08X is already hooked by a DIFFERENT module of ours - the "
             "detour that lost is at %p, and only the first one installed runs",
-            (unsigned)(uintptr_t)target, loser);
+            (unsigned)t, loser);
     } else if (n == 49) {
-        Log("[Hooks] ... more collisions follow; only the first 48 are named. "
-            "The count at the end of init is the real number.");
+        Log("[Hooks] ... more collisions follow; only the first 48 are named.");
     }
 }
 
 extern "C" void WowOpt_ReportForeignDetours() {
     long dup = g_duplicateHooks;
     if (dup > 0) {
-        Log("[Hooks] %ld address%s targeted by more than one of our own modules. "
+        Log("[Hooks] %ld address%s targeted by two DIFFERENT modules of ours. "
             "Whichever installs first wins, which is not decided anywhere on "
             "purpose - so a switch a tester ticked can install nothing and say "
             "nothing. Each line above names the detour that lost; place it with "
             "the symbol table the profiler prints.", dup, dup == 1 ? "" : "es");
+    }
+
+    long re = g_reattempts;
+    if (re > 0) {
+        Log("[Hooks] %ld further attempt%s came from the module that already owns "
+            "the address - LuaFastPath re-hooks its own functions after every UI "
+            "reload, and that is expected. These used to be counted with the line "
+            "above, which is how a fixed set of addresses read as a number that "
+            "climbed all session.", re, re == 1 ? "" : "s");
     }
 
     long n = g_foreignDetours;

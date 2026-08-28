@@ -836,6 +836,9 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 // every translation unit that installs a hook.
 extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte);
 extern "C" void WowOpt_LogDuplicateHook(void* target, void* loser);
+// Records which detour won an address, so a later duplicate can be told apart
+// from the same module simply asking again.
+extern "C" void WowOpt_RecordHookOwner(uintptr_t target, const void* detour);
 // Records a detour's address with the sampling profiler under a name made from
 // the function it hooks. Cheap and silent; safe before the profiler has started.
 extern "C" void WowOpt_NoteDetour(uintptr_t target, const void* detour);
@@ -916,7 +919,10 @@ static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, voi
     // hook in the project passes through, so registering here names all of them
     // at once, and the name it makes - the address being hooked - is the thing a
     // reader actually wants to know.
-    if (st == MH_OK) WowOpt_NoteDetour((uintptr_t)target, detour);
+    if (st == MH_OK) {
+        WowOpt_NoteDetour((uintptr_t)target, detour);
+        WowOpt_RecordHookOwner((uintptr_t)target, detour);
+    }
     return st;
 }
 

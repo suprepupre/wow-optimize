@@ -333,6 +333,21 @@ void OnFrame() {
 bool Init() {
     if (!Config::g_settings.OptAnimCensus) return true;
 
+    // AnimLod hooks this same function. Two of our modules on one address means
+    // whichever installs first wins and the other logs what reads as a failure
+    // of the target - the collision this project has a guard for. Both have real
+    // switches, so a tester can tick both and get a silent race.
+    //
+    // The census yields, because it only measures and the other one is a feature
+    // a player asked for. Saying so is the point: an absent census with AnimLod
+    // on is a decision, and an absent census with AnimLod off would be a defect.
+    if (Config::g_settings.OptAnimLod) {
+        Log("[AnimCensus] not installing: AnimLod owns sub_%08X and both were "
+            "switched on. Turn AnimLod off to measure with this.",
+            (unsigned)ADDR_AnimateModel);
+        return true;
+    }
+
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     if (freq.QuadPart == 0) return false;
