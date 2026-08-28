@@ -16,7 +16,9 @@ namespace ShadowStateProbe {
 
 bool Init();
 
-// From the main-thread pump. Six reads; self-throttles its reporting.
+// From the main-thread pump. Only emits the periodic report - the measuring is
+// done by the hook on the shadow pass itself, because the sampling this used to
+// do ran twice per frame and answered the question wrongly.
 void OnFrame();
 
 void Shutdown();

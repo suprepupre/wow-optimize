@@ -7,32 +7,58 @@
 // without the DXVK proxy. So this is the client's own bug, and this module does
 // not try to fix it - it watches it, so there is something to reason from.
 //
-// What it watches, from reading the shadow subsystem at 0x873F80..0x876000:
+// ---------------------------------------------------------------------------
+// Why this stopped sampling
 //
-//   dword_B1D51C  the shadow suppress flag. While it is set, sub_873F80 reports
-//                 an effective quality of 0 to the whole engine and sub_8744E0
-//                 binds no shadow constants and no shadow textures at all.
-//                 Changing extShadowQuality sets it (sub_874210). Exactly one
-//                 function clears it - sub_875F80, the shadow pass, reached from
-//                 one call site.
+// The first version read six globals from the main-thread pump every frame and
+// inferred whether the shadow pass had run by watching byte_D4316C move. It
+// produced a confident, wrong answer: a fifty-minute log reported the pass dead
+// for three and a half minutes, and the code says that cannot happen the way it
+// was described.
 //
-//   dword_D43154  the configured quality, 0-5.
+// Two defects, both ours. MainThreadPump is called from hooked_Sleep and from
+// the frame limiter, and the eight-millisecond gate that deduplicates them sits
+// BELOW where the probe was called - so it ran twice per frame. Its sample count
+// came out at 2.005x the frames FrameBench counted from D3D9 Present, which is
+// what put the defect on the table. And reading a per-pass counter twice per
+// frame means the second read always sees no movement, so the "did the pass run"
+// figure was structurally capped near half and could sit at zero for minutes
+// while shadows rendered perfectly.
 //
-//   D43158/5C/60/64  four function pointers the shadow pass needs. sub_875F80
-//                 opens with
+// A sampler cannot answer this question. The pass either ran or it did not, and
+// the only instrument that says so exactly is the pass itself.
+//
+// ---------------------------------------------------------------------------
+// What is measured now
+//
+// sub_875F80 is the shadow pass. It has one caller, sub_7BB570, which has one
+// caller, sub_79A870 - the world render - and it sits on that function's
+// unconditional main line at 0x79AC21 with no branch in front of it. So an entry
+// count here is also the world-render count, and a window with no entries at all
+// is a different fact from a window where the pass was entered and declined.
+//
+// Read from the top of it:
+//
+//   dword_B1D51C  the suppress flag. sub_873F80 is six instructions and returns
+//                 `flag ? 0 : dword_D43154`, so while it is set every caller
+//                 that asks the engine for the shadow quality is told zero.
+//                 Changing extShadowQuality sets it. sub_875F80 is the only
+//                 thing that clears it, and it clears it on the way past - which
+//                 is why sampling almost never caught it set, and why "the flag
+//                 was never set" was never evidence of anything.
+//
+//   D43158/5C/60/64  four function pointers. The pass opens with
 //                     if (!D43158 || !D4315C || !D43160 || !D43164) return 0;
-//                 and that return happens *before* the flag is cleared. If any
-//                 of them is null at a given quality, the pass gives up and the
-//                 suppress flag stays set - which is what permanently missing
-//                 shadows would look like.
+//                 and that return is before the flag is cleared, so a null one
+//                 leaves shadows suppressed until something sets the pointer.
 //
-//   byte_D4316C   a counter the pass increments, used as a ring index only at
-//                 quality >= 5:  if (v5 >= 5) v3 = byte_D4316C; else v3 = 0;
-//                 So it also tells us whether the pass is running at all.
+//   dword_D43154  the configured quality. The pass does its work under
+//                 `if (quality >= 1)`, so quality 0 means entered and declined.
 //
-// Between them these separate the three explanations that fit the symptom:
-// a flag oscillating frame to frame, a null pointer wedging the pass, or the
-// pass simply not running. Read-only, six dwords a frame, off by default.
+// Those two conditions are the only ways past the entry that skip the work, so
+// the classification below is exhaustive by construction rather than by guess.
+// Read-only, six reads per pass, off by default, and the client's own code runs
+// with every register and the stack exactly as they arrived.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -42,183 +68,172 @@
 #include <cstdint>
 
 #include "shadow_state_probe.h"
+#include "MinHook.h"
 #include "config.h"
 #include "version.h"
 
 extern "C" void Log(const char* fmt, ...);
-extern DWORD g_mainThreadId;
 
-namespace ShadowStateProbe {
+MH_STATUS WineSafe_CreateHook(void* target, void* detour, void** original);
+MH_STATUS WO_EnableHook(void* target);
 
-static constexpr uintptr_t ADDR_Suppress = 0x00B1D51C;  // dword_B1D51C
-static constexpr uintptr_t ADDR_Quality  = 0x00D43154;  // dword_D43154
-static constexpr uintptr_t ADDR_Fn0      = 0x00D43158;
-static constexpr uintptr_t ADDR_Fn1      = 0x00D4315C;
-static constexpr uintptr_t ADDR_Fn2      = 0x00D43160;
-static constexpr uintptr_t ADDR_Fn3      = 0x00D43164;
-static constexpr uintptr_t ADDR_PassTick = 0x00D4316C;  // byte_D4316C
+namespace {
 
-static bool  g_active = false;
-static DWORD g_lastReport = 0;
-static constexpr DWORD REPORT_MS = 10000;
+constexpr uintptr_t ADDR_Pass     = 0x00875F80;
+constexpr uintptr_t ADDR_Suppress = 0x00B1D51C;
+constexpr uintptr_t ADDR_Quality  = 0x00D43154;
+constexpr uintptr_t ADDR_Fn0      = 0x00D43158;
+constexpr uintptr_t ADDR_Fn1      = 0x00D4315C;
+constexpr uintptr_t ADDR_Fn2      = 0x00D43160;
+constexpr uintptr_t ADDR_Fn3      = 0x00D43164;
 
-// Per window.
-//
-// These count SAMPLES, not frames, and the first version of this file called
-// them frames. It is called from MainThreadPump, which is not the render loop:
-// in the log that prompted the fix it took 135163 samples while the client
-// presented 305208 frames, so it saw 44.3% of them and a reader dividing by ten
-// seconds got a frame rate that was wrong by more than half.
-//
-// What that does and does not cost is worth stating, because the answer differs
-// per counter. g_passAdvanced watches a byte the client bumps once per shadow
-// pass; under-sampling can only make it miss a change, never invent one, so a
-// window reporting zero really is a window where the pass did not run.
-// g_suppressed and g_flips are shares of samples: a flag toggling faster than
-// the sample rate could alias, though a per-frame toggle would still show up as
-// roughly half the samples suppressed rather than none of them.
-static uint32_t g_samples       = 0;
-static uint32_t g_suppressed    = 0;   // samples with the flag set
-static uint32_t g_flips         = 0;   // transitions either way
-static uint32_t g_passAdvanced  = 0;   // samples where the pass counter moved
-static uint32_t g_nullPtrFrames = 0;   // samples with any of the four null
-static DWORD    g_windowStart   = 0;
-static int      g_prevSuppress  = -1;
-static uint32_t g_prevTick      = 0xFFFFFFFF;
-static int      g_prevQuality   = -1;
-static uint32_t g_nullMask      = 0;   // which pointers were seen null
+constexpr DWORD REPORT_MS = 10000;
 
-// A ten-second window can say the pass did not run; it cannot say when it
-// stopped, and the moment is what identifies the cause. In the log that prompted
-// this, the pass died 17 seconds after a PLAYER_LEAVING_WORLD loading screen and
-// stayed dead for three and a half minutes - which is only visible by lining two
-// timestamps up by hand. So the transition is logged as it happens, and the next
-// log answers "stopped right after what" by itself.
-static bool     g_passStalled   = false;
-static uint32_t g_stillSamples  = 0;
-static DWORD    g_lastMoveAt    = 0;
-static constexpr uint32_t kStallSamples = 60;   // about a second at the observed rate
+bool  g_installed = false;
+DWORD g_lastReport = 0;
 
-// Whole session.
-static uint32_t g_windows = 0;
+// Per window. Written from the pass, which is the main thread, and read from the
+// same thread, so plain counters - and the report says they are lower bounds.
+uint32_t g_entries      = 0;   // times the pass was entered
+uint32_t g_ran          = 0;   // times it reached the work
+uint32_t g_blockedNull  = 0;   // returned early on a null function pointer
+uint32_t g_blockedQual  = 0;   // entered, quality below 1, declined
+uint32_t g_reinit       = 0;   // suppress flag was set on entry and got cleared
+uint32_t g_nullMask     = 0;
+int      g_prevQuality  = -1;
+uint32_t g_windows      = 0;
 
-bool Init() {
-    if (!Config::g_settings.OptShadowStateProbe) return true;
-    g_active = true;
-    g_lastReport = g_windowStart = GetTickCount();
-    Log("[ShadowProbe] Watching the client's shadow state (suppress flag 0x%08X, "
-        "quality 0x%08X). Read-only; reports every %lu seconds. It samples from "
-        "the main-thread pump, NOT from the render loop, so the counts below are "
-        "samples and the report says how many per second - do not read a frame "
-        "rate out of them.",
-        (unsigned)ADDR_Suppress, (unsigned)ADDR_Quality,
-        (unsigned long)(REPORT_MS / 1000));
-    return true;
-}
+// Whole session, so a window that never fires still has something behind it.
+uint32_t g_totalEntries = 0;
+uint32_t g_totalRan     = 0;
 
-void OnFrame() {
-    if (!g_active) return;
-    if (GetCurrentThreadId() != g_mainThreadId) return;
+}  // namespace
 
-    uint32_t suppress, quality, tick;
-    uint32_t nulls = 0;
+// At file scope: the naked thunk reaches it from inline assembly.
+static void* g_origPass = nullptr;
+
+extern "C" void __cdecl ShadowProbe_NoteEntry() {
+    uint32_t suppress, quality, f0, f1, f2, f3;
     __try {
         suppress = *(volatile uint32_t*)ADDR_Suppress;
         quality  = *(volatile uint32_t*)ADDR_Quality;
-        tick     = *(volatile uint8_t*)ADDR_PassTick;
-        if (!*(volatile uint32_t*)ADDR_Fn0) nulls |= 1;
-        if (!*(volatile uint32_t*)ADDR_Fn1) nulls |= 2;
-        if (!*(volatile uint32_t*)ADDR_Fn2) nulls |= 4;
-        if (!*(volatile uint32_t*)ADDR_Fn3) nulls |= 8;
+        f0 = *(volatile uint32_t*)ADDR_Fn0;
+        f1 = *(volatile uint32_t*)ADDR_Fn1;
+        f2 = *(volatile uint32_t*)ADDR_Fn2;
+        f3 = *(volatile uint32_t*)ADDR_Fn3;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
 
-    ++g_samples;
-    if (suppress) ++g_suppressed;
-    if (nulls) { ++g_nullPtrFrames; g_nullMask |= nulls; }
+    g_entries++;
+    g_totalEntries++;
+    if (suppress) g_reinit++;
 
-    int s = suppress ? 1 : 0;
-    if (g_prevSuppress >= 0 && s != g_prevSuppress) ++g_flips;
-    g_prevSuppress = s;
-
-    DWORD now = GetTickCount();
-    if (g_lastMoveAt == 0) g_lastMoveAt = now;
-
-    if (g_prevTick != 0xFFFFFFFF && tick != g_prevTick) {
-        ++g_passAdvanced;
-        if (g_passStalled) {
-            Log("[ShadowProbe] the shadow pass STARTED advancing again after %lu ms "
-                "stopped", (unsigned long)(now - g_lastMoveAt));
-            g_passStalled = false;
-        }
-        g_stillSamples = 0;
-        g_lastMoveAt = now;
-    } else if (g_prevTick != 0xFFFFFFFF && !g_passStalled) {
-        if (++g_stillSamples >= kStallSamples) {
-            g_passStalled = true;
-            Log("[ShadowProbe] the shadow pass STOPPED advancing - the byte at "
-                "0x%08X has not moved for %lu ms, while the suppress flag reads %u "
-                "and quality reads %d. Whatever is in the log just above this line "
-                "is what it stopped after.",
-                (unsigned)ADDR_PassTick, (unsigned long)(now - g_lastMoveAt),
-                suppress, g_prevQuality);
-        }
+    if (!f0 || !f1 || !f2 || !f3) {
+        g_blockedNull++;
+        if (!f0) g_nullMask |= 1;
+        if (!f1) g_nullMask |= 2;
+        if (!f2) g_nullMask |= 4;
+        if (!f3) g_nullMask |= 8;
+        return;
     }
-    g_prevTick = tick;
+    if ((int)quality < 1) { g_blockedQual++; return; }
 
-    // A quality change is the moment worth naming, since it is the trigger.
+    g_ran++;
+    g_totalRan++;
+
     if (g_prevQuality >= 0 && (int)quality != g_prevQuality) {
-        Log("[ShadowProbe] extShadowQuality changed %d -> %u (suppress flag is %u "
-            "right now)", g_prevQuality, quality, suppress);
+        Log("[ShadowProbe] extShadowQuality changed %d -> %d", g_prevQuality, (int)quality);
     }
     g_prevQuality = (int)quality;
+}
 
+// sub_875F80 is __cdecl with two stack arguments and a plain retn. Everything is
+// preserved and the client's own code runs unchanged.
+__declspec(naked) static void HookedShadowPass() {
+    __asm {
+        pushad
+        pushfd
+        call ShadowProbe_NoteEntry
+        popfd
+        popad
+        jmp  dword ptr [g_origPass]
+    }
+}
+
+namespace ShadowStateProbe {
+
+bool Init() {
+    if (!Config::g_settings.OptShadowStateProbe) return true;
+
+    if (IsBadReadPtr((void*)ADDR_Pass, 16)) {
+        Log("[ShadowProbe] 0x%08X unreadable - not installing", (unsigned)ADDR_Pass);
+        return false;
+    }
+    if (WineSafe_CreateHook((void*)ADDR_Pass, (void*)HookedShadowPass, &g_origPass) != MH_OK) {
+        Log("[ShadowProbe] hook NOT created");
+        return false;
+    }
+    if (WO_EnableHook((void*)ADDR_Pass) != MH_OK) {
+        Log("[ShadowProbe] hook created but could not be enabled");
+        return false;
+    }
+
+    g_installed = true;
+    g_lastReport = GetTickCount();
+    Log("[ShadowProbe] ACTIVE on the shadow pass (sub_875F80 @ 0x%08X). It counts "
+        "entries and classifies each one, instead of sampling globals from the "
+        "main-thread pump the way it used to - that ran twice per frame and "
+        "reported the pass dead for minutes at a time while shadows were fine. "
+        "The pass sits on the unconditional main line of the world render, so an "
+        "entry count is a frame count, and no entries at all is a different "
+        "finding from entered-and-declined. Read-only; reports every %lu seconds.",
+        (unsigned)ADDR_Pass, (unsigned long)(REPORT_MS / 1000));
+    return true;
+}
+
+void OnFrame() {
+    if (!g_installed) return;
+
+    DWORD now = GetTickCount();
     if (now - g_lastReport < REPORT_MS) return;
     g_lastReport = now;
     ++g_windows;
 
-    if (g_samples == 0) return;
-
-    DWORD windowMs = now - g_windowStart;
-    g_windowStart = now;
-
-    Log("[ShadowProbe] #%u  quality=%d  %u samples over %lu ms (%.0f/s): flag said "
-        "suppressed on %u (%.1f%%), flipped %u time(s), the shadow pass advanced "
-        "on %u",
-        g_windows, g_prevQuality, g_samples, (unsigned long)windowMs,
-        windowMs ? 1000.0 * (double)g_samples / (double)windowMs : 0.0,
-        g_suppressed, 100.0 * (double)g_suppressed / (double)g_samples,
-        g_flips, g_passAdvanced);
-
-    if (g_nullPtrFrames) {
-        Log("[ShadowProbe]   one of the four shadow function pointers was null on "
-            "%u samples (mask %u) - the pass returns before clearing the flag when "
-            "that happens, which would wedge shadows off",
-            g_nullPtrFrames, g_nullMask);
+    if (g_entries == 0) {
+        Log("[ShadowProbe] #%u  the shadow pass was not entered at all in this "
+            "window. It is called unconditionally from the world render, so this "
+            "means the world was not being rendered - a loading screen, character "
+            "select, or a minimised window. %u entries and %u runs so far this "
+            "session.", g_windows, g_totalEntries, g_totalRan);
+        g_nullMask = 0;
+        return;
     }
 
-    // Say what the numbers mean, so a tester's log answers the question without
-    // anyone having to hold this file open beside it.
-    if (g_flips > 2) {
-        Log("[ShadowProbe]   the flag is oscillating - that is the flicker, and it "
-            "is the client turning its own shadows off and on");
-    } else if (g_suppressed == g_samples) {
-        Log("[ShadowProbe]   the flag said suppressed on every sample in this window");
-    } else if (g_passAdvanced == 0 && g_prevQuality > 0) {
-        Log("[ShadowProbe]   the shadow pass did not run at all in this window, "
-            "while the flag said shadows were on and quality stayed at %d. Those "
-            "two disagree, and the pass is the one that decides what you see - "
-            "this is the state to catch, not a suppressed one",
-            g_prevQuality);
+    Log("[ShadowProbe] #%u  quality=%d  %u entries: ran %u (%.1f%%), declined on a "
+        "null pointer %u, declined on quality %u, reinit flag was set on entry %u "
+        "time(s). Counts are lower bounds.",
+        g_windows, g_prevQuality, g_entries, g_ran,
+        100.0 * (double)g_ran / (double)g_entries,
+        g_blockedNull, g_blockedQual, g_reinit);
+
+    if (g_blockedNull) {
+        Log("[ShadowProbe]   a null function pointer (mask %u) returns before the "
+            "suppress flag is cleared, so shadows stay off until something sets "
+            "that pointer. This is the state that looks like shadows being gone "
+            "for good.", g_nullMask);
+    } else if (g_ran == 0) {
+        Log("[ShadowProbe]   entered every time and never did the work, with no "
+            "null pointer - so quality read below 1 while the launcher and the "
+            "client disagree about what it is set to");
     }
 
-    g_samples = g_suppressed = g_flips = g_passAdvanced = g_nullPtrFrames = 0;
+    g_entries = g_ran = g_blockedNull = g_blockedQual = g_reinit = 0;
     g_nullMask = 0;
 }
 
 void Shutdown() {
-    g_active = false;
+    if (g_installed) MH_DisableHook((void*)ADDR_Pass);
 }
 
 } // namespace ShadowStateProbe
