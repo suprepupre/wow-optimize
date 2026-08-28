@@ -328,7 +328,7 @@ namespace Config {
         // each, until one contains the pointer. Two tester freeze samples landed
         // on the compare inside that loop. Opt-in, and it predicts against the
         // client before it skips anything.
-        bool OptLuaPoolFreeFast = false;
+        bool OptLuaPoolFast = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
