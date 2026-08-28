@@ -159,6 +159,31 @@ static void UpdateMainThreadActivity() {
 }
 
 // Classify a code address to "module.dll+0xOFFSET" (or raw hex if not in a module).
+// Does a call instruction end exactly at this address? A return address always
+// has one; a stale word left on the stack, a pointer to a global, or a string
+// literal almost never does. x86 calls are E8 rel32, FF /2 in its addressing
+// forms, and the far 9A, so every length one of those can take is checked
+// against the bytes immediately before the candidate.
+//
+// This is a filter, not a proof. FF /2 is matched by scanning a window, so a
+// byte pattern inside an unrelated instruction can still pass, and a candidate
+// whose preceding page is unmapped is rejected rather than guessed at. It turns
+// a list where most entries were noise into one where most are real, which is
+// the difference between a diagnostic that steers the work and one that misleads
+// it.
+static bool FreezeCallPrecedes(uintptr_t addr) {
+    __try {
+        const unsigned char* p = (const unsigned char*)addr;
+        if (p[-5] == 0xE8) return true;               // call rel32
+        if (p[-7] == 0x9A) return true;               // far call
+        for (int len = 2; len <= 7; len++) {          // call r/m32, FF /2
+            if (p[-len] == 0xFF && ((p[-len + 1] >> 3) & 7) == 2) return true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return false;
+}
+
 static void FreezeClassifyAddr(uintptr_t addr, char* out) {
     HMODULE hm = NULL;
     if (addr >= 0x10000 &&
@@ -314,6 +339,21 @@ static void CaptureFreezeLocation(DWORD mainTid) {
     // the stack). Do NOT call GetModuleHandleExA here: it takes the loader lock,
     // and if the thread froze while holding that lock (e.g. mid DLL load) we'd
     // deadlock. Classification happens after we resume.
+    //
+    // What follows is a raw scan of the words at ESP, not a frame walk, and for
+    // a long time it printed every one of them that landed inside a loaded
+    // module under the heading "stack ->". That reads as a call chain and is
+    // not one: the same list carries stale return addresses from calls that
+    // already returned, pointers to globals and string literals, and any
+    // integer that happens to fall in a module's range. A tester's freeze was
+    // read here as "the client called into our DLL and back out again" on the
+    // strength of one such word - which turned out to sit on a `mov [global],
+    // eax`, an address no call can ever return to.
+    //
+    // A real return address has a call instruction ending exactly where it
+    // points. Checking that is cheap and throws out most of the noise, so the
+    // candidates are split into ones that survive it and ones that do not, and
+    // neither is called a stack frame.
     uintptr_t eip = 0, rawStack[96]; int rawCount = 0;
     if (SuspendThread(h) != (DWORD)-1) {
         CONTEXT ctx; ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
@@ -334,7 +374,7 @@ static void CaptureFreezeLocation(DWORD mainTid) {
         char buf[MAX_PATH + 32];
         FreezeClassifyAddr(eip, buf);
         Log("!!!   STUCK AT: EIP=%s", buf);
-        int shown = 0;
+        int shown = 0, rejected = 0;
         for (int i = 0; i < rawCount && shown < 6; i++) {
             uintptr_t v = rawStack[i];
             HMODULE hm = NULL;
@@ -342,11 +382,19 @@ static void CaptureFreezeLocation(DWORD mainTid) {
                 GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                    (LPCSTR)v, &hm) && hm) {
+                if (!FreezeCallPrecedes(v)) { rejected++; continue; }
                 FreezeClassifyAddr(v, buf);
-                Log("!!!     stack -> %s", buf);
+                Log("!!!     called from: %s", buf);
                 shown++;
             }
         }
+        if (shown == 0)
+            Log("!!!     no word at ESP had a call instruction in front of it - "
+                "no caller could be identified, and EIP above is the only "
+                "trustworthy address here");
+        if (rejected)
+            Log("!!!     %d further word(s) pointed into a module but had no call "
+                "in front of them - stale returns or data, not callers", rejected);
     }
 }
 
