@@ -57,16 +57,29 @@ enum {
     V_SETTEXTURE           = 65,
     V_RESET                = 16,
     V_PRESENT              = 17,
+    // The two nobody has ever counted. d3d9.dll is the largest single entry in
+    // the one CPU-bound profile this project has - 7.75% of executing time - and
+    // under DXVK that is the cost of RECORDING calls on the main thread, because
+    // DXVK executes them on its own command-stream thread. Recording cost scales
+    // with the number of calls, so the question is whether there are too many
+    // draws, and nothing here could answer it: DrawIndexedPrimitive was not
+    // hooked anywhere in the tree.
+    //
+    // The number that decides it is primitives per draw. Two triangles a call
+    // means batching is worth a great deal; five hundred means the draws are
+    // already as large as they get and the 7.75% is not reducible from our side.
+    V_DRAWPRIMITIVE        = 81,
+    V_DRAWINDEXEDPRIMITIVE = 82,
 };
 
-static constexpr int NUM_HOOKS = 16;
+static constexpr int NUM_HOOKS = 18;
 static int g_vtableIndices[NUM_HOOKS] = {
     V_SETRENDERSTATE, V_SETTEXTURESTAGESTATE, V_SETSAMPLERSTATE,
     V_SETTEXTURE, V_SETTRANSFORM, V_SETMATERIAL,
     V_SETVIEWPORT, V_SETSCISSORRECT, V_SETSTREAMSOURCE,
     V_SETINDICES, V_SETVERTEXDECLARATION, V_SETFVF,
     V_SETVERTEXSHADER, V_SETPIXELSHADER, V_RESET,
-    V_PRESENT
+    V_PRESENT, V_DRAWPRIMITIVE, V_DRAWINDEXEDPRIMITIVE
 };
 
 static void* g_vtableOriginals[NUM_HOOKS] = {};
@@ -106,7 +119,7 @@ static const char* g_statNames[NUM_HOOKS] = {
     "SetViewport", "SetScissorRect", "SetStreamSource",
     "SetIndices", "SetVertexDeclaration", "SetFVF",
     "SetVertexShader", "SetPixelShader", "Reset",
-    "Present"
+    "Present", "DrawPrimitive", "DrawIndexedPrimitive"
 };
 
 static unsigned long g_totalFrames = 0;
@@ -527,6 +540,63 @@ static HRESULT __stdcall Hooked_Present(void* dev, const RECT* src, const RECT* 
 // ================================================================
 // VTable patching
 // ================================================================
+// ================================================================
+// Draw-call census
+// ================================================================
+// These two skip nothing and never will - they exist to answer one question
+// that no instrument in this project could answer before: how many primitives
+// does a draw call carry?
+//
+// It decides whether the largest entry in the profile is reducible. d3d9.dll is
+// 7.75% of executing time, and under DXVK - which both testers run - that is the
+// cost of recording calls on the main thread, because DXVK executes them on its
+// own command-stream thread. Recording scales with the call count, so batching
+// helps if and only if the calls are small. The average alone would hide that,
+// so the spread is bucketed: a frame of ten thousand two-triangle draws and a
+// frame of forty large ones can share an average and want opposite answers.
+typedef HRESULT (__stdcall *DrawPrim_t)(void* dev, D3DPRIMITIVETYPE t, UINT start, UINT count);
+static DrawPrim_t g_orig_DrawPrimitive = nullptr;
+typedef HRESULT (__stdcall *DrawIdxPrim_t)(void* dev, D3DPRIMITIVETYPE t, INT base,
+                                           UINT minV, UINT numV, UINT startIdx, UINT count);
+static DrawIdxPrim_t g_orig_DrawIndexedPrimitive = nullptr;
+
+// Plain 32-bit on the hottest calls in the frame, for the reason written above
+// the state counters. Lower bounds, and the report says so.
+static unsigned long g_drawPrims  = 0;    // primitives summed over all draws
+static unsigned long g_drawTiny   = 0;    // draws of eight primitives or fewer
+static unsigned long g_drawBucket[6] = {};  // 1-2, 3-8, 9-32, 33-128, 129-512, 513+
+static const char*   g_bucketName[6] = { "1-2", "3-8", "9-32", "33-128", "129-512", "513+" };
+
+static inline void NoteDraw(UINT prims) {
+    g_drawPrims += prims;
+    int b;
+    if      (prims <= 2)   b = 0;
+    else if (prims <= 8)   b = 1;
+    else if (prims <= 32)  b = 2;
+    else if (prims <= 128) b = 3;
+    else if (prims <= 512) b = 4;
+    else                   b = 5;
+    g_drawBucket[b]++;
+    if (b <= 1) g_drawTiny++;
+}
+
+static HRESULT __stdcall Hooked_DrawPrimitive(void* dev, D3DPRIMITIVETYPE t,
+                                              UINT start, UINT count) {
+    CheckDeviceChange(dev);
+    ++g_statCalls[16];
+    NoteDraw(count);
+    return g_orig_DrawPrimitive(dev, t, start, count);
+}
+
+static HRESULT __stdcall Hooked_DrawIndexedPrimitive(void* dev, D3DPRIMITIVETYPE t, INT base,
+                                                     UINT minV, UINT numV, UINT startIdx,
+                                                     UINT count) {
+    CheckDeviceChange(dev);
+    ++g_statCalls[17];
+    NoteDraw(count);
+    return g_orig_DrawIndexedPrimitive(dev, t, base, minV, numV, startIdx, count);
+}
+
 static void* g_hookFuncs[NUM_HOOKS] = {
     (void*)Hooked_SetRenderState,
     (void*)Hooked_SetTextureStageState,
@@ -543,7 +613,9 @@ static void* g_hookFuncs[NUM_HOOKS] = {
     (void*)Hooked_SetVertexShader,
     (void*)Hooked_SetPixelShader,
     (void*)Hooked_Reset,
-    (void*)Hooked_Present
+    (void*)Hooked_Present,
+    (void*)Hooked_DrawPrimitive,
+    (void*)Hooked_DrawIndexedPrimitive
 };
 
 static void SetHookOrigin(int idx, void* orig) {
@@ -564,6 +636,8 @@ static void SetHookOrigin(int idx, void* orig) {
         case 13: g_orig_SetPixelShader        = (SetPixelShader_t)orig; break;
         case 14: g_orig_Reset                 = (Reset_t)orig; break;
         case 15: g_orig_Present               = (PresentFn)orig; break;
+        case 16: g_orig_DrawPrimitive         = (DrawPrim_t)orig; break;
+        case 17: g_orig_DrawIndexedPrimitive  = (DrawIdxPrim_t)orig; break;
         default: break;
     }
 }
@@ -811,6 +885,12 @@ void D3D9StateManager_LogStats(void) {
         // them as "skipped=0 (0.0%)" beside hooks that genuinely tried and
         // failed invites the reader to think the dedup was tested here and lost.
         // It was never run.
+        if (i == 16 || i == 17) {
+            Log("[D3D9State]   %-22s: calls=%lu, counting only - this is the "
+                "draw-call census, not a dedup",
+                g_statNames[i], g_statCalls[i]);
+            continue;
+        }
         if (i == 12 || i == 13) {
             Log("[D3D9State]   %-22s: calls=%lu, no skip attempted - this detour "
                 "only counts, because caching a shader pointer is unsafe when the "
@@ -826,6 +906,28 @@ void D3D9StateManager_LogStats(void) {
     if (!anySkip)
         Log("[D3D9State]   nothing was suppressed on any hook, so nothing this "
             "module did can have changed what the client drew");
+
+    unsigned long draws = g_statCalls[16] + g_statCalls[17];
+    if (draws && g_totalFrames) {
+        Log("[D3D9State] draw calls: %lu over %lu frames = %.0f per frame, "
+            "carrying %lu primitives = %.0f per frame and %.1f per call.",
+            draws, g_totalFrames, (double)draws / (double)g_totalFrames,
+            g_drawPrims, (double)g_drawPrims / (double)g_totalFrames,
+            (double)g_drawPrims / (double)draws);
+        Log("[D3D9State]   primitives per draw - the number that decides whether "
+            "batching is worth anything, because an average hides it:");
+        for (int b = 0; b < 6; b++) {
+            if (!g_drawBucket[b]) continue;
+            Log("[D3D9State]     %-8s %8lu draws (%4.1f%%)",
+                g_bucketName[b], g_drawBucket[b],
+                100.0 * (double)g_drawBucket[b] / (double)draws);
+        }
+        Log("[D3D9State]   %lu of them (%.1f%%) carried eight primitives or "
+            "fewer. Under DXVK the per-call cost is recording on this thread, so "
+            "that share is what a batching pass could remove; a small share means "
+            "the draws are already as large as they get.",
+            g_drawTiny, 100.0 * (double)g_drawTiny / (double)draws);
+    }
 }
 
 // DXVK (and some other D3D9-on-Vulkan translation layers) can resize its
