@@ -1,7 +1,28 @@
-cmake_minimum_required(VERSION 3.14)
+# 3.15, not 3.14, and the reason is load-bearing.
+#
+# MSVC_RUNTIME_LIBRARY and CMAKE_MSVC_RUNTIME_LIBRARY are governed by policy
+# CMP0091, which arrived in 3.15. Asking for 3.14 leaves that policy at OLD, and
+# at OLD both settings are IGNORED - silently, with no warning. So the line below
+# said "force static CRT globally" and forced nothing: the generated project
+# carried <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>, and the shipped DLL
+# imported MSVCP140.dll, VCRUNTIME140.dll and the api-ms-win-crt-* set.
+#
+# That is not a cosmetic difference.
+#   * It makes the Visual C++ Redistributable a requirement to load at all. A
+#     user without it sees the injector do nothing, with no message.
+#   * This project's own rule is that MSVCP140 must not be pulled in, because it
+#     is loaded during early init and has crashed under Wine/Proton. The rule was
+#     being enforced in the source and broken by the build.
+#
+# The policy is set explicitly as well as implied by the version, so that raising
+# or lowering cmake_minimum_required later cannot quietly turn it back off.
+cmake_minimum_required(VERSION 3.15)
+cmake_policy(SET CMP0091 NEW)
 project(wow_optimize LANGUAGES C CXX)
 
-# Force static CRT globally for all targets and dependencies (mimalloc, minhook, etc.)
+# Static CRT for every target and dependency (mimalloc, minhook). Now that
+# CMP0091 is NEW this is actually applied - check it the way it was found, by
+# reading the DLL's import table rather than by trusting the setting.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 
