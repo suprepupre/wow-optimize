@@ -27,6 +27,13 @@ namespace LoadingState {
     // Only called while IsLoading() is true, so gameplay pays nothing.
     void NoteRead(double ms, unsigned int bytes);
 
+    // The write side of the same question. A tester's 139-second loading screen
+    // spent 1% of itself in ReadFile, and the freeze watchdog caught its main
+    // thread blocked 13 seconds inside the client's own write wrapper - the one
+    // carrying the string "Win32 Write - %s". Reads were measured and writes were
+    // not, so the largest share of that load had nowhere to be counted.
+    void NoteWrite(double ms, unsigned int bytes, const char* name);
+
     // Whether the ReadFile hook that feeds NoteRead is actually installed. It is
     // compiled out by CRASH_TEST_DISABLE_READFILE in the shipped build, and the
     // first real log carrying this report said "0 ms (0%) inside ReadFile" for

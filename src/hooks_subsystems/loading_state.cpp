@@ -36,6 +36,9 @@ extern "C" void ReleaseLoadingArena();
 
 static constexpr uintptr_t ADDR_FrameScript_SignalEvent = 0x0081AC90;
 
+// The client's own file-write wrapper - it carries the string "Win32 Write - %s".
+static constexpr uintptr_t kClientWrite = 0x00454910;
+
 void* g_origSignalEvent = nullptr;
 
 static volatile LONG g_isLoading = 0;
@@ -94,6 +97,14 @@ EventKind ClassifyEvent(int eventId) {
 static LARGE_INTEGER g_qpcFreq      = {};
 static LARGE_INTEGER g_loadStartQpc = {};
 static double        g_ioMsThisLoad = 0.0;
+
+// Writes, measured because reads alone did not account for a 139-second load.
+static double        g_wrMsThisLoad = 0.0;
+static unsigned long long g_wrBytesThisLoad = 0;
+static unsigned long long g_wrCountThisLoad = 0;
+static double        g_wrMsWorst    = 0.0;
+static char          g_wrWorstName[128] = {};
+static bool          g_writeHookOn  = false;
 static uint64_t      g_ioBytesThisLoad = 0;
 static uint64_t      g_ioReadsThisLoad = 0;
 
@@ -110,6 +121,9 @@ static void LoadTimerBegin() {
     g_ioMsThisLoad = 0.0;
     g_ioBytesThisLoad = 0;
     g_ioReadsThisLoad = 0;
+    g_wrMsThisLoad = 0.0;
+    g_wrBytesThisLoad = 0;
+    g_wrCountThisLoad = 0;
 }
 
 static void LoadTimerEnd() {
@@ -145,6 +159,59 @@ static void LoadTimerEnd() {
             (unsigned long long)g_ioReadsThisLoad,
             (double)g_ioBytesThisLoad / (1024.0 * 1024.0));
     }
+
+    if (!g_writeHookOn) {
+        Log("[LoadingState]   writes not measured - the client's write wrapper is "
+            "not hooked in this build");
+    } else if (g_wrCountThisLoad) {
+        Log("[LoadingState]   and %.0f ms (%.0f%%) inside the client's own file "
+            "writes, %llu of them, %.1f MB. Worst single write %.0f ms on %s.",
+            g_wrMsThisLoad, (ms > 0.0) ? (100.0 * g_wrMsThisLoad / ms) : 0.0,
+            (unsigned long long)g_wrCountThisLoad,
+            (double)g_wrBytesThisLoad / (1024.0 * 1024.0),
+            g_wrMsWorst, g_wrWorstName[0] ? g_wrWorstName : "(unnamed)");
+    } else {
+        Log("[LoadingState]   and no file writes at all - so the time is neither "
+            "reading nor writing");
+    }
+}
+
+// The client's own file-write wrapper, sub_454910. Found from a freeze capture:
+// a tester's main thread was blocked 13 seconds inside it, twice, during a
+// character switch, and the same load reported only 1% of its 139 seconds inside
+// ReadFile. Reads were instrumented and writes were not, so the larger share had
+// nowhere to be counted.
+//
+// It is the right place rather than WriteFile itself: it is reached only for the
+// client's own files, so no lookup is needed to tell them apart, and it carries
+// the name at +76 - used there only to build an error string, and read here to
+// say which file the worst write was.
+//
+// Times the call and passes it on. Nothing else.
+typedef char (__cdecl* clientWrite_fn)(void* fileObj, const void* buf,
+                                       void* overlapped, unsigned long* pBytes);
+static clientWrite_fn orig_ClientWrite = nullptr;
+
+static char __cdecl Hooked_ClientWrite(void* fileObj, const void* buf,
+                                       void* overlapped, unsigned long* pBytes) {
+    unsigned long want = 0;
+    __try { if (pBytes) want = *pBytes; } __except (EXCEPTION_EXECUTE_HANDLER) { want = 0; }
+
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    char r = orig_ClientWrite(fileObj, buf, overlapped, pBytes);
+    QueryPerformanceCounter(&b);
+
+    if (g_qpcFreq.QuadPart) {
+        double ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)g_qpcFreq.QuadPart;
+        const char* name = nullptr;
+        __try {
+            name = *(const char**)((const unsigned char*)fileObj + 76);
+            if (name < (const char*)0x10000 || name > (const char*)0xFFE00000) name = nullptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { name = nullptr; }
+        LoadingState::NoteWrite(ms, want, name);
+    }
+    return r;
 }
 
 void ApplyEventKind(EventKind kind) {
@@ -253,6 +320,26 @@ void SetReadHookInstalled(bool installed) {
     g_readHookOn = installed;
 }
 
+void NoteWrite(double ms, unsigned int bytes, const char* name) {
+    g_wrMsThisLoad += ms;
+    g_wrBytesThisLoad += bytes;
+    g_wrCountThisLoad++;
+    if (ms > g_wrMsWorst) {
+        g_wrMsWorst = ms;
+        g_wrWorstName[0] = 0;
+        if (name) {
+            __try {
+                const char* leaf = strrchr(name, '\\');
+                leaf = leaf ? leaf + 1 : name;
+                strncpy(g_wrWorstName, leaf, sizeof(g_wrWorstName) - 1);
+                g_wrWorstName[sizeof(g_wrWorstName) - 1] = 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                g_wrWorstName[0] = 0;
+            }
+        }
+    }
+}
+
 void NoteRead(double ms, unsigned int bytes) {
     g_ioMsThisLoad += ms;
     g_ioBytesThisLoad += bytes;
@@ -299,6 +386,25 @@ bool Init() {
         Log("[LoadingState] Failed to enable FrameScript_SignalEvent hook");
         g_origSignalEvent = nullptr;
         return false;
+    }
+
+    // The write timer. Separate from the event detour above so a failure here
+    // cannot take loading detection down with it.
+    if (QueryPerformanceFrequency(&g_qpcFreq) &&
+        !IsBadReadPtr((void*)kClientWrite, 8) &&
+        WineSafe_CreateHook((void*)kClientWrite, (void*)Hooked_ClientWrite,
+                            (void**)&orig_ClientWrite) == MH_OK &&
+        WO_EnableHook((void*)kClientWrite) == MH_OK) {
+        g_writeHookOn = true;
+        Log("[LoadingState] timing the client's file writes at 0x%08X. A tester's "
+            "139-second load spent 1%% of itself in ReadFile, and the freeze "
+            "watchdog caught its main thread blocked 13 seconds inside this "
+            "function - twice, during a character switch. Reads were measured and "
+            "writes were not, so the larger share had nowhere to be counted.",
+            (unsigned)kClientWrite);
+    } else {
+        Log("[LoadingState] the client's write wrapper at 0x%08X was NOT hooked - "
+            "loads will report their read share only", (unsigned)kClientWrite);
     }
 
     Log("[LoadingState] ACTIVE (FrameScript_SignalEvent @ 0x%08X) - native loading detection",
