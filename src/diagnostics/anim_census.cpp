@@ -67,6 +67,7 @@
 
 #include <windows.h>
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 
 #include "anim_census.h"
@@ -140,6 +141,87 @@ static bool  g_distinctOverflow = false;
 
 static int  g_peakDistinct   = 0;
 static bool g_everOverflowed = false;
+
+// ---- Would caching the animation result have helped? -----------------------
+//
+// The M2 cluster is about 15% of executing time in the one CPU-bound profile
+// this project has, and bone matrices are a function of the model's animation
+// state. If that state is unchanged from the previous frame the matrices are
+// unchanged too, so a cache could skip the work. Whether there is anything to
+// skip is a measurement, and this is it - the same discipline that killed
+// AnimLod, which declined 94.2% of models and skipped 0.0%.
+//
+// Two things have to be counted apart, because the client already does some of
+// this itself. sub_82F0F0 opens with
+//
+//     mov eax, [esi+10h]  / test al, 1  / jz  out      ; an instance flag
+//     mov ecx, [esi+28h]  / mov edx, [esi+3Ch]
+//     cmp edx, [ecx+14h]  / jz  out                    ; a per-tick stamp
+//
+// so a share of the calls counted here return without doing anything. Those are
+// not work a cache could remove - they are work already removed. Counting them
+// separately is the difference between "models animated" and "models that
+// actually rebuilt their bones".
+//
+// For the rest, the ceiling on what a cache could skip is how often a model is
+// asked for the same animation state two frames running. That is what repeats
+// below counts. It is a ceiling and not a promise: a matching tuple is strong
+// evidence the output matches, not proof, and proving it needs the bone array
+// compared rather than the arguments. If the ceiling turns out to be small the
+// idea is dead and one log says so, which is the cheap half of the work.
+static constexpr int  ANIM_SLOTS = 512;
+struct AnimKey {
+    void*    model;
+    int      a2, a3;
+    uint32_t a4, a5, a6;      // the floats, by bit pattern
+    uint64_t frame;
+};
+static AnimKey g_animKey[ANIM_SLOTS];
+
+static uint64_t g_workCalls   = 0;   // reached past both early exits
+static uint64_t g_skipFlag    = 0;   // the instance flag was clear
+static uint64_t g_skipStamp   = 0;   // the per-tick stamp already matched
+static uint64_t g_repeats     = 0;   // same model, same tuple, previous frame
+static uint64_t g_evictions   = 0;   // a slot held a different model
+
+// Read the two conditions the client tests before doing anything, without
+// repeating its work. Guarded: this runs on every animated model.
+static bool ClassifyEntry(void* This, bool* outFlagClear, bool* outStampMatch) {
+    __try {
+        const uint8_t* m = (const uint8_t*)This;
+        uint32_t flags = *(const uint32_t*)(m + 0x10);
+        *outFlagClear = (flags & 1u) == 0u;
+        if (*outFlagClear) { *outStampMatch = false; return true; }
+        uint32_t owner = *(const uint32_t*)(m + 0x28);
+        if (!owner) return false;
+        *outStampMatch = *(const uint32_t*)(m + 0x3C) == *(const uint32_t*)(owner + 0x14);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static void NoteAnimRepeat(void* This, int a2, int a3, float a4, float a5, float a6) {
+    unsigned slot = (unsigned)(((uintptr_t)This >> 4) & (ANIM_SLOTS - 1));
+    AnimKey& k = g_animKey[slot];
+    uint32_t b4, b5, b6;
+    memcpy(&b4, &a4, 4); memcpy(&b5, &a5, 4); memcpy(&b6, &a6, 4);
+
+    if (k.model == This) {
+        // A later frame asking for the same state. Same-frame duplicates are not
+        // counted - the client's own stamp already removes those, and counting
+        // them would inflate the ceiling with work nobody would have done.
+        if (k.frame != g_frames &&
+            k.a2 == a2 && k.a3 == a3 &&
+            k.a4 == b4 && k.a5 == b5 && k.a6 == b6) {
+            g_repeats++;
+        }
+    } else if (k.model) {
+        g_evictions++;
+    }
+    k.model = This; k.a2 = a2; k.a3 = a3;
+    k.a4 = b4; k.a5 = b5; k.a6 = b6; k.frame = g_frames;
+}
 
 // Spread of the candidate per-model position across one frame. If every model
 // reports the same point this stays at zero and there is nothing to drive a
@@ -232,6 +314,19 @@ static int __fastcall Hooked_AnimateModel(void* This, void* edx,
         return orig_AnimateModel(This, edx, a2, a3, a4, a5, a6);
 
     InterlockedIncrement(&g_callsThisFrame);
+
+    // Before anything else: which of the client's two early exits this call
+    // would take, and whether its animation state repeats a previous frame's.
+    bool flagClear = false, stampMatch = false;
+    if (ClassifyEntry(This, &flagClear, &stampMatch)) {
+        if (flagClear)       g_skipFlag++;
+        else if (stampMatch) g_skipStamp++;
+        else {
+            g_workCalls++;
+            NoteAnimRepeat(This, a2, a3, a4, a5, a6);
+        }
+    }
+
     uint32_t bones = BoneCountOf(This);
     if (bones) InterlockedExchangeAdd(&g_bonesThisFrame, (LONG)bones);
 
@@ -392,6 +487,29 @@ void LogStats() {
             "about %.2f ms/frame at the average model count",
             avgNs / 1000.0, (unsigned long long)g_sampledCount,
             avgNs * avgCalls / 1e6);
+    }
+
+    uint64_t entries = g_workCalls + g_skipFlag + g_skipStamp;
+    if (entries) {
+        Log("[AnimCensus] of %llu calls: %llu rebuilt bones, %llu returned on the "
+            "instance flag, %llu returned because the per-tick stamp already "
+            "matched. Only the first group is work a cache could remove.",
+            (unsigned long long)entries, (unsigned long long)g_workCalls,
+            (unsigned long long)g_skipFlag, (unsigned long long)g_skipStamp);
+    }
+    if (g_workCalls) {
+        Log("[AnimCensus] %llu of those %llu (%.1f%%) were the same model asked "
+            "for the same animation state as in an earlier frame. That is the "
+            "CEILING on what caching the result could skip, not a promise - a "
+            "matching argument tuple is evidence the bones match, and proving it "
+            "needs the bone array compared. %llu lookups hit a slot held by a "
+            "different model and could not be judged.",
+            (unsigned long long)g_repeats, (unsigned long long)g_workCalls,
+            100.0 * (double)g_repeats / (double)g_workCalls,
+            (unsigned long long)g_evictions);
+        if (g_repeats * 20 < g_workCalls)
+            Log("[AnimCensus]   under five percent - caching the animation result "
+                "is not worth building, and this is the log that says so.");
     }
 
     // The two numbers that decide whether level of detail is possible here.
