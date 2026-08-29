@@ -12,7 +12,11 @@
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <thread>
+// <thread> was included here and never used - every worker in this project is
+// a CreateThread. Including it is what the no-std::thread rule exists to stop:
+// it is the doorway to MSVCP140, which is loaded during early init and has
+// crashed under Wine/Proton. Removed so the next person cannot reach through
+// it by accident.
 #include "win_mutex.h"
 #include <queue>
 #include <atomic>
