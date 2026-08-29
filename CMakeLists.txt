@@ -111,6 +111,7 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/m2_sort_key_cache.cpp
     src/simd_math/frustum_aabb_sse2.cpp
     src/simd_math/segment_aabb_sse2.cpp
+    src/runtime_vm/lua_hget_dispatch.cpp
     src/runtime_vm/lua_pool_fast.cpp
     src/runtime_vm/lua_proto_cache.cpp
     src/simd_math/quat_lerp_sse2.cpp

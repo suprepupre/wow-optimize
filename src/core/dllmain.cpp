@@ -42,6 +42,7 @@
 #include "m2_sort_key_cache.h"
 #include "frustum_aabb_sse2.h"
 #include "segment_aabb_sse2.h"
+#include "runtime_vm/lua_hget_dispatch.h"
 #include "runtime_vm/lua_pool_fast.h"
 #include "anim_census.h"
 #include "net_diag.h"
@@ -4913,6 +4914,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     M2SortKey::LogStats();
     FrustumAabb::LogStats();
     SegmentAabb::LogStats();
+    LuaHGetDispatch::LogStats();
     LuaPoolFast::LogStats();
     CombatLogFilter::LogStats();
     LuaThisCache_LogStats();
@@ -7501,6 +7503,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     M2SortKey::Init();
     FrustumAabb::Init();
     SegmentAabb::Init();
+    LuaHGetDispatch::Init();
     LuaPoolFast::Init();
 
     Log("--- UnitAura Fast Path ---");

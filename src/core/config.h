@@ -348,6 +348,11 @@ namespace Config {
         // profile's weight is on a `test ah` waiting for an `fnstsw ax` - the
         // x87 way of branching on a float compare, ten times over. Opt-in.
         bool OptSegmentAabb = false;
+        // luaH_get (sub_85C470), 0.67% of executing time, almost all of it
+        // deciding where to hand off. Answering "is this key an integer" costs
+        // three memory round-trips and an fnstsw there. Opt-in; read-only, so
+        // both answers are simply compared.
+        bool OptLuaHGetDispatch = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
