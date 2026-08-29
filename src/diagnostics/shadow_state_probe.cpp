@@ -209,8 +209,28 @@ bool     g_holdActive = false;
 uint32_t g_holdWrites = 0;
 float    g_holdFrom[kCascades] = {};
 float    g_holdTo[kCascades]   = {};
-constexpr float kHoldMaxFactor = 16.0f;   // never raise further than this
-constexpr float kHoldDriftFrac = 0.25f;   // nor past this share of the extent
+// A ratchet, and how it was found.
+//
+// The first version read the threshold from the client every frame and
+// multiplied THAT by the factor - but by the second frame the value it read was
+// one this module had already written. So it climbed by 16x per frame until it
+// hit the cap, and the cap is where it stayed. prince's log showed it plainly:
+// the "before" values printed as 64.0, 256.0 and 16384.0, exactly sixteen times
+// the 4.0, 16.0 and 1024.0 of the session before, and the "after" values were
+// the caps to the digit.
+//
+// So cascade 0 ended up recentring at ten yards inside a cascade forty yards
+// across, and he reported the shadows lagging. Which they were: the map was
+// being built around a point up to ten yards behind him.
+//
+// The stock value is captured the first time each cascade is seen and every
+// target is computed from that, never from the current value. And the raise is
+// halved: four times the squared threshold is twice the distance, which is a
+// smaller change than the caps were making on their own.
+constexpr float kHoldMaxFactor = 4.0f;    // on the SQUARED threshold, so 2x distance
+constexpr float kHoldDriftFrac = 0.10f;   // nor past this share of the extent
+float    g_holdStock[kCascades] = {};     // the client's own value, captured once
+bool     g_holdHaveStock[kCascades] = {};
 
 // Whole session, so a window that never fires still has something behind it.
 uint32_t g_totalEntries = 0;
@@ -292,13 +312,22 @@ extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
             if (d2 > (double)g_worstMove[c]) g_worstMove[c] = (float)d2;
 
             if (g_holdActive && g_extent[c] > 0.0f && thr > 0.0f) {
+                // Capture the client's own value once, and notice if it ever
+                // changes it back - a settings change would, and computing from
+                // a value of ours is what made this ratchet.
+                if (!g_holdHaveStock[c] ||
+                    (thr != g_holdStock[c] && thr != g_holdTo[c])) {
+                    g_holdStock[c]     = thr;
+                    g_holdHaveStock[c] = true;
+                }
+                float stock = g_holdStock[c];
                 float drift = g_extent[c] * kHoldDriftFrac;
                 float cap   = drift * drift;              // compared squared
-                float want  = thr * kHoldMaxFactor;
+                float want  = stock * kHoldMaxFactor;
                 if (want > cap) want = cap;
+                g_holdFrom[c] = stock;
+                g_holdTo[c]   = want;
                 if (want > thr) {
-                    g_holdFrom[c] = thr;
-                    g_holdTo[c]   = want;
                     *(volatile float*)(ADDR_Threshold + off) = want;
                     g_holdWrites++;
                 }
@@ -386,12 +415,13 @@ bool Init() {
 
     g_holdActive = Config::g_settings.OptShadowCascadeHold;
     if (g_holdActive) {
-        Log("[ShadowProbe] cascade hold is ON: the recentre distance is raised by "
-            "up to %.0fx, but never past %.0f%% of the cascade's own half-size, so "
-            "the camera cannot leave the area the cascade covers however large the "
-            "raise would have been. It is never lowered. Measured cause: cascade 0 "
-            "recentres every two yards, and each recentre restarts the round-robin "
-            "so two thirds of the map is stale for the new projection.",
+        Log("[ShadowProbe] cascade hold is ON: the recentre distance is doubled "
+            "(%.0fx on the squared value), never past %.0f%% of the cascade's own "
+            "half-size, and always computed from the client's stock value rather "
+            "than the current one. The first version computed from the current "
+            "one and ratcheted to the cap in a few frames - cascade 0 reached ten "
+            "yards inside a forty-yard cascade, and the tester reported the "
+            "shadows lagging, which they were.",
             (double)kHoldMaxFactor, 100.0 * (double)kHoldDriftFrac);
     }
 
@@ -470,13 +500,15 @@ void OnFrame() {
             "while moving against 1.0 standing still for cascade 0. That is the "
             "flicker, and it is the client's own cache.");
         if (g_holdActive) {
-            Log("[ShadowProbe]     hold wrote a raised recentre distance %u time(s) "
-                "this window: cascade 0 %.1f -> %.1f, 1 %.1f -> %.1f, 2 %.1f -> "
-                "%.1f (squared). Fewer recentres means fewer of the flips above.",
+            Log("[ShadowProbe]     hold wrote %u time(s) this window. Stock -> "
+                "held, as distances: cascade 0 %.1f -> %.1f yards, 1 %.1f -> "
+                "%.1f, 2 %.1f -> %.1f. Stock is the client's own value, captured "
+                "once - computing from the current one is what made this ratchet "
+                "to the cap in prince's first run.",
                 g_holdWrites,
-                (double)g_holdFrom[0], (double)g_holdTo[0],
-                (double)g_holdFrom[1], (double)g_holdTo[1],
-                (double)g_holdFrom[2], (double)g_holdTo[2]);
+                sqrt((double)g_holdFrom[0]), sqrt((double)g_holdTo[0]),
+                sqrt((double)g_holdFrom[1]), sqrt((double)g_holdTo[1]),
+                sqrt((double)g_holdFrom[2]), sqrt((double)g_holdTo[2]));
         }
         g_holdWrites = 0;
     } else {
