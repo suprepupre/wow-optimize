@@ -135,6 +135,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "FrustumAabb", &Settings::OptFrustumAabb },
     { "Graphics_Sound", "SegmentAabb", &Settings::OptSegmentAabb },
     { "UI_Lua", "LuaHGetDispatch", &Settings::OptLuaHGetDispatch },
+    { "Graphics_Sound", "ShadowCascadeHold", &Settings::OptShadowCascadeHold },
     { "Graphics_Sound", "WorldStateCoalesce", &Settings::OptWorldStateCoalesce },
     { "Graphics_Sound", "D3d9RenderThread", &Settings::OptD3d9RenderThread },
     { "Combat_Net", "CombatLogFilter", &Settings::OptCombatLogFilter },
@@ -594,6 +595,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptFrustumAabb     = GetPrivateProfileIntA("Graphics_Sound", "FrustumAabb", 0, iniPath.c_str()) != 0;
         g_settings.OptSegmentAabb     = GetPrivateProfileIntA("Graphics_Sound", "SegmentAabb", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaHGetDispatch = GetPrivateProfileIntA("UI_Lua", "LuaHGetDispatch", 0, iniPath.c_str()) != 0;
+        g_settings.OptShadowCascadeHold = GetPrivateProfileIntA("Graphics_Sound", "ShadowCascadeHold", 0, iniPath.c_str()) != 0;
         g_settings.OptWorldStateCoalesce  = GetPrivateProfileIntA("Graphics_Sound", "WorldStateCoalesce", 0, iniPath.c_str()) != 0;
         g_settings.OptD3d9RenderThread    = GetPrivateProfileIntA("Graphics_Sound", "D3d9RenderThread", 0, iniPath.c_str()) != 0;
         // HARD-DISABLED regardless of ini: this offloads D3D9 draw/Present/Reset

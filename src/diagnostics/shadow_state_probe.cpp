@@ -66,6 +66,7 @@
 #endif
 #include <windows.h>
 #include <cstdint>
+#include <cmath>
 
 #include "shadow_state_probe.h"
 #include "MinHook.h"
@@ -117,6 +118,7 @@ constexpr uintptr_t ADDR_Fn3      = 0x00D43164;
 // a flicker or not. Guessing that they do is how this project has twice built a
 // feature that skipped nothing.
 constexpr uintptr_t ADDR_Cascade  = 0x00874890;
+constexpr uintptr_t ADDR_Extent    = 0x00D43298;  // half-size the cascade covers
 constexpr uintptr_t ADDR_Threshold = 0x00D4329C;  // squared distance to recentre
 constexpr uintptr_t ADDR_CentreX   = 0x00D432A0;  // the cached centre
 constexpr uintptr_t ADDR_CentreY   = 0x00D432A4;
@@ -173,6 +175,42 @@ uint32_t g_cascFlip[kCascades]   = {};       // the buffer flag toggled
 int      g_prevFlag[kCascades]   = { -1, -1, -1 };
 float    g_worstMove[kCascades]  = {};       // furthest the camera got from the centre
 float    g_threshold[kCascades]  = {};       // the squared distance it is compared with
+float    g_extent[kCascades]     = {};       // the half-size the cascade covers
+
+// ---------------------------------------------------------------------------
+// Holding the cascade centre still for longer
+//
+// prince's log settles the mechanism. Over 108,225 cascade updates, buffer
+// toggles run at 45.3 per thousand frames while moving against 1.0 standing
+// still for cascade 0, 31.2 against 0.5 for cascade 1, and 5.9 against exactly
+// zero for cascade 2. Redraws divided by toggles is 9.0, matching the counter
+// reset the disassembly shows. And the recentre distances are tiny: 4.0, 16.0
+// and 1024.0 squared, which is 2, 4 and 32 yards.
+//
+// So cascade 0 recentres every two yards. Each recentre re-projects the shadow
+// map around a new point and restarts the round-robin at slice zero, leaving two
+// thirds of the map stale for the new projection until the next frames catch up.
+// At running speed that is about three and a half times a second, which is what
+// "the houses on both sides flicker as you run" looks like.
+//
+// Between recentres the map stays complete - the round-robin keeps it that way.
+// So a larger recentre distance buys longer stretches of a complete map that is
+// slightly off-centre, and off-centre is invisible while the camera is inside
+// the area the cascade covers.
+//
+// That last clause is the whole safety argument, so this does not take a
+// multiplier on trust. It reads the cascade's own half-size and never lets the
+// drift exceed a quarter of it, so the camera cannot leave the covered area no
+// matter what the raise would have been. It never lowers a threshold either.
+//
+// Off by default and separate from the probe's switch: with only the probe on,
+// nothing here writes anything.
+bool     g_holdActive = false;
+uint32_t g_holdWrites = 0;
+float    g_holdFrom[kCascades] = {};
+float    g_holdTo[kCascades]   = {};
+constexpr float kHoldMaxFactor = 16.0f;   // never raise further than this
+constexpr float kHoldDriftFrac = 0.25f;   // nor past this share of the extent
 
 // Whole session, so a window that never fires still has something behind it.
 uint32_t g_totalEntries = 0;
@@ -250,7 +288,21 @@ extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
             double d2 = dx * dx + dy * dy + dz * dz;
 
             g_threshold[c] = thr;
+            g_extent[c]    = *(volatile float*)(ADDR_Extent + off);
             if (d2 > (double)g_worstMove[c]) g_worstMove[c] = (float)d2;
+
+            if (g_holdActive && g_extent[c] > 0.0f && thr > 0.0f) {
+                float drift = g_extent[c] * kHoldDriftFrac;
+                float cap   = drift * drift;              // compared squared
+                float want  = thr * kHoldMaxFactor;
+                if (want > cap) want = cap;
+                if (want > thr) {
+                    g_holdFrom[c] = thr;
+                    g_holdTo[c]   = want;
+                    *(volatile float*)(ADDR_Threshold + off) = want;
+                    g_holdWrites++;
+                }
+            }
 
             // The client's own test: with the counter at zero, staying inside the
             // threshold skips the cascade entirely for this frame.
@@ -332,6 +384,17 @@ bool Init() {
             "counters above still work", (unsigned)ADDR_Cascade);
     }
 
+    g_holdActive = Config::g_settings.OptShadowCascadeHold;
+    if (g_holdActive) {
+        Log("[ShadowProbe] cascade hold is ON: the recentre distance is raised by "
+            "up to %.0fx, but never past %.0f%% of the cascade's own half-size, so "
+            "the camera cannot leave the area the cascade covers however large the "
+            "raise would have been. It is never lowered. Measured cause: cascade 0 "
+            "recentres every two yards, and each recentre restarts the round-robin "
+            "so two thirds of the map is stale for the new projection.",
+            (double)kHoldMaxFactor, 100.0 * (double)kHoldDriftFrac);
+    }
+
     g_installed = true;
     g_lastReport = GetTickCount();
     Log("[ShadowProbe] ACTIVE on the shadow pass (sub_875F80 @ 0x%08X). It counts "
@@ -396,13 +459,26 @@ void OnFrame() {
             "triggers a recentre:", g_cascCalls, g_cascCached);
         for (int c = 0; c < kCascades; c++) {
             Log("[ShadowProbe]     cascade %d: %u skipped, %u redrawn, %u flips, "
-                "worst %.1f vs threshold %.1f (squared)",
+                "worst %.1f vs threshold %.1f (squared, = %.1f yards), cascade "
+                "covers %.1f yards either side",
                 c, g_cascSkip[c], g_cascDraw[c], g_cascFlip[c],
-                (double)g_worstMove[c], (double)g_threshold[c]);
+                (double)g_worstMove[c], (double)g_threshold[c],
+                sqrt((double)g_threshold[c]), (double)g_extent[c]);
         }
         Log("[ShadowProbe]     a flip is the cascade swapping which buffer it "
-            "shows. If flips are frequent while moving and rare while standing "
-            "still, that is the flicker and it is the client's own cache.");
+            "shows. Measured over 108225 updates: 45.3 flips per thousand frames "
+            "while moving against 1.0 standing still for cascade 0. That is the "
+            "flicker, and it is the client's own cache.");
+        if (g_holdActive) {
+            Log("[ShadowProbe]     hold wrote a raised recentre distance %u time(s) "
+                "this window: cascade 0 %.1f -> %.1f, 1 %.1f -> %.1f, 2 %.1f -> "
+                "%.1f (squared). Fewer recentres means fewer of the flips above.",
+                g_holdWrites,
+                (double)g_holdFrom[0], (double)g_holdTo[0],
+                (double)g_holdFrom[1], (double)g_holdTo[1],
+                (double)g_holdFrom[2], (double)g_holdTo[2]);
+        }
+        g_holdWrites = 0;
     } else {
         Log("[ShadowProbe]   the cascade updater was never called this window");
     }

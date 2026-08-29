@@ -353,6 +353,12 @@ namespace Config {
         // three memory round-trips and an fnstsw there. Opt-in; read-only, so
         // both answers are simply compared.
         bool OptLuaHGetDispatch = false;
+        // Holds the shadow cascade centre still for longer. Measured cause of
+        // the flicker two testers report below extShadowQuality 5: cascade 0
+        // recentres every two yards and each recentre leaves two thirds of the
+        // map stale. Self-limiting - never drifts past a quarter of the
+        // cascade's own extent. Rides on the shadow probe's hook.
+        bool OptShadowCascadeHold = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 
