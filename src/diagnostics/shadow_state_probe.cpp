@@ -87,6 +87,45 @@ constexpr uintptr_t ADDR_Fn1      = 0x00D4315C;
 constexpr uintptr_t ADDR_Fn2      = 0x00D43160;
 constexpr uintptr_t ADDR_Fn3      = 0x00D43164;
 
+// The cascade cache, which is where the flicker actually lives.
+//
+// Every input to the pass has now been measured across two five-hour sessions
+// and every one is constant: entered on 100% of frames, ran on 100%, quality 4
+// throughout with no change, no null pointer, the reinit flag set once at
+// startup, and the second draw asked for on 100% of runs with zero changes
+// between consecutive frames. The pass is not the flicker.
+//
+// sub_874890 is. Below quality 5 it does not redraw the shadow map each frame -
+// it keeps three cascades, each with a cached centre, a refresh counter and a
+// pair of buffers, and:
+//
+//   * skips a cascade entirely while the camera stays within a squared distance
+//     of the cached centre,
+//   * otherwise redraws one slice of it - a third for cascades 0 and 1, a fifth
+//     for cascade 2, chosen round-robin by the counter,
+//   * and on the counter reaching 9 (or 25 for cascade 2) recentres on the
+//     current position and FLIPS the cascade's buffer flag.
+//
+// At quality 5 that whole branch is skipped and everything is redrawn. Which is
+// exactly the shape of the original report - "below extShadowQuality 5 shadows
+// flicker" - and of the reproduction: running toward the Alliance bank in
+// Dalaran, with the buildings on both sides flickering. Running is what keeps
+// pushing the camera past the recentre threshold.
+//
+// So this counts what the cache does. Read-only, before the client's own code
+// runs, and the numbers say whether the recentres and buffer flips line up with
+// a flicker or not. Guessing that they do is how this project has twice built a
+// feature that skipped nothing.
+constexpr uintptr_t ADDR_Cascade  = 0x00874890;
+constexpr uintptr_t ADDR_Threshold = 0x00D4329C;  // squared distance to recentre
+constexpr uintptr_t ADDR_CentreX   = 0x00D432A0;  // the cached centre
+constexpr uintptr_t ADDR_CentreY   = 0x00D432A4;
+constexpr uintptr_t ADDR_CentreZ   = 0x00D432A8;
+constexpr uintptr_t ADDR_Counter   = 0x00D432C4;  // refresh counter
+constexpr uintptr_t ADDR_BufFlag   = 0x00D432C8;  // flips on every recentre
+constexpr unsigned  kCascadeStride = 60;          // 15 dwords per cascade
+constexpr int       kCascades      = 3;
+
 constexpr DWORD REPORT_MS = 10000;
 
 bool  g_installed = false;
@@ -124,6 +163,16 @@ uint32_t g_windows      = 0;
 uint32_t g_a2Set        = 0;   // entries where the second draw was asked for
 uint32_t g_a2Flips      = 0;   // times it differed from the previous entry
 int      g_prevA2       = -1;
+
+// Per cascade, per window.
+uint32_t g_cascCalls    = 0;                 // times the cascade updater ran
+uint32_t g_cascCached   = 0;                 // it took the caching branch at all
+uint32_t g_cascSkip[kCascades]   = {};       // camera inside the threshold, no redraw
+uint32_t g_cascDraw[kCascades]   = {};       // a slice was redrawn
+uint32_t g_cascFlip[kCascades]   = {};       // the buffer flag toggled
+int      g_prevFlag[kCascades]   = { -1, -1, -1 };
+float    g_worstMove[kCascades]  = {};       // furthest the camera got from the centre
+float    g_threshold[kCascades]  = {};       // the squared distance it is compared with
 
 // Whole session, so a window that never fires still has something behind it.
 uint32_t g_totalEntries = 0;
@@ -175,6 +224,62 @@ extern "C" void __cdecl ShadowProbe_NoteEntry(uint32_t a2) {
     g_prevQuality = (int)quality;
 }
 
+// Read the cascade cache before the client's own updater changes it. Nothing is
+// written; every value here is one the client is about to read for itself.
+extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
+    if (!pos) return;
+    __try {
+        g_cascCalls++;
+        uint32_t suppress = *(volatile uint32_t*)ADDR_Suppress;
+        uint32_t quality  = *(volatile uint32_t*)ADDR_Quality;
+        if ((suppress ? 0u : quality) >= 5u) return;   // the uncached branch
+        g_cascCached++;
+
+        for (int c = 0; c < kCascades; c++) {
+            unsigned off = kCascadeStride * (unsigned)c;
+            uint32_t counter = *(volatile uint32_t*)(ADDR_Counter + off);
+            int      flag    = *(volatile uint32_t*)(ADDR_BufFlag + off) ? 1 : 0;
+            float    thr     = *(volatile float*)(ADDR_Threshold + off);
+            float    cx      = *(volatile float*)(ADDR_CentreX + off);
+            float    cy      = *(volatile float*)(ADDR_CentreY + off);
+            float    cz      = *(volatile float*)(ADDR_CentreZ + off);
+
+            double dx = (double)cx - (double)pos[0];
+            double dy = (double)cy - (double)pos[1];
+            double dz = (double)cz - (double)pos[2];
+            double d2 = dx * dx + dy * dy + dz * dz;
+
+            g_threshold[c] = thr;
+            if (d2 > (double)g_worstMove[c]) g_worstMove[c] = (float)d2;
+
+            // The client's own test: with the counter at zero, staying inside the
+            // threshold skips the cascade entirely for this frame.
+            if (counter == 0 && d2 <= (double)thr) g_cascSkip[c]++;
+            else                                   g_cascDraw[c]++;
+
+            if (g_prevFlag[c] >= 0 && flag != g_prevFlag[c]) g_cascFlip[c]++;
+            g_prevFlag[c] = flag;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// sub_874890 is __cdecl(a1, a2 = the camera position, a3, a4).
+void* g_origCascade = nullptr;
+__declspec(naked) static void HookedCascade() {
+    __asm {
+        pushad
+        pushfd
+        mov  eax, [esp+2Ch]        ; a2, the position: entry [esp+8] under 0x24
+        push eax
+        call ShadowProbe_NoteCascade
+        add  esp, 4
+        popfd
+        popad
+        jmp  dword ptr [g_origCascade]
+    }
+}
+
 // sub_875F80 is __cdecl with two stack arguments and a plain retn. Everything is
 // preserved and the client's own code runs unchanged.
 __declspec(naked) static void HookedShadowPass() {
@@ -207,6 +312,24 @@ bool Init() {
     if (WO_EnableHook((void*)ADDR_Pass) != MH_OK) {
         Log("[ShadowProbe] hook created but could not be enabled");
         return false;
+    }
+
+    // The cascade updater, installed separately so a failure there leaves the
+    // pass hook above working rather than taking it down.
+    if (!IsBadReadPtr((void*)ADDR_Cascade, 16) &&
+        WineSafe_CreateHook((void*)ADDR_Cascade, (void*)HookedCascade, &g_origCascade) == MH_OK &&
+        WO_EnableHook((void*)ADDR_Cascade) == MH_OK) {
+        Log("[ShadowProbe] also watching the cascade cache (sub_874890 @ 0x%08X). "
+            "Below quality 5 the shadow map is not redrawn each frame: three "
+            "cascades each keep a centre, a counter and two buffers, skip "
+            "entirely while the camera stays within a squared distance of the "
+            "centre, redraw one slice at a time otherwise, and flip a buffer on "
+            "recentring. That is the shape of the report - flicker below quality "
+            "5, worst while running - so it is counted rather than assumed.",
+            (unsigned)ADDR_Cascade);
+    } else {
+        Log("[ShadowProbe] the cascade cache at 0x%08X was NOT hooked - the pass "
+            "counters above still work", (unsigned)ADDR_Cascade);
     }
 
     g_installed = true;
@@ -266,13 +389,38 @@ void OnFrame() {
             "client disagree about what it is set to");
     }
 
+    if (g_cascCalls) {
+        Log("[ShadowProbe]   cascade cache: %u updates, %u of them on the cached "
+            "branch. Per cascade - skipped/redrawn/buffer-flips, and the furthest "
+            "the camera got from the cached centre against the distance that "
+            "triggers a recentre:", g_cascCalls, g_cascCached);
+        for (int c = 0; c < kCascades; c++) {
+            Log("[ShadowProbe]     cascade %d: %u skipped, %u redrawn, %u flips, "
+                "worst %.1f vs threshold %.1f (squared)",
+                c, g_cascSkip[c], g_cascDraw[c], g_cascFlip[c],
+                (double)g_worstMove[c], (double)g_threshold[c]);
+        }
+        Log("[ShadowProbe]     a flip is the cascade swapping which buffer it "
+            "shows. If flips are frequent while moving and rare while standing "
+            "still, that is the flicker and it is the client's own cache.");
+    } else {
+        Log("[ShadowProbe]   the cascade updater was never called this window");
+    }
+
     g_entries = g_ran = g_blockedNull = g_blockedQual = g_reinit = 0;
     g_a2Set = g_a2Flips = 0;
+    g_cascCalls = g_cascCached = 0;
+    for (int c = 0; c < kCascades; c++) {
+        g_cascSkip[c] = g_cascDraw[c] = g_cascFlip[c] = 0;
+        g_worstMove[c] = 0.0f;
+    }
     g_nullMask = 0;
 }
 
 void Shutdown() {
-    if (g_installed) MH_DisableHook((void*)ADDR_Pass);
+    if (!g_installed) return;
+    MH_DisableHook((void*)ADDR_Pass);
+    if (g_origCascade) MH_DisableHook((void*)ADDR_Cascade);
 }
 
 } // namespace ShadowStateProbe
