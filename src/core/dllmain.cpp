@@ -8472,7 +8472,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- SSE2 Math Fast Paths ---");
-    bool simdMathOk = Config::g_settings.OptStrStrSse2 && SimdMathFast::Init();
+    // Was gated on OptStrStrSse2 - a string-search switch - so it could not be
+    // turned off deliberately by anyone who wanted to. It has its own key now,
+    // and that key defaults off; see the module for the measurement that decided
+    // it.
+    bool simdMathOk = SimdMathFast::Init();
 
     Log("");
     Log("--- Incremental Combat Log Parsing ---");

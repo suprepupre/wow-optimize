@@ -359,6 +359,14 @@ namespace Config {
         // map stale. Self-limiting - never drifts past a quarter of the
         // cascade's own extent. Rides on the shadow probe's hook.
         bool OptShadowCascadeHold = false;
+        // The SSE2 matrix-vector multiply on sub_4C21B0. Default OFF, and the
+        // reason is in the module's own harness numbers: 3.333 ns against 2.497
+        // ns for the code it replaces, with output bit-identical - worst
+        // relative difference 0.000e+00. A replacement that is slower and
+        // returns the same answer is negative value, and this one runs 5257
+        // times a frame. It also used to be gated on OptStrStrSse2, a string
+        // search switch, so nobody could turn it off on purpose either.
+        bool OptMatrixVectorSse2 = false;
         bool OptWorldStateCoalesce = false;
         bool OptD3d9RenderThread = false;
 

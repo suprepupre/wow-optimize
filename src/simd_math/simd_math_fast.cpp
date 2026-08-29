@@ -7,6 +7,7 @@
 #include "simd_math_fast.h"
 #include "MinHook.h"
 #include "version.h"
+#include "config.h"
 #include <windows.h>
 #include <xmmintrin.h>
 #include <emmintrin.h>
@@ -110,6 +111,29 @@ bool Init() {
     #if TEST_DISABLE_SIMD_MATH_FAST
     return true;
     #endif
+
+    // Off unless asked for, and the reason is three lines up in this file: the
+    // harness above the hook measured 3.333 ns for this against 2.497 ns for the
+    // code it replaces, with the output bit-identical - worst relative
+    // difference 0.000e+00 over 4096 random matrices.
+    //
+    // A replacement that is slower than the original and returns the same answer
+    // is not an optimization, and this one is not rare: a tester's session ran it
+    // 566,247,424 times over 107,724 frames, which is 5257 calls a frame. By
+    // those numbers it costs about 4.4 microseconds of every frame and buys
+    // nothing. The number was in this comment all along and nobody subtracted.
+    //
+    // The code stays because the analysis in it is worth keeping - the
+    // single-precision version of this hook is what caused the first-person
+    // camera snapping, and that is a lesson with an address attached.
+    if (!Config::g_settings.OptMatrixVectorSse2) {
+        Log("[SimdMathFast] not installing MatVec3Mul: measured at 3.333 ns "
+            "against 2.497 ns for the client's own routine, with bit-identical "
+            "output, over 4096 random matrices. Slower and identical is negative "
+            "value, and it runs about 5257 times a frame. Set MatrixVectorSse2=1 "
+            "to install it anyway.");
+        return true;
+    }
 
     void* target_mul = (void*)0x004C21B0;
 
