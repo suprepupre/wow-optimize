@@ -3845,6 +3845,35 @@ static bool PathPassesThroughMPQ(const char* path) {
     return false;
 }
 
+// Every SavedVariables file the client opens for writing, named once each.
+//
+// A tester reports addon names coming out garbled - in the addon list and in the
+// SavedVariables filenames on disk. A name on disk means the client wrote a file
+// under a corrupted name and the corruption outlived the session. Nothing in our
+// logs records those names, so there is no way to see when a bad one first
+// appears or what else was happening at the time.
+//
+// This is not a fix and it names no cause. It puts the filename in the log at
+// the moment the client creates it, with a timestamp, so the next report can be
+// read rather than guessed at. Names are remembered so a file reopened every few
+// seconds is logged once.
+static void NoteSavedVariablesWrite(const char* path) {
+    if (!path) return;
+    const char* leaf = strrchr(path, '\\');
+    leaf = leaf ? leaf + 1 : path;
+
+    static char s_seen[64][64];
+    static int  s_count = 0;
+    for (int i = 0; i < s_count; i++)
+        if (strcmp(s_seen[i], leaf) == 0) return;
+    if (s_count < 64) {
+        strncpy(s_seen[s_count], leaf, sizeof(s_seen[0]) - 1);
+        s_seen[s_count][sizeof(s_seen[0]) - 1] = 0;
+        s_count++;
+    }
+    Log("[SavedVars] client opened for writing: %s", leaf);
+}
+
 static HANDLE WINAPI hooked_CreateFileA(LPCSTR lpFileName, DWORD dwAccess, DWORD dwShare,
     LPSECURITY_ATTRIBUTES lpSA, DWORD dwDisposition, DWORD dwFlags, HANDLE hTemplate)
 {
@@ -3854,7 +3883,13 @@ static HANDLE WINAPI hooked_CreateFileA(LPCSTR lpFileName, DWORD dwAccess, DWORD
         size_t len = strlen(lpFileName);
         const char* checkPath = lpFileName;
         char fixedPath[MAX_PATH];
-        if (len > 0 && lpFileName[len-1] == '\\') {
+        // The length was not checked against the buffer. A path longer than
+        // MAX_PATH ending in a backslash overflowed this stack array, and Win32
+        // takes paths well past MAX_PATH - through the extended prefix, and
+        // through a relative path in a deep working directory. Nothing here
+        // needs the whole path, only the extension, so an over-long one skips
+        // the trim and is examined as it arrived.
+        if (len > 0 && len < sizeof(fixedPath) && lpFileName[len-1] == '\\') {
             memcpy(fixedPath, lpFileName, len);
             fixedPath[len-1] = 0;
             checkPath = fixedPath;
@@ -3889,6 +3924,8 @@ static HANDLE WINAPI hooked_CreateFileA(LPCSTR lpFileName, DWORD dwAccess, DWORD
             extern bool ContainsWTF(const char* path);
             const char* luaExt = strrchr(lpFileName, '.');
             if (ContainsWTF(lpFileName) && luaExt && _stricmp(luaExt, ".lua") == 0) {
+                if (dwAccess & (GENERIC_WRITE | FILE_WRITE_DATA | GENERIC_ALL))
+                    NoteSavedVariablesWrite(lpFileName);
                 #if !TEST_DISABLE_SAVED_VARS_ASYNC
                 if (dwAccess & (GENERIC_WRITE | FILE_WRITE_DATA | GENERIC_ALL)) {
                     extern void TrackSVHandle(HANDLE h);
@@ -3932,6 +3969,8 @@ static HANDLE WINAPI hooked_CreateFileW(LPCWSTR lpFileName, DWORD dwAccess, DWOR
         extern bool ContainsWTF(const char* path);
         const char* luaExt = strrchr(buf, '.');
         if (ContainsWTF(buf) && luaExt && _stricmp(luaExt, ".lua") == 0) {
+            if (dwAccess & (GENERIC_WRITE | FILE_WRITE_DATA | GENERIC_ALL))
+                NoteSavedVariablesWrite(buf);
             #if !TEST_DISABLE_SAVED_VARS_ASYNC
             if (dwAccess & (GENERIC_WRITE | FILE_WRITE_DATA | GENERIC_ALL)) {
                 extern void TrackSVHandle(HANDLE h);
