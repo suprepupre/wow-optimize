@@ -68,9 +68,21 @@ static          uint64_t g_sendBytes   = 0;
 static volatile DWORD  g_lastSendTick  = 0;
 static volatile DWORD  g_firstRecvTick = 0;
 
-// One report per session. A disconnect cascades - recv fails, then send fails,
-// then the socket closes - and three copies of the same story is noise.
+// One report per connection. A disconnect cascades - recv fails, then send
+// fails, then the socket closes - and three copies of the same story is noise.
+//
+// Per connection, not per session, which is what it used to be. A raid log with
+// three separate drops in it carried one report, for the first, and both of the
+// drops the player actually wrote the report about produced nothing at all. The
+// latch is cleared in WatchSocket when traffic moves to a new socket, so it is
+// always cleared after the old connection has had its say and before the new one
+// can need it.
 static volatile LONG g_reported = 0;
+
+// How many connections have carried traffic this session. Printed in the
+// periodic line too, because the receive counters restart with each one and a
+// count that suddenly falls otherwise reads as a broken counter.
+static volatile LONG g_connSeq = 0;
 
 // Which socket the counters above are describing.
 //
@@ -112,6 +124,8 @@ static void WatchSocket(SOCKET s) {
     g_sendBytes     = 0;
     g_firstRecvTick = 0;
     g_lastSendTick  = 0;
+    InterlockedIncrement(&g_connSeq);
+    InterlockedExchange(&g_reported, 0);
 }
 
 static bool IsWatched(SOCKET s) { return g_watchedSocket == (LONG)s; }
@@ -140,7 +154,19 @@ static void ReportDisconnect(const char* how, int err) {
     DWORD sinceSend = (g_lastSendTick != 0) ? (now - g_lastSendTick) : 0;
     DWORD sessionMs = (g_firstRecvTick != 0) ? (now - g_firstRecvTick) : 0;
 
-    Log("!!! DISCONNECT !!! %s%s%s", how,
+    // A connection that carried neither long enough nor much enough to be a world
+    // session is the logon exchange ending, which is a normal step in starting the
+    // game. It gets a line rather than a banner. Silence is what let the
+    // per-session latch look harmless for as long as it did.
+    if (sessionMs < kRealSessionMs && g_recvBytes < kRealSessionBytes) {
+        Log("[NetDiag] Connection %ld ended (%s) after %lu ms and %llu bytes - too "
+            "short to be a world session, so this is the logon handoff",
+            g_connSeq, how, (unsigned long)sessionMs,
+            (unsigned long long)g_recvBytes);
+        return;
+    }
+
+    Log("!!! DISCONNECT !!! (connection %ld) %s%s%s", g_connSeq, how,
         (err && *ErrorName(err)) ? " - " : "",
         (err && *ErrorName(err)) ? ErrorName(err) : "");
 
@@ -299,16 +325,16 @@ bool Init() {
 
     g_active = true;
     Log("[NetDiag] Watching the receive path, %d/4 entry points - reports once if "
-        "the connection ends", installed);
+        "a connection ends", installed);
     return true;
 }
 
 void LogStats() {
     if (!g_active) return;
     DWORD now = GetTickCount();
-    Log("[NetDiag] %ld receives (%llu bytes), %ld sends (%llu bytes), last byte "
-        "%lu ms ago",
-        g_recvCalls, (unsigned long long)g_recvBytes,
+    Log("[NetDiag] connection %ld: %ld receives (%llu bytes), %ld sends (%llu "
+        "bytes), last byte %lu ms ago",
+        g_connSeq, g_recvCalls, (unsigned long long)g_recvBytes,
         g_sendCalls, (unsigned long long)g_sendBytes,
         (unsigned long)(g_lastRecvTick ? (now - g_lastRecvTick) : 0));
 }
