@@ -194,6 +194,18 @@ static void ReportDisconnect(const char* how, int err) {
         LuaOpt::IsReloading() ? 1 : 0,
         LuaOpt::IsSwapping() ? 1 : 0);
 
+    // A clean close of a healthy connection has one known cause on at least one
+    // server, and the reader of this log deserves to be told rather than left to
+    // repeat the whole investigation. Only said when the mode is off, because
+    // with it on this report is the experiment rather than a complaint.
+    if (err == 0 && mainSilent < 1000 && !Config::g_settings.OptNoClientPatches) {
+        Log("!!!   The client was healthy when this happened, so nothing here "
+            "stalled or crashed. On WoWCircle two players stopped being dropped "
+            "entirely once they enabled No Client Patches in the launcher, which "
+            "stops this DLL writing anything into WoW.exe. That turns every "
+            "optimisation off - it is the trade, not a fix.");
+    }
+
     CrashDumper::DumpTrace(12, 30000);
     Log("!!! END DISCONNECT REPORT !!!");
 }
