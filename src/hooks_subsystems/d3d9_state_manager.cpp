@@ -874,8 +874,20 @@ void D3D9StateManager_LogStats(void) {
         Log("[D3D9State] not hooked - nothing measured");
         return;
     }
-    Log("[D3D9State] %lu frames; per-hook calls and skips, all lower bounds:",
-        g_totalFrames);
+    // g_totalFrames is not a frame count. It is bumped from
+    // OnFrameD3D9StateManager, which runs out of hooked_Sleep at one tick every
+    // SleepPrecisionValue ms, so it counts sleeps. In one tester session it read
+    // 2,150 while Present had been called 56,321 times - a factor of twenty-six -
+    // and the draw report below divided by it, which is how 1,323 draw calls a
+    // frame got printed as 34,671.
+    //
+    // Present is the frame boundary, and it is counted by the same hook table as
+    // everything else in this report, so it is the denominator. The sleep count
+    // is still worth printing because it is what the state-cache invalidation
+    // fallback actually runs at.
+    const unsigned long frames = g_statCalls[15];   // Present
+    Log("[D3D9State] %lu frames (Present), %lu maintenance ticks; per-hook calls "
+        "and skips, all lower bounds:", frames, g_totalFrames);
     bool anySkip = false;
     for (int i = 0; i < NUM_HOOKS; i++) {
         if (g_statCalls[i] == 0) continue;
@@ -908,11 +920,16 @@ void D3D9StateManager_LogStats(void) {
             "module did can have changed what the client drew");
 
     unsigned long draws = g_statCalls[16] + g_statCalls[17];
-    if (draws && g_totalFrames) {
+    if (draws && !frames) {
+        Log("[D3D9State] draw calls: %lu counted, but Present was never seen, so "
+            "there is no frame count to divide by and no per-frame figure here.",
+            draws);
+    }
+    if (draws && frames) {
         Log("[D3D9State] draw calls: %lu over %lu frames = %.0f per frame, "
             "carrying %lu primitives = %.0f per frame and %.1f per call.",
-            draws, g_totalFrames, (double)draws / (double)g_totalFrames,
-            g_drawPrims, (double)g_drawPrims / (double)g_totalFrames,
+            draws, frames, (double)draws / (double)frames,
+            g_drawPrims, (double)g_drawPrims / (double)frames,
             (double)g_drawPrims / (double)draws);
         Log("[D3D9State]   primitives per draw - the number that decides whether "
             "batching is worth anything, because an average hides it:");
