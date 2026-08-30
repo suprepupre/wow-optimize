@@ -72,6 +72,8 @@ bool WowMemoryOpt::EnableLargeAddressAware() {
     
     if (alreadyLAA) {
         Log("[MEMORY_OPT] LAA: Already enabled in PE header (WoW.exe is LAA-aware)");
+    } else if (!WowOpt_ClientPatchAllowed(&nt->FileHeader.Characteristics)) {
+        Log("[MEMORY_OPT] LAA: PE header left alone (NoClientPatches)");
     } else {
         // Patch PE header in memory to enable LAA
         DWORD oldProtect;

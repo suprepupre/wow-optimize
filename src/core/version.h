@@ -825,6 +825,43 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 // MinHook patching WoW .text section (0x00400000-0x00FFFFFF) may
 // invalidate JIT translations. System DLL hooks are safe (separate modules).
 // Only available in TUs that include MinHook.h before version.h.
+// ================================================================
+
+// Whether this run is forbidden to write anything into the wow.exe image, and
+// the tally of what that refused. Both live in dllmain.cpp; see the note at the
+// head of WowOpt_CreateHookGuarded for what the mode is for.
+extern "C" int  WowOpt_NoClientPatches(void);
+extern "C" void WowOpt_NoteClientPatchRefused(void);
+
+// The client's mapped image, resolved once. Its own base and SizeOfImage, so a
+// relocated or differently sized build answers correctly rather than against a
+// constant. Anything outside it - ws2_32, kernel32, d3d9, our own code - is not
+// the client and is left alone by the mode above.
+static inline bool WowOpt_InsideClientImage(const void* addr) {
+    static uintptr_t base = 0, end = 0;
+    if (!end) {
+        HMODULE h = GetModuleHandleA(NULL);
+        if (!h) return false;
+        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)h;
+        IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((char*)h + dos->e_lfanew);
+        base = (uintptr_t)h;
+        end  = base + nt->OptionalHeader.SizeOfImage;
+    }
+    uintptr_t a = (uintptr_t)addr;
+    return a >= base && a < end;
+}
+
+// The same refusal for a write this project performs itself rather than through
+// MinHook. Returns true when the write may go ahead. Call it with the address
+// about to be written and a name for the log; a patch site that does not ask is
+// a hole in the experiment, not an optimisation that got away with it.
+static inline bool WowOpt_ClientPatchAllowed(const void* addr) {
+    if (!WowOpt_NoClientPatches()) return true;
+    if (!WowOpt_InsideClientImage(addr)) return true;
+    WowOpt_NoteClientPatchRefused();
+    return false;
+}
+
 #if defined(MH_ALL_HOOKS) || defined(MH_OK)
 #ifndef WOWOPT_WINESAFE_HOOK_DEFINED
 #define WOWOPT_WINESAFE_HOOK_DEFINED
@@ -862,6 +899,32 @@ static inline MH_STATUS WowOpt_CreateHookGuarded(void* target, void* detour, voi
         }
     }
 #endif
+    // Refuse every target inside the client's own image, when asked to.
+    //
+    // Three disconnects have now been measured from the inside and all three
+    // look the same: recv returns 0, so the server sent FIN, while data was
+    // still arriving and the main thread was still ticking. That is a
+    // server-side close of a healthy connection, and this DLL cannot tell a
+    // routine kick from a server noticing that a hundred-odd entry points in
+    // wow.exe start with a jmp that was not there on disk.
+    //
+    // One tester's friend removed the DLL, kept the addon, and stopped being
+    // dropped. That is one uncontrolled data point and it points here, so the
+    // question needs an experiment rather than an argument.
+    //
+    // This is that experiment. With the mode on, nothing is written into the
+    // wow.exe image: the socket observer still runs (ws2_32), the crash
+    // reporter still runs (kernel32, ntdll), the frame timing still runs (the
+    // D3D9 vtable lives in d3d9.dll), so a session still produces the same
+    // disconnect report. What stops is every optimisation, because every one of
+    // them is a patch. If the drops continue in this mode, they are not our
+    // patches. If they stop, they are, and the count below says how many were
+    // refused so the run cannot be mistaken for a normal one.
+    if (WowOpt_NoClientPatches() && WowOpt_InsideClientImage(target)) {
+        WowOpt_NoteClientPatchRefused();
+        return MH_ERROR_UNSUPPORTED_FUNCTION;
+    }
+
     // Refuse a target that somebody else has already detoured.
     //
     // A player on Ascension was kicked seconds after using an ability and then

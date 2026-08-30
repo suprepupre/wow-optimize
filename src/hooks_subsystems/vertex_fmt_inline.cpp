@@ -50,6 +50,7 @@
 
 #include "vertex_fmt_inline.h"
 #include "config.h"
+#include "version.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -164,6 +165,11 @@ bool PatchOne(const Site& s) {
     repl[i++] = 0x05;                      // add eax, 214h
     repl[i++] = 0x14; repl[i++] = 0x02; repl[i++] = 0x00; repl[i++] = 0x00;
     repl[i++] = 0x90;                      // nop, to fill the 14th byte
+
+    if (!WowOpt_ClientPatchAllowed(p)) {
+        Log("[VertexFmt] %s: site found and left alone (NoClientPatches)", s.what);
+        return false;
+    }
 
     DWORD old = 0;
     if (!VirtualProtect(p, kLen, PAGE_EXECUTE_READWRITE, &old)) {

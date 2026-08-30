@@ -104,6 +104,12 @@ namespace Config {
         bool OptMimallocLarge = false;
         bool OptVaArena = false;   // EXPERIMENTAL opt-in: segregated VirtualAlloc arena (anti-fragmentation)
         bool OptCompatMode = false; // Compatibility: skip aggressive CPU-priority/affinity/working-set tweaks (for VMs/HyperV where they break the connection)
+        // Diagnostic: write nothing into the wow.exe image. Every optimisation
+        // is a patch, so this turns them all off and leaves only the observers
+        // that live outside the client - the socket watch, the crash reporter,
+        // the frame timing. It exists to answer whether a disconnect follows
+        // the patches or happens regardless of them.
+        bool OptNoClientPatches = false;
 
         // UI & Lua
         bool OptUIFrameBatch = false;

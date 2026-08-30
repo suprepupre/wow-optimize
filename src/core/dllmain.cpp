@@ -751,6 +751,21 @@ void ClearCombatLogCache();
 #include "version.h"
 #include "config.h"
 
+// The diagnostic mode that writes nothing into the wow.exe image, and what it
+// turned away. Read straight from the settings rather than mirrored into a flag,
+// so there is no window in which a hook installs before the mirror is set.
+// Installs are not a hot path, so the interlocked count costs nothing here.
+static volatile long g_clientPatchesRefused = 0;
+
+extern "C" int WowOpt_NoClientPatches(void) {
+    return Config::g_settings.OptNoClientPatches ? 1 : 0;
+}
+
+extern "C" void WowOpt_NoteClientPatchRefused(void) {
+    InterlockedIncrement(&g_clientPatchesRefused);
+}
+
+
 // ================================================================
 // TOGGLES// Each toggle disables a specific optimization for binary search
 // during crash investigation. Set to 1 to DISABLE the feature.
@@ -4604,7 +4619,10 @@ static void TryRemoveFPSCap() {
         searchFrom = found + 1;
     }
 
-    if (addr) {
+    if (addr && !WowOpt_ClientPatchAllowed((void*)(addr + 1))) {
+        Log("FPS cap: patch site found at 0x%08X and left alone (NoClientPatches)",
+            (unsigned)addr);
+    } else if (addr) {
         DWORD old;
         if (VirtualProtect((void*)(addr + 1), 4, PAGE_EXECUTE_READWRITE, &old)) {
             *(uint32_t*)(addr + 1) = 200;  // stock cap — 999 breaks camera interpolation
@@ -4971,6 +4989,14 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     ApiCache::LogStats();
     TextureUnloadDelay::LogStats();
     NetDiag::LogStats();
+    // Said every report, not once at startup, because the whole value of this
+    // mode is that a log from it cannot be read as a log from a normal run.
+    if (Config::g_settings.OptNoClientPatches) {
+        Log("[NoClientPatches] ON - %ld write%s into the wow.exe image refused. "
+            "No optimisation ran this session; the socket watch, the crash "
+            "reporter and the frame timing live outside the client and did.",
+            g_clientPatchesRefused, g_clientPatchesRefused == 1 ? "" : "s");
+    }
     RenderNullGuard_LogStats();
     StrncmpSse2::LogStats();
     DbcLookupCache_LogStats();
