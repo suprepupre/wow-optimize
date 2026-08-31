@@ -3,6 +3,15 @@
 > memory optimization tools as illegal software regardless of intent, and the
 > result is a permanent ban on your account.
 
+> [!WARNING]
+> **On WoWCircle you will be disconnected.** Not banned - dropped, several times a
+> session, in raids and battlegrounds. It is this DLL: two players independently
+> turned on **No Client Patches** in the launcher and the disconnects stopped
+> entirely, and both were dropped again with it off. That option stops anything
+> being written into WoW.exe, which also turns every optimization off, so it is a
+> trade rather than a fix. See
+> [WoWCircle disconnects](#wowcircle-disconnects) below.
+
 # wow_optimize
 
 Performance optimization DLL for World of Warcraft 3.3.5a (WotLK)
@@ -20,6 +29,7 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## Table of Contents
 * [What's New in v3.19.1](#whats-new-in-v3191)
+  * [WoWCircle disconnects](#wowcircle-disconnects)
 * [What's New in v3.19.0](#whats-new-in-v3190)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
@@ -36,8 +46,51 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## What's New in v3.19.1
 
-A bugfix release. Two of these were reported by testers and reproduced in their
+A bugfix release. Some of these were reported by testers and reproduced in their
 logs; the rest came from reading our own numbers and finding they were wrong.
+
+### WoWCircle disconnects
+
+Reported by [Flokj](https://github.com/Flokj): dropped from the server twice in a
+Halion 25 heroic raid, then again in a battleground, then again three seconds
+after leaving a cross-realm battleground.
+
+The receive path is watched, so the end of a connection can be described rather
+than guessed at. Five of his drops were measured and all five are the same event:
+`recv` returns 0, meaning the server sent FIN. Not `WSAECONNRESET`, which is what
+a route failure looks like from here, and not a timeout. The client was healthy
+at each of those instants - the last byte had arrived 0 to 2156 ms earlier, the
+main thread had ticked 0 to 31 ms earlier, and the freeze watchdog stayed silent
+at its 10 second threshold through every session. Time from connecting to being
+dropped was 76.4, 47.6, 12.5 and 17.7 minutes, so there was no period in it
+either. The battleground one came 4.8 seconds after the loading screen finished,
+on a connection that had been open the whole session, so it was not a server
+handoff.
+
+That is a server closing a working connection, and from inside the process there
+is no way to tell a routine kick from a server noticing the client's code has
+been modified. So this release added a way to ask: **No Client Patches**, in the
+launcher, which writes nothing at all into the WoW.exe image. Every optimization
+in this project is a patch, so they all stop; the disconnect watch, the crash
+reporter and the frame timing keep running because they live in ws2_32, kernel32
+and d3d9 rather than in the client.
+
+Flokj ran two hours and sixteen minutes with it on: one connection, 1,941,806
+packets received, 49.4 MB, and no server-side close in the whole log. asslol
+reported the same result independently. Both are dropped again with it off.
+
+For contrast, four sessions from a tester on a different server contain zero
+server-side closes at all.
+
+About 110 entry points in WoW.exe are rewritten to begin with a jump that is not
+in the file on disk. That is what the optimizations are, and it is also what a
+memory scan looks for.
+
+So on WoWCircle the options are the switch - keep your connection, lose the
+performance work - or the `!LuaBoost` addon on its own without the DLL. There is
+deliberately no attempt here to find which of the patches the server's checks do
+not cover; that would be working around a server's protection rather than fixing
+anything.
 
 ### The glowing models
 
