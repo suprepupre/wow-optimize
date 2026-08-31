@@ -4,13 +4,8 @@
 > result is a permanent ban on your account.
 
 > [!WARNING]
-> **On WoWCircle you will be disconnected.** Not banned - dropped, several times a
-> session, in raids and battlegrounds. It is this DLL: two players independently
-> turned on **No Client Patches** in the launcher and the disconnects stopped
-> entirely, and both were dropped again with it off. That option stops anything
-> being written into WoW.exe, which also turns every optimization off, so it is a
-> trade rather than a fix. See
-> [WoWCircle disconnects](#wowcircle-disconnects) below.
+> **On WoW Circle the DLL gets you disconnected** - Turning on **No Client Patches** in the launcher stops it, and
+> also turns every optimization off. Or use the `!LuaBoost` addon without the DLL.
 
 # wow_optimize
 
@@ -29,8 +24,6 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## Table of Contents
 * [What's New in v3.19.1](#whats-new-in-v3191)
-  * [WoWCircle disconnects](#wowcircle-disconnects)
-* [What's New in v3.19.0](#whats-new-in-v3190)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
 * [Current Feature Set](#current-feature-set)
@@ -46,166 +39,54 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## What's New in v3.19.1
 
-A bugfix release. Some of these were reported by testers and reproduced in their
-logs; the rest came from reading our own numbers and finding they were wrong.
+### Fixed
 
-### WoWCircle disconnects
-
-Reported by [Flokj](https://github.com/Flokj): dropped from the server twice in a
-Halion 25 heroic raid, then again in a battleground, then again three seconds
-after leaving a cross-realm battleground.
-
-The receive path is watched, so the end of a connection can be described rather
-than guessed at. Five of his drops were measured and all five are the same event:
-`recv` returns 0, meaning the server sent FIN. Not `WSAECONNRESET`, which is what
-a route failure looks like from here, and not a timeout. The client was healthy
-at each of those instants - the last byte had arrived 0 to 2156 ms earlier, the
-main thread had ticked 0 to 31 ms earlier, and the freeze watchdog stayed silent
-at its 10 second threshold through every session. Time from connecting to being
-dropped was 76.4, 47.6, 12.5 and 17.7 minutes, so there was no period in it
-either. The battleground one came 4.8 seconds after the loading screen finished,
-on a connection that had been open the whole session, so it was not a server
-handoff.
-
-That is a server closing a working connection, and from inside the process there
-is no way to tell a routine kick from a server noticing the client's code has
-been modified. So this release added a way to ask: **No Client Patches**, in the
-launcher, which writes nothing at all into the WoW.exe image. Every optimization
-in this project is a patch, so they all stop; the disconnect watch, the crash
-reporter and the frame timing keep running because they live in ws2_32, kernel32
-and d3d9 rather than in the client.
-
-Flokj ran two hours and sixteen minutes with it on: one connection, 1,941,806
-packets received, 49.4 MB, and no server-side close in the whole log. asslol
-reported the same result independently. Both are dropped again with it off.
-
-For contrast, four sessions from a tester on a different server contain zero
-server-side closes at all.
-
-About 110 entry points in WoW.exe are rewritten to begin with a jump that is not
-in the file on disk. That is what the optimizations are, and it is also what a
-memory scan looks for.
-
-So on WoWCircle the options are the switch - keep your connection, lose the
-performance work - or the `!LuaBoost` addon on its own without the DLL. There is
-deliberately no attempt here to find which of the patches the server's checks do
-not cover; that would be working around a server's protection rather than fixing
-anything.
-
-### The glowing models
-
-Reported by [txtsd](https://github.com/txtsd): characters glowing, sometimes only
-the shoulder pads and the weapon, then snapping back. Turning Spread Model
-Animation off stopped it.
-
-The function that feature skips does not only pose bone skeletons. Its last
-instructions also animate materials, writing colour, alpha and emissive, and then
-walk the model's attachment list and animate each attached model. Weapons and
-shoulder pads are attached models, so skipping a character froze its colour
-tracks and skipped its whole attached chain with it.
-
-It now refuses to skip any model where either of those would have run. On the
-first session measured with the fix that turned out to be 94% of models, so the
-feature currently skips almost nothing. The report says so rather than implying
-a saving, and says which of the two halves is responsible.
-
-### A crash, and the same defect caught in another log
-
-One tester's dump ends inside the game's own error formatter, reading a line
-number out of a compiled script object that had already been freed. Another
-tester's log has the same defect caught earlier and more gently: Reuse Compiled
-Scripts noticed a cached chunk no longer matched a fresh compile and switched
-itself off.
-
-The cache decided a new Lua state had started by comparing one address. The game
-runs its own memory pool for Lua, so a new state is routinely allocated where the
-old one was and the comparison saw nothing. In the crashing session the tool's
-own log recorded six state changes and the cache reported two.
-
-It now hears about every state change directly from the part of the tool that
-detects them, and each kept script carries three fields read when it was stored
-and checked again before it is handed back.
-
-### The tool could be loaded into its own launcher
-
-`version.dll` sits in the same folder as the launcher and the loader, and Windows
-resolves it out of the application directory for anything that runs there. The
-loader thread called LoadLibrary without ever asking which process it was in, so
-a DLL that patches addresses inside the game could end up inside the launcher.
-It checks now.
-
-### Settings that did not do what they said
-
-* **Lua VM: stop the automatic GC** was read, written to the file and shown in
-  the launcher, and gated nothing at all. The collector was driven entirely by
-  the Adaptive GC Governor tickbox. Both now mean what they say.
-* **UI Frame Batch** had no launcher entry at all and could only be changed by
-  editing the ini by hand. It also looked like it controlled four things and
-  controlled two: the other two have been compiled out of the build for as long
-  as anyone can tell. Split into **Cache Script Handlers** and **Unit API Fast
-  Path**, each inheriting the old setting so nothing changes for anyone, which
-  makes the flickering reported in issue #36 answerable in two runs instead of
-  never.
-* **Terrain Read-Ahead** was compiled out of every build while appearing to be a
-  setting, and read its position from an address the game never writes. Both
-  fixed. It is off by default and what it does when it works has still never
-  been tested by anyone.
-
-### Numbers that were not true
-
-Six of these, and every one of them was in logs people have been reading.
-
-* **"98/100 SUBSYSTEM performance features installed"** and **"34/40 EXTENDED
-  performance features installed"**. Three and five were installed. A loop added
-  the rest to the count so the line would say so, beside 127 empty functions that
-  nothing called. All gone.
-* **The CVar watchdog reported a corrupted client in every log ever collected**,
-  on sessions that then played for five hours without a fault. Two of its entries
-  did not describe what they pointed at and two more treated a value of zero as
-  damage when the game simply had not filled that global in yet.
-* **Three modules read a world position from an address the game never writes.**
-  Every model distance the animation census has ever printed is a distance from
-  the map origin, and the terrain read-ahead silently did nothing on every frame
-  of every session because of it. The real one is the point the game itself
-  streams terrain around.
-* **The feature summary mixed three different units in one column.** Features on
-  hot paths report one hit per few thousand calls, and those counts sat beside
-  ones that count every call. One entry read as the smallest of five and is
-  really the largest by an order of magnitude.
-* **A short session printed one report, taken thirty seconds in.** The periodic
-  dump fires at 30 seconds and then every 300, and nothing but the frame times
-  was printed at exit, so a five-minute session reporting a visual defect
-  produced no evidence covering it. Every session ends with a full report now.
-* **The freeze watchdog dismissed the very stall people report.** It captures
-  where the main thread is stuck only past 45 seconds, so blocks of eleven to
-  fourteen seconds during a load were noted on one line and never diagnosed.
-  Eight seconds is enough now, once per stall.
+* **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58).
+  Dropped from the server in raids and battlegrounds. Measured: the server closes
+  the connection while the client is running fine, so it is the DLL patching
+  WoW.exe. New launcher option **No Client Patches** writes nothing into the
+  client and the disconnects stop; two players confirmed. It turns every
+  optimization off, so it is a trade, not a fix.
+* **Glowing models** - reported by [txtsd](https://github.com/txtsd). Spread Model
+  Animation skipped material and attachment animation along with the bones, so
+  characters, weapons and shoulder pads glowed. It no longer skips a model where
+  either of those would have run.
+* **Crash in the game's error formatter.** Reuse Compiled Scripts detected a new
+  Lua state by comparing one address, and the game's Lua memory pool hands out
+  the old address again. Four of six state changes were missed and freed scripts
+  were served from the cache. It now hears about every state change directly.
+* **The DLL could load itself into its own launcher.** `version.dll` sits beside
+  the launcher, so Windows resolved it there too. It checks which process it is
+  in now.
+* **Lua VM: stop the automatic GC** gated nothing - the collector was driven
+  entirely by the Adaptive GC Governor tickbox.
+* **UI Frame Batch** had no launcher entry and could only be set by editing the
+  ini. Split into **Cache Script Handlers** and **Unit API Fast Path**, both
+  inheriting the old setting.
+* **Terrain Read-Ahead** was compiled out of every build while still appearing as
+  a setting, and read its position from an address the game never writes.
+* **Wrong numbers in the log**: the feature counts ("98/100 installed" when three
+  were), the CVar watchdog reporting a corrupted client in every log ever
+  collected, three modules reading the world position from a dead address, the
+  draw-call census dividing by sleeps instead of frames, and short sessions
+  printing no report at all. All corrected.
+* **The freeze watchdog** only captured a stall past 45 seconds, so the eleven to
+  fourteen second freezes people actually report were never diagnosed. Eight
+  seconds now.
 
 ### Faster
 
-* **Roughly 120 locked instructions removed from hot paths.** Every call to
-  every hooked game function was paying one or two of them to keep a counter.
-  On 32-bit that is a locked read-modify-write, and they sat on the CRT string
-  functions, the Direct3D state hooks, the frustum test, the clock read and the
-  most expensive function in the whole client. The counts they keep are lower
-  bounds now and the reports say so.
-* **The bone rotation blend is exact.** It shipped approximate, with a measured
-  worst error of 2.98e-07 and only 6.5% of results identical to the game's. The
-  vector unit has double precision as well as single, and double is exactly what
-  the game's floating point stack carries, so the same operations in the same
-  order reproduce it perfectly. Measured over three million interpolations:
-  100.0000% identical, worst difference zero. The in-game check compares bit
-  patterns with no tolerance and switches the feature off on the first
-  difference.
-* **The point transform is exact too**, and was two millimetres out. Its comment
-  claimed otherwise; the claim had never been measured.
+* Roughly 120 locked instructions removed from hot paths - every call to every
+  hooked game function was paying one or two to keep a counter.
+* The bone rotation blend and the point transform are now bit-exact against the
+  game's own answer, verified in-game with no tolerance.
 
 ### New, all off by default
 
 * **Spread Model Animation** now decides by distance from the camera rather than
   by how crowded the scene is, after proving at runtime which field carries the
   position. Models within 40 yards are never throttled.
-* **Object Tick Prefetch** — the game walks a list of objects every frame and
+* **Object Tick Prefetch** - the game walks a list of objects every frame and
   pokes each one, and the two fields it touches are in different cache lines.
   1.39% of main-thread time in a measured session, spent waiting. It changes
   nothing the game computes and refuses to install unless the function is
@@ -215,115 +96,6 @@ Six of these, and every one of them was in logs people have been reading.
   work in every profile taken here, ahead of running scripts, and neither how
   much of it is wasted nor how much of it this tool causes has ever been
   measured. These two answer that.
-
-### Still not claimed
-
-No feature here has a measured frame-rate gain. The sizes of what they target
-are measured and their correctness is verified, two of them now bit for bit
-against the game's own answer, but no before-and-after frame time exists yet.
-
----
-
-## What's New in v3.19.0
-
-Thanks to [txtsd](https://github.com/txtsd) for four long sessions, including the
-first one anyone has sent in with the frame rate uncapped. Every number below
-comes from those logs.
-
-### Four new features, all off by default
-
-They sit in the **Experimental** tab and **Enable All skips them**. Tick them
-yourself.
-
-**Reuse Compiled Scripts** — `UI_Lua/LuaProtoCache`
-
-Interface scripts written inside XML templates are recompiled every time a frame
-is built from that template. Measured: 68% of every chunk the client compiled in
-a session was source it had already compiled. This keeps the compiled form and
-hands it back, so the parse does not run. The client still builds the function
-object, its environment and its addon ownership, so nothing about permissions is
-shared between two uses.
-
-Field: 806 and 704 reuses across two sessions, each compared against a fresh
-compile, none differing.
-
-**UI Method Object Lookup** — `UI_Lua/LuaThisFast`
-
-Every call an addon makes into a frame (`SetText`, `GetWidth`, and 672 others)
-starts by fetching the frame object out of a table slot through four script-engine
-calls. This reads it directly. The addon-ownership propagation those calls perform
-is reproduced, not skipped — it decides what may touch protected actions.
-
-Field: 86.6M, 63.4M and 31.4M lookups across three sessions. None handed back,
-none disagreeing.
-
-**Spread Model Animation** — `Graphics_Sound/AnimLod`
-
-Posing model skeletons is the largest single block of frame time: 3.68 ms of a
-24.5 ms frame in a VoA raid, 114 models averaging 31 bones. No one function
-inside it is worth rewriting, so the only way to reach it is to do less.
-
-Below 96 models on screen nothing changes. Above that each model's pose refreshes
-every 2nd–4th frame, never slower than a quarter of your frame rate, and never
-before its first pose. It cannot make animations run slow: the client derives
-animation time from a clock, not by counting frames. In a packed city you may
-notice steppier movement on some characters.
-
-**Collision Box Test (SSE2)** — `Graphics_Sound/CollisionOutcode`
-
-Line-of-sight checks, world clicks and projectile paths sort a collision model's
-corners against a box — six comparisons per corner on the x87 stack, 3.8% of
-main-thread time. This does four corners per instruction.
-
-Unlike the other maths replacements here it is **exact, not approximate**: the
-bounds are plain floats with no arithmetic applied, so the vector comparison
-answers identically for every input including NaN. Before taking over it predicts
-which corners are outside and which triangles the game will queue, lets the game
-run, and compares — 3000 matches required.
-
-### The measurement tools were wrong
-
-**Every percentage the profiler printed was 5.6× too small** on a three-hour
-session: counts came from the last million ring entries, the divisor was the whole
-session. The top fifty summed to 12% of a profile, which no program can do. It
-produced a profile with no hot spot in it, and that reading was steering the work.
-Corrected: `AwesomeWotlkLib.dll` 9.7%, model animation 7.0%, `d3d9.dll` 6.3%, this
-DLL's own modules ~6%, particle vertex fill 2.5%, UI batch draw 2.3%. The
-executing/blocked split had the same defect and pinned every long session near
-99% executing whatever it was doing.
-
-**The animation counter claimed 72 ms of animation inside a 53 ms frame.** It
-closed its frame on the hooked `Sleep` tick, which a CPU-bound client stops
-running, so many frames were charged to one.
-
-**The feature summary listed two working default-on features as never having
-run**, forty lines below those features reporting their own work.
-
-**The vsync detector called an uncapped session capped** and told a tester to
-redo it. It tested the median frame time alone; a limiter has no tail, so the
-spread is what separates the two cases.
-
-### Removed and cheapened
-
-Six things that were never running: two event-name caches that logged themselves
-at startup and were never read, a CDataStore batch whose Install was called from
-nowhere, a frame-script throttle whose entry point nothing called, a sound guard
-that re-registered another module's hook, and a combat-text batch flushed every
-frame whose producer index nothing incremented. About 550 lines, and six log
-lines that claimed something was running.
-
-Nine counters on hot paths were atomic. On 32-bit x86 that is a locked
-instruction — and in the D3D9 state cache they sat on the skip branch, the fast
-one the whole feature exists to reach. The 64-bit ones in the script handler cache
-compiled to a locked retry loop. All are plain counters now; the numbers they
-report are a lower bound.
-
-The DBC row cache moved 1360 bytes per hit to deliver 680 — about 6.7 GB of spare
-`memcpy` in one session. The payload now goes straight to the caller.
-
-The quality governor could change settings the client only applies later, which
-queues a change the player never asked for and leaves the governor unable to
-measure what it did. It now reads each setting's flags and refuses those.
 
 ---
 
@@ -860,7 +632,7 @@ Recent events:
     -110351ms  TID=900   D3D9 device Reset (dev=0x0EB1AA90)
 ```
 
-The startup banner reports the exact build the log came from (`v3.19.0 (build abc1234)`), so please don't trim the first lines.
+The startup banner reports the exact build the log came from (`v3.19.1 (build abc1234)`), so please don't trim the first lines.
 
 If the complaint is stuttering rather than a crash, look for `slow frame` lines — each one names how far past your session's own median that frame ran, and what was happening during it:
 
