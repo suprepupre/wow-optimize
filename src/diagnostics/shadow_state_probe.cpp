@@ -380,17 +380,28 @@ __declspec(naked) static void HookedShadowPass() {
 namespace ShadowStateProbe {
 
 bool Init() {
-    if (!Config::g_settings.OptShadowStateProbe) return true;
+    // Two switches share this file and they gate different things. The probe is a
+    // diagnostic; the hold is the flicker fix a player would tick and expect to
+    // work. The hold lives in the cascade hook, which was installed below this
+    // early return, so ticking "Steadier Shadows" on its own did nothing at all -
+    // silently, with the launcher showing it enabled.
+    //
+    // The cascade hook now installs when either switch is on. The pass hook and
+    // the periodic report stay with the probe, because those are the diagnostic.
+    g_holdActive = Config::g_settings.OptShadowCascadeHold;
+    const bool wantProbe = Config::g_settings.OptShadowStateProbe;
+    if (!wantProbe && !g_holdActive) return true;
 
-    if (IsBadReadPtr((void*)ADDR_Pass, 16)) {
+    if (wantProbe && IsBadReadPtr((void*)ADDR_Pass, 16)) {
         Log("[ShadowProbe] 0x%08X unreadable - not installing", (unsigned)ADDR_Pass);
         return false;
     }
-    if (WineSafe_CreateHook((void*)ADDR_Pass, (void*)HookedShadowPass, &g_origPass) != MH_OK) {
+    if (wantProbe &&
+        WineSafe_CreateHook((void*)ADDR_Pass, (void*)HookedShadowPass, &g_origPass) != MH_OK) {
         Log("[ShadowProbe] hook NOT created");
         return false;
     }
-    if (WO_EnableHook((void*)ADDR_Pass) != MH_OK) {
+    if (wantProbe && WO_EnableHook((void*)ADDR_Pass) != MH_OK) {
         Log("[ShadowProbe] hook created but could not be enabled");
         return false;
     }
@@ -413,8 +424,11 @@ bool Init() {
             "counters above still work", (unsigned)ADDR_Cascade);
     }
 
-    g_holdActive = Config::g_settings.OptShadowCascadeHold;
-    if (g_holdActive) {
+    if (g_holdActive && !g_origCascade) {
+        Log("[ShadowProbe] Steadier Shadows is ON but the cascade cache could not "
+            "be hooked, so it is doing nothing this session.");
+    }
+    if (g_holdActive && g_origCascade) {
         Log("[ShadowProbe] cascade hold is ON: the recentre distance is doubled "
             "(%.0fx on the squared value), never past %.0f%% of the cascade's own "
             "half-size, and always computed from the client's stock value rather "
@@ -423,6 +437,12 @@ bool Init() {
             "yards inside a forty-yard cascade, and the tester reported the "
             "shadows lagging, which they were.",
             (double)kHoldMaxFactor, 100.0 * (double)kHoldDriftFrac);
+    }
+
+    if (!wantProbe) {
+        Log("[ShadowProbe] the pass counters are off (Shadow State Probe), so this "
+            "session reports nothing about shadows - only the hold above runs.");
+        return true;
     }
 
     g_installed = true;
