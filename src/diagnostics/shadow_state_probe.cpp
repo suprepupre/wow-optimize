@@ -187,21 +187,51 @@ float    g_extent[kCascades]     = {};       // the half-size the cascade covers
 // reset the disassembly shows. And the recentre distances are tiny: 4.0, 16.0
 // and 1024.0 squared, which is 2, 4 and 32 yards.
 //
-// So cascade 0 recentres every two yards. Each recentre re-projects the shadow
-// map around a new point and restarts the round-robin at slice zero, leaving two
-// thirds of the map stale for the new projection until the next frames catch up.
-// At running speed that is about three and a half times a second, which is what
-// "the houses on both sides flicker as you run" looks like.
+// The paragraph that used to stand here said each recentre restarts the
+// round-robin and leaves two thirds of the map stale. The disassembly of
+// sub_874890 says otherwise, and the difference is the whole design:
 //
-// Between recentres the map stays complete - the round-robin keeps it that way.
-// So a larger recentre distance buys longer stretches of a complete map that is
-// slightly off-centre, and off-centre is invisible while the camera is inside
-// the area the cascade covers.
+//   if (counter == 0 && distance2 <= threshold) -> skip the cascade entirely
+//   if (counter == 0)                           -> latch a PENDING centre at the
+//                                                  camera's position now
+//   ... render one tile: counter%3 across, counter/3 down (%5 and /5 for 2)
+//   ++counter
+//   if (counter == 9)   (25 for cascade 2)      -> commit pending centre,
+//                                                  counter = 0, FLIP the buffer
 //
-// That last clause is the whole safety argument, so this does not take a
-// multiplier on trust. It reads the cascade's own half-size and never lets the
-// drift exceed a quarter of it, so the camera cannot leave the covered area no
-// matter what the raise would have been. It never lowers a threshold either.
+// Both guards test counter == 0, so once a cycle is running neither the
+// threshold nor the camera is consulted again. A cycle is never restarted. It
+// runs its nine frames (twenty-five for cascade 2), and only then does the new
+// map become visible, all at once, on the buffer flip.
+//
+// So the artefact is not a stale region. It is a snap. The map that appears at
+// the flip was centred on where the camera was nine frames ago, and the camera
+// spent those frames moving away. At running speed cascade 0 crosses its two
+// yards about three and a half times a second, so the map jumps three and a half
+// times a second - which is what "the houses on both sides flicker as you run"
+// looks like.
+//
+// That makes the recentre distance a dial between two complaints rather than a
+// setting with a right answer:
+//
+//   larger  - fewer snaps, each one bigger, and the map sits further behind the
+//             camera between them. prince reported exactly this as "a delay in
+//             refreshing some maps" on the first version, which doubled it.
+//   smaller - more snaps, each one smaller, and the map is never far behind.
+//             Many small corrections read as motion; few large ones read as
+//             popping. The cost is that the cascade gets fewer of the frames it
+//             skips entirely, so it does more work while you move.
+//
+// The first version went larger. It removed the flicker for one tester and gave
+// another a visible lag, which is what the dial says should happen. This one goes
+// the other way, halving the distance, because that is the direction where
+// neither complaint gets worse - and it is a hypothesis about how a snap looks,
+// not a measurement, which is why the probe counts the flips either way and this
+// stays off by default.
+//
+// The cascade's own half-size still bounds a raise, so a value above stock can
+// never push the camera outside the area the cascade covers. Below stock that
+// bound cannot bind and is not applied.
 //
 // Off by default and separate from the probe's switch: with only the probe on,
 // nothing here writes anything.
@@ -224,11 +254,13 @@ float    g_holdTo[kCascades]   = {};
 // being built around a point up to ten yards behind him.
 //
 // The stock value is captured the first time each cascade is seen and every
-// target is computed from that, never from the current value. And the raise is
-// halved: four times the squared threshold is twice the distance, which is a
-// smaller change than the caps were making on their own.
-constexpr float kHoldMaxFactor = 4.0f;    // on the SQUARED threshold, so 2x distance
-constexpr float kHoldDriftFrac = 0.10f;   // nor past this share of the extent
+// target is computed from that, never from the current value.
+//
+// The factor is on the distance and squared here, because the client's own value
+// is squared. 0.5 turns cascade 0's two yards into one, cascade 1's four into
+// two, and cascade 2's thirty-two into sixteen.
+constexpr float kHoldDistFactor = 0.5f;   // on the DISTANCE; squared below
+constexpr float kHoldDriftFrac  = 0.10f;  // a raise never past this share of the extent
 float    g_holdStock[kCascades] = {};     // the client's own value, captured once
 bool     g_holdHaveStock[kCascades] = {};
 
@@ -321,13 +353,17 @@ extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
                     g_holdHaveStock[c] = true;
                 }
                 float stock = g_holdStock[c];
-                float drift = g_extent[c] * kHoldDriftFrac;
-                float cap   = drift * drift;              // compared squared
-                float want  = stock * kHoldMaxFactor;
-                if (want > cap) want = cap;
+                float want  = stock * (kHoldDistFactor * kHoldDistFactor);
+                if (want > stock) {
+                    // Only a raise can walk the camera out of the area the
+                    // cascade covers, so only a raise is bounded.
+                    float drift = g_extent[c] * kHoldDriftFrac;
+                    float cap   = drift * drift;          // compared squared
+                    if (want > cap) want = cap;
+                }
                 g_holdFrom[c] = stock;
                 g_holdTo[c]   = want;
-                if (want > thr) {
+                if (want != thr) {
                     *(volatile float*)(ADDR_Threshold + off) = want;
                     g_holdWrites++;
                 }
@@ -429,14 +465,18 @@ bool Init() {
             "be hooked, so it is doing nothing this session.");
     }
     if (g_holdActive && g_origCascade) {
-        Log("[ShadowProbe] cascade hold is ON: the recentre distance is doubled "
-            "(%.0fx on the squared value), never past %.0f%% of the cascade's own "
-            "half-size, and always computed from the client's stock value rather "
-            "than the current one. The first version computed from the current "
-            "one and ratcheted to the cap in a few frames - cascade 0 reached ten "
-            "yards inside a forty-yard cascade, and the tester reported the "
-            "shadows lagging, which they were.",
-            (double)kHoldMaxFactor, 100.0 * (double)kHoldDriftFrac);
+        Log("[ShadowProbe] cascade recentre distance set to %.0f%% of the "
+            "client's own, computed from the stock value each cascade started "
+            "with and never from the current one. The shadow map is committed all "
+            "at once after nine frames (twenty-five for cascade 2) and is centred "
+            "on where the camera was when those frames began, so what you see is "
+            "a snap rather than a stale patch. A shorter distance makes the snaps "
+            "smaller and more frequent, at the cost of frames the cascade would "
+            "have skipped. The version before this went the other way, doubled "
+            "the distance, and a tester reported the shadows lagging - which at "
+            "twice the distance they were. Compare the flips per thousand frames "
+            "below against a run with this off.",
+            100.0 * (double)kHoldDistFactor);
     }
 
     if (!wantProbe) {
