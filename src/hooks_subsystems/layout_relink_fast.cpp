@@ -46,6 +46,38 @@
 // `mov eax, [edx-4]`. That is inside the scan, not in the early-out at 0x489726
 // that this module leaves to the client. The target is the right one.
 //
+// ---------------------------------------------------------------------------
+// Why the case where a dependant IS found cannot be shortcut too
+//
+// The obvious next step is to answer the found case from the same index rather
+// than only the not-found case, and it does not work. Decompiled, the client is:
+//
+//     while (node) {
+//         for each of nine anchor slots a in node:
+//             if (a && !(a->flags & 0x800) && a->owner == this) match = node;
+//         if (match) { move this node to just before `match`; return; }
+//         node = next(node);
+//     }
+//     move this node to the head of the list;
+//
+// The `if (match)` is inside the loop, so it stops at the FIRST NODE carrying an
+// anchor that points at `this` - not the last match in the list. What it computes
+// is therefore a position in the global list: put me immediately before the first
+// thing that depends on me. It is one step of a topological sort.
+//
+// The dependants list at this+0x38 knows which anchors point at `this`, and that
+// is what makes the empty case answerable. It does not know which of their owning
+// nodes comes first in the global list, because it holds them in registration
+// order. Recovering that would need an order key per node, and this very function
+// reorders the list on every call, so any key it maintained would be invalidated
+// by the next relink - including its own.
+//
+// So the found case is left to the client. What remains unmeasured is how often
+// it is taken: the counters below separate it as `deferred`, and no tester log
+// has ever had this module switched on, so the share is not known rather than
+// known to be small.
+//
+// ---------------------------------------------------------------------------
 // The scan skips any anchor whose word at +0x0C has 0x800 set, while sub_489C30
 // registers a dependant regardless of it - the point mask it ORs into that same
 // word occupies the low bits. A dependants list holding only entries the scan
