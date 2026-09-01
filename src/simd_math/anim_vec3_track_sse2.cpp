@@ -101,6 +101,7 @@
 #include "version.h"
 #include "config.h"
 #include "sampling_profiler.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -139,6 +140,9 @@ vecTrack_fn orig_VecTrack = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 // Plain 32-bit: per bone per frame, and a lost increment costs a number rather
@@ -247,7 +251,7 @@ void Evaluate(void* obj, uint8_t* state, uint8_t* track,
 
 }  // namespace
 
-void __cdecl Hooked_VecTrack(void* obj, void* state, void* track,
+void __cdecl Hooked_VecTrackBody(void* obj, void* state, void* track,
                              uint32_t* out, const float* defVec) {
     g_calls++;
 
@@ -290,6 +294,20 @@ void __cdecl Hooked_VecTrack(void* obj, void* state, void* track,
     Evaluate(obj, (uint8_t*)state, (uint8_t*)track, out, defVec);
 }
 
+// The detour proper, split from the body above so the A/B harness can time
+// the call. A scope guard would be the natural way to close that sample on
+// every return path, and MSVC refuses object unwinding in a function that
+// contains __try - which the body does. This wrapper has none, so one pair
+// of reads covers every path the body can leave by.
+void __cdecl Hooked_VecTrack(void* obj, void* state, void* track,
+                             uint32_t* out, const float* defVec) {
+    if (!g_abSubject) { Hooked_VecTrackBody(obj, state, track, out, defVec); return; }
+    unsigned long long abTick = AbTest::TickIn();
+    if (AbTest::StandAside()) orig_VecTrack(obj, state, track, out, defVec);
+    else                      Hooked_VecTrackBody(obj, state, track, out, defVec);
+    AbTest::TickOut(abTick);
+}
+
 bool Init() {
     if (!Config::g_settings.OptAnimVec3Track) return true;
 
@@ -313,6 +331,13 @@ bool Init() {
     if (WO_EnableHook((void*)kVecTrack) != MH_OK) {
         Log("[AnimVec3Track] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("AnimVec3Track");
+    if (g_abSubject) {
+        Log("[AnimVec3Track] under A/B test: it alternates on and off in stints, "
+            "and AbTest reports both the frame times and the cost of this "
+            "call each way. The correctness checks are unaffected.");
     }
 
     g_installed = true;

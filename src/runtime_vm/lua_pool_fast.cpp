@@ -86,6 +86,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "lua_mempool_fast.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -112,6 +113,9 @@ poolFree_fn orig_PoolFree = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 // Plain 32-bit. This is the hot path the module exists to shorten, and a lost
@@ -234,7 +238,7 @@ inline void PushFree(uint32_t chunk, uint32_t block) {
 
 }  // namespace
 
-int __fastcall Hooked_PoolFree(void* pool, void* edx, void* block) {
+int __fastcall Hooked_PoolFreeBody(void* pool, void* edx, void* block) {
     g_calls++;
 
     uint32_t p = (uint32_t)pool;
@@ -334,6 +338,20 @@ int __fastcall Hooked_PoolFree(void* pool, void* edx, void* block) {
     }
 }
 
+// The detour proper, split from the body above so the A/B harness can time
+// the call. A scope guard would be the natural way to close that sample on
+// every return path, and MSVC refuses object unwinding in a function that
+// contains __try - which the body does. This wrapper has none, so one pair
+// of reads covers every path the body can leave by.
+int __fastcall Hooked_PoolFree(void* pool, void* edx, void* block) {
+    if (!g_abSubject) return Hooked_PoolFreeBody(pool, edx, block);
+    unsigned long long abTick = AbTest::TickIn();
+    int r = AbTest::StandAside() ? orig_PoolFree(pool, edx, block)
+                    : Hooked_PoolFreeBody(pool, edx, block);
+    AbTest::TickOut(abTick);
+    return r;
+}
+
 namespace LuaPoolFast {
 
 bool Init() {
@@ -359,6 +377,13 @@ bool Init() {
     if (WO_EnableHook((void*)kPoolFree) != MH_OK) {
         Log("[LuaPoolFast] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("LuaPoolFast");
+    if (g_abSubject) {
+        Log("[LuaPoolFast] under A/B test: it alternates on and off in stints, "
+            "and AbTest reports both the frame times and the cost of this "
+            "call each way. The correctness checks are unaffected.");
     }
 
     g_installed = true;

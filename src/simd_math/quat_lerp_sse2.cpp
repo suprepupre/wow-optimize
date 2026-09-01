@@ -81,6 +81,7 @@
 #include "MinHook.h"
 #include "version.h"
 #include "config.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -116,6 +117,9 @@ constexpr long kResampleMask = 1023;
 unsigned long g_calls      = 0;
 unsigned long g_agreements = 0;
 volatile LONG g_armed      = 0;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 volatile LONG g_dead       = 0;
 bool          g_installed  = false;
 
@@ -180,7 +184,7 @@ void Retire(const char* why) {
     }
 }
 
-float* __cdecl Hooked_QuatLerp(float* out, float t, const float* a, const float* b) {
+float* __cdecl Hooked_QuatLerpBody(float* out, float t, const float* a, const float* b) {
     if (g_dead || !out || !a || !b) return orig_QuatLerp(out, t, a, b);
 
     unsigned long n = ++g_calls;
@@ -242,6 +246,20 @@ float* __cdecl Hooked_QuatLerp(float* out, float t, const float* a, const float*
     return out;
 }
 
+// The detour proper, split from the body above so the A/B harness can time
+// the call. A scope guard would be the natural way to close that sample on
+// every return path, and MSVC refuses object unwinding in a function that
+// contains __try - which the body does. This wrapper has none, so one pair
+// of reads covers every path the body can leave by.
+float* __cdecl Hooked_QuatLerp(float* out, float t, const float* a, const float* b) {
+    if (!g_abSubject) return Hooked_QuatLerpBody(out, t, a, b);
+    unsigned long long abTick = AbTest::TickIn();
+    float* r = AbTest::StandAside() ? orig_QuatLerp(out, t, a, b)
+                    : Hooked_QuatLerpBody(out, t, a, b);
+    AbTest::TickOut(abTick);
+    return r;
+}
+
 } // namespace
 
 bool Init() {
@@ -261,6 +279,13 @@ bool Init() {
     if (WO_EnableHook((void*)kQuatLerp) != MH_OK) {
         Log("[QuatLerp] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("QuatLerpSse2");
+    if (g_abSubject) {
+        Log("[QuatLerp] under A/B test: it alternates on and off in stints, "
+            "and AbTest reports both the frame times and the cost of this "
+            "call each way. The correctness checks are unaffected.");
     }
 
     g_installed = true;
