@@ -13,6 +13,10 @@ namespace LuaGCGovernor {
 typedef int (__cdecl *lua_gc_fn)(void* L, int what, int data);
 static lua_gc_fn g_lua_gc = (lua_gc_fn)0x0084ED50;
 
+// Frames on which a collection was declined because a loading screen was up.
+// Counted so the guard can be told apart from a guard that never fires.
+static unsigned long g_declinedLoading = 0;
+
 typedef int (__cdecl *lua_getfield_fn)(void* L, int idx, const char* k);
 static lua_getfield_fn g_lua_getfield = (lua_getfield_fn)0x0084E590;
 
@@ -106,6 +110,20 @@ void LogStats() {
             g_gcStepMsTotal / (double)g_gcStepCount);
     }
 
+    // Printed whether or not any step ran, because "the guard never fired" and
+    // "the guard was never reached" are different facts and the second one is
+    // what a session with stepping switched off produces.
+    if (g_declinedLoading) {
+        Log("[GCGovernor] %lu frame(s) declined because a loading screen was up. "
+            "The client builds large tables then, every other cache here bypasses "
+            "during it, and this one did not until now.",
+            g_declinedLoading);
+    } else {
+        Log("[GCGovernor] no frame was declined for a loading screen - either none "
+            "came up while a step was wanted, or the window is narrower than it "
+            "looked");
+    }
+
     // Those numbers are this module's own work and nothing else. Lowering the
     // pause below the stock 200 makes the client start a new collection cycle
     // sooner, and all of that work is the client's, in its own functions, where
@@ -133,9 +151,36 @@ void LogStats() {
         win, tp, ts, sp, ss, tp + sp);
 }
 
+// Where this is allowed to collect from, and what that rules out.
+//
+// The one tester crash with this DLL genuinely in the call stack (nobus1.dmp,
+// 2026-08-05) went Hooked_EngineFrameLimit -> MainThreadPump -> OnFrame ->
+// StepTimed -> lua_gc -> the client's traversetable, reading [EAX+9] with EAX
+// zero. A null table where the collector expects one is what a half-built or
+// mid-resize table looks like, so the standing theory was that the frame-limiter
+// hook is not a safe point to collect from.
+//
+// It is one. sub_6836D0, the function that hook sits on, has three callers -
+// sub_69E220, sub_6A3450 and sub_6A7610 - and all three call it immediately
+// after presenting the frame: in sub_6A3450 the call is four instructions past
+// the device's own present through the vtable at +68. The client is not inside
+// Lua at that point, so a GC step there cannot catch the VM mid-operation, and
+// that theory is finished.
+//
+// What it does not rule out is a table left inconsistent earlier in the frame by
+// something else - the collector only has to walk it. So the suspicion moves off
+// the collection point and onto whatever wrote the table, and the crash stays
+// open.
+//
+// The one window this did not cover is a loading screen. The client builds large
+// tables while one is up, every other cache in this project bypasses during it,
+// and this did not - it checked only the two transient reload flags. Declines are
+// counted rather than silent, so a session can say whether the window was ever
+// entered at all.
 void OnFrame(double frameMs) {
     if (!g_initialized) return;
     if (LuaOpt::IsReloading() || LuaOpt::IsSwapping()) return;
+    if (LuaOpt::IsLoadingMode()) { g_declinedLoading++; return; }
 
     void* L = *(void**)0x00D3F78C;
     if (!L) return;
