@@ -110,6 +110,11 @@ namespace Config {
         // the frame timing. It exists to answer whether a disconnect follows
         // the patches or happens regardless of them.
         bool OptNoClientPatches = false;
+        // Per-frame ring the player dumps with a key when something looks
+        // wrong, so a report carries the frames around the moment instead of
+        // the ten-second average that has cost every investigation so far.
+        bool OptFlightRecorder = false;
+        int  FlightRecorderKey = 0x91;   // VK_SCROLL
 
         // UI & Lua
         bool OptUIFrameBatch = false;

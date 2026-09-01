@@ -72,6 +72,7 @@
 #include "MinHook.h"
 #include "config.h"
 #include "version.h"
+#include "flight_recorder.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -282,6 +283,12 @@ bool     g_holdHaveStock[kCascades] = {};
 uint32_t g_totalEntries = 0;
 uint32_t g_totalRan     = 0;
 
+// Columns in the flight recorder. The ten-second windows below could not
+// answer "was it flipping at the moment I saw it", which is the only
+// question anyone actually asked; per frame, they can.
+int g_frSlotFlip = -1;
+int g_frSlotDraw = -1;
+
 }  // namespace
 
 // At file scope: the naked thunk reaches it from inline assembly.
@@ -386,10 +393,17 @@ extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
 
             // The client's own test: with the counter at zero, staying inside the
             // threshold skips the cascade entirely for this frame.
-            if (counter == 0 && d2 <= (double)thr) g_cascSkip[c]++;
-            else                                   g_cascDraw[c]++;
+            if (counter == 0 && d2 <= (double)thr) {
+                g_cascSkip[c]++;
+            } else {
+                g_cascDraw[c]++;
+                FlightRecorder::Bump(g_frSlotDraw);
+            }
 
-            if (g_prevFlag[c] >= 0 && flag != g_prevFlag[c]) g_cascFlip[c]++;
+            if (g_prevFlag[c] >= 0 && flag != g_prevFlag[c]) {
+                g_cascFlip[c]++;
+                FlightRecorder::Bump(g_frSlotFlip);
+            }
             g_prevFlag[c] = flag;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -499,6 +513,9 @@ bool Init() {
             "session reports nothing about shadows - only the hold above runs.");
         return true;
     }
+
+    g_frSlotFlip = FlightRecorder::RegisterSlot("shdflip");
+    g_frSlotDraw = FlightRecorder::RegisterSlot("shddraw");
 
     g_installed = true;
     g_lastReport = GetTickCount();

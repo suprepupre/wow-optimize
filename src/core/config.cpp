@@ -63,6 +63,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "VaArena", &Settings::OptVaArena },
     { "General", "CompatMode", &Settings::OptCompatMode },
     { "General", "NoClientPatches", &Settings::OptNoClientPatches },
+    { "General", "FlightRecorder", &Settings::OptFlightRecorder },
     { "UI_Lua", "UIFrameBatch", &Settings::OptUIFrameBatch },
     { "UI_Lua", "AddonDispatcher", &Settings::OptAddonDispatcher },
     { "UI_Lua", "UIFrameAccessorFast", &Settings::OptUIFrameAccessorFast },
@@ -218,6 +219,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         }
 
         Log("[Config]   [General] SleepPrecisionValue=%d", g_settings.SleepPrecisionValue);
+        Log("[Config]   [General] FlightRecorderKey=0x%02X", g_settings.FlightRecorderKey);
         Log("[Config]   [General] SessionLogsToKeep=%d", g_settings.SessionLogsToKeep);
         Log("[Config] %d set in the file, %d left at defaults.", fromFile, defaulted);
 
@@ -502,6 +504,11 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptVaArena             = GetPrivateProfileIntA("General", "VaArena", 0, iniPath.c_str()) != 0;
         g_settings.OptCompatMode          = GetPrivateProfileIntA("General", "CompatMode", 0, iniPath.c_str()) != 0;
         g_settings.OptNoClientPatches     = GetPrivateProfileIntA("General", "NoClientPatches", 0, iniPath.c_str()) != 0;
+        g_settings.OptFlightRecorder      = GetPrivateProfileIntA("General", "FlightRecorder", 0, iniPath.c_str()) != 0;
+        // 0x91 is Scroll Lock. The client binds no action to it, and a key
+        // works on a loading screen and at character select, where no addon is
+        // running and where two of the open defects appear.
+        g_settings.FlightRecorderKey      = GetPrivateProfileIntA("General", "FlightRecorderKey", 0x91, iniPath.c_str());
         // HARD-DISABLED regardless of ini: in tester logs the arena was active
         // on machines with zero fragmentation (2GB+ largest free block), so it
         // used ~0.2MB of its 64MB and delivered no benefit - while still routing

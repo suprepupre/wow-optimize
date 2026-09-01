@@ -38,6 +38,7 @@
 #include "MinHook.h"
 #include "version.h"
 #include "config.h"
+#include "flight_recorder.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -84,6 +85,10 @@ static uint64_t g_total    = 0;
 static uint64_t g_totalBytes = 0;
 static uint32_t g_overflow = 0;
 static int      g_reports  = 0;
+
+// A column in the flight recorder. A UI reload compiles thousands of chunks
+// in a handful of frames, and a per-window count cannot show that shape.
+static int      g_frSlot   = -1;
 
 // Whether the same *source* keeps being compiled, which is the question a cache
 // turns on and which counting by name cannot answer.
@@ -199,6 +204,7 @@ static bool Record(const char* name, const char* buf, size_t sz, char* labelOut,
 
     ++g_total;
     g_totalBytes += (uint64_t)sz;
+    FlightRecorder::Bump(g_frSlot);
 
     // Hash the source itself, capped so a pathologically large chunk cannot make
     // this the expensive part of a compile.
@@ -294,6 +300,7 @@ bool Init() {
     if (!Config::g_settings.OptLuaCompileCensus) return true;
 
     QueryPerformanceFrequency(&g_qpcFreq);
+    g_frSlot = FlightRecorder::RegisterSlot("luacomp");
 
     // lua_load first, and luaL_loadbuffer only if that fails.
     //
