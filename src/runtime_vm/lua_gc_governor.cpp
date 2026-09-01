@@ -1,5 +1,6 @@
 #include "lua_gc_governor.h"
 #include "ab_test.h"
+#include "flight_recorder.h"
 #include "version.h"
 #include "lua_optimize.h"
 #include "../diagnostics/sampling_profiler.h"
@@ -43,6 +44,10 @@ bool          g_abSubject   = false;
 int           g_abLastPhase = -1;   // -1 nothing seen yet, 0 off, 1 on
 unsigned long g_abHandbacks = 0;
 
+// A flight-recorder column, so a stall in a dump can be lined up against the
+// steps that were asked for on the frames leading into it.
+int g_frSlotStep = -1;
+
 typedef int (__cdecl *lua_getfield_fn)(void* L, int idx, const char* k);
 static lua_getfield_fn g_lua_getfield = (lua_getfield_fn)0x0084E590;
 
@@ -75,6 +80,7 @@ static double g_lastMemoryKB = 0.0;
 
 bool Init() {
     g_initialized = true;
+    g_frSlotStep = FlightRecorder::RegisterSlot("gcstep");
     g_abSubject = AbTest::IsSubject("LuaGcManual");
     if (g_abSubject) {
         Log("[GCGovernor] under A/B test: during OFF stints the automatic "
@@ -113,6 +119,7 @@ static LARGE_INTEGER g_qpcFreq  = {};
 
 static inline void StepTimed(void* L, int kb) {
     if (g_qpcFreq.QuadPart == 0) QueryPerformanceFrequency(&g_qpcFreq);
+    FlightRecorder::Bump(g_frSlotStep);
 
     LARGE_INTEGER a, b;
     QueryPerformanceCounter(&a);

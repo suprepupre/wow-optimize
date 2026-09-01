@@ -3946,10 +3946,21 @@ static bool SavedVarsNameHasAddon(const char* path, const char* leaf) {
 
 static unsigned g_savedVarsBadNames = 0;
 
+// A flight-recorder column and its slot. The garbled names arrive in a burst
+// during a character switch, and how that burst is shaped - steady, or one frame
+// doing all of it - is not visible in a per-window count.
+static int g_frSlotSavedVars = -1;
+
 static void NoteSavedVariablesWrite(const char* path) {
     if (!path) return;
     const char* leaf = strrchr(path, '\\');
     leaf = leaf ? leaf + 1 : path;
+
+    // Above the dedupe below, not after it. The dedupe exists so the log names
+    // each file once; this column wants every open, and a counter placed after an
+    // early return stops counting the moment that return starts firing - which is
+    // its own entry in the list of ways this project has lied to itself.
+    FlightRecorder::Bump(g_frSlotSavedVars);
 
     // Widened past the sixty-four it held: one session logged about seventy
     // distinct files, and the table filling silently turned the dedupe off, so
@@ -3971,6 +3982,11 @@ static void NoteSavedVariablesWrite(const char* path) {
 
     if (!SavedVarsNameHasAddon(path, leaf)) {
         g_savedVarsBadNames++;
+        // The third event nobody can react to. It happens mid-transition, the
+        // player has no idea it happened until they look at the folder later,
+        // and by then the frames around it are long gone.
+        FlightRecorder::Mark("a SavedVariables file was written under a name "
+                             "matching no addon");
         Verdict::Add(Verdict::Bad,
                      "SavedVariables written under a name matching no addon "
                      "folder: %s", leaf);
@@ -7856,6 +7872,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // Before the modules that claim columns in it, so their RegisterSlot
     // calls have somewhere to land.
     FlightRecorder::Init();
+    g_frSlotSavedVars = FlightRecorder::RegisterSlot("svopen");
     AbTest::Init();
 
     Log("--- Event Name Hash Cache ---");
