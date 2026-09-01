@@ -119,6 +119,8 @@ add_library(wow_optimize SHARED
     src/diagnostics/shadow_state_probe.h
     src/diagnostics/flight_recorder.cpp
     src/diagnostics/flight_recorder.h
+    src/diagnostics/ab_test.cpp
+    src/diagnostics/ab_test.h
     src/hooks_subsystems/strncmp_sse2.cpp
     src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp

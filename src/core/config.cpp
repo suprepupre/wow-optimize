@@ -64,6 +64,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "CompatMode", &Settings::OptCompatMode },
     { "General", "NoClientPatches", &Settings::OptNoClientPatches },
     { "General", "FlightRecorder", &Settings::OptFlightRecorder },
+    { "General", "AbTest", &Settings::OptAbTest },
     { "UI_Lua", "UIFrameBatch", &Settings::OptUIFrameBatch },
     { "UI_Lua", "AddonDispatcher", &Settings::OptAddonDispatcher },
     { "UI_Lua", "UIFrameAccessorFast", &Settings::OptUIFrameAccessorFast },
@@ -220,6 +221,8 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
 
         Log("[Config]   [General] SleepPrecisionValue=%d", g_settings.SleepPrecisionValue);
         Log("[Config]   [General] FlightRecorderKey=0x%02X", g_settings.FlightRecorderKey);
+        Log("[Config]   [General] AbTestSubject='%s' every %d ms",
+            g_settings.AbTestSubject, g_settings.AbTestPeriodMs);
         Log("[Config]   [General] SessionLogsToKeep=%d", g_settings.SessionLogsToKeep);
         Log("[Config] %d set in the file, %d left at defaults.", fromFile, defaulted);
 
@@ -505,6 +508,11 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptCompatMode          = GetPrivateProfileIntA("General", "CompatMode", 0, iniPath.c_str()) != 0;
         g_settings.OptNoClientPatches     = GetPrivateProfileIntA("General", "NoClientPatches", 0, iniPath.c_str()) != 0;
         g_settings.OptFlightRecorder      = GetPrivateProfileIntA("General", "FlightRecorder", 0, iniPath.c_str()) != 0;
+        g_settings.OptAbTest              = GetPrivateProfileIntA("General", "AbTest", 0, iniPath.c_str()) != 0;
+        g_settings.AbTestPeriodMs         = GetPrivateProfileIntA("General", "AbTestPeriodMs", 20000, iniPath.c_str());
+        GetPrivateProfileStringA("General", "AbTestSubject", "",
+                                 g_settings.AbTestSubject,
+                                 sizeof(g_settings.AbTestSubject), iniPath.c_str());
         // 0x91 is Scroll Lock. The client binds no action to it, and a key
         // works on a loading screen and at character select, where no addon is
         // running and where two of the open defects appear.

@@ -120,6 +120,7 @@
 #include "version.h"
 #include "config.h"
 #include "layout_relink_fast.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -210,6 +211,12 @@ unsigned long g_invocations  = 0;
 unsigned long g_earlyOut     = 0;
 volatile LONG g_armed        = 0;   // 1 once the fast path is trusted
 volatile LONG g_dead         = 0;   // 1 after a disagreement
+
+// Set once at init when the A/B harness names this module. Tested before
+// calling into it, so a session not testing this feature pays a predictable
+// branch on a false global rather than a call.
+bool          g_abSubject    = false;
+unsigned long g_abOffCalls   = 0;   // reached the hook while the test had it off
 
 inline uint32_t Rd(uintptr_t p)          { return *(volatile uint32_t*)p; }
 inline void     Wr(uintptr_t p, uint32_t v) { *(volatile uint32_t*)p = v; }
@@ -324,6 +331,17 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     // diagnostic is worth.
     g_invocations++;
     if (g_dead || !self) return orig_Relink(self, edx);
+
+    // The A/B harness, when this is the feature it was pointed at. It
+    // alternates whole stints of running and not running, so the frame times
+    // either way come from the same zone, the same addons and the same play.
+    // That is the only route by which anything here gets a measured gain
+    // instead of a plausible story, and this module targets the largest
+    // single entry in the profile, so it goes first.
+    if (g_abSubject && !AbTest::FeatureOn()) {
+        g_abOffCalls++;
+        return orig_Relink(self, edx);
+    }
 
     uintptr_t This = (uintptr_t)self;
     uint32_t* result;
@@ -457,6 +475,16 @@ bool Init() {
     Log("[LayoutRelink] ACTIVE on sub_489710, the largest single entry in the "
         "main-thread profile (9.06%%). Verifying against the client for the first "
         "%ld calls before it changes anything.", (long)kLearnCalls);
+
+    const char* subject = AbTest::Subject();
+    if (subject && lstrcmpiA(subject, "LayoutRelinkFast") == 0) {
+        g_abSubject = true;
+        Log("[LayoutRelink] under A/B test: the shortcut is taken only during the "
+            "test's ON stints, and the frame times either side are reported by "
+            "AbTest. The verification above is unaffected - it still runs, and a "
+            "disagreement still retires this module whichever stint it happens "
+            "in.");
+    }
     return true;
 }
 
@@ -469,6 +497,12 @@ void LogStats() {
         g_invocations, (long)g_calls, (long)g_fastTaken, (long)g_deferred,
         (long)g_agreements, (long)g_disagreed,
         g_dead ? " - DISABLED" : "");
+    if (g_abSubject) {
+        Log("[LayoutRelink]   %lu of those invocations were handed straight to the "
+            "client because the A/B test had this feature off at the time. The "
+            "shortcut counts above therefore describe the ON stints only.",
+            g_abOffCalls);
+    }
     // The gap between the two is the client's own early-out, which this module
     // deliberately leaves alone. If almost every invocation stops there, the
     // nine percent measured in the profile is not where this module is looking

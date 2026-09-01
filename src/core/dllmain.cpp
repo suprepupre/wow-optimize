@@ -678,6 +678,7 @@ static void StopFreezeWatchdog() {
 #include "lua_compile_census.h"
 #include "shadow_state_probe.h"
 #include "flight_recorder.h"
+#include "ab_test.h"
 #include "crt_memcpy_fast.h"
 #include "frame_script_dispatch.h"
 #include "strcat_fast.h"
@@ -5087,6 +5088,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     DbcLookupCache_LogStats();
     LuaCompileCensus::LogStats();
     FlightRecorder::LogStats();
+    AbTest::LogStats();
     AnimCensus::LogStats();
     PredictivePrefetch::LogStats();
     TickListPrefetch::LogStats();
@@ -5350,6 +5352,7 @@ extern "C" void WowOpt_OnFrameBoundary() {
     // frame apart by construction, which is the resolution the ring is for.
     FlightRecorder::OnFrame();
     FlightRecorder::PollHotkey();
+    AbTest::OnFrame();
 
     // A presented frame is the honest proof that the main thread is alive.
     //
@@ -7813,6 +7816,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // Before the modules that claim columns in it, so their RegisterSlot
     // calls have somewhere to land.
     FlightRecorder::Init();
+    AbTest::Init();
 
     Log("--- Event Name Hash Cache ---");
 

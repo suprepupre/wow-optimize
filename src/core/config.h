@@ -115,6 +115,13 @@ namespace Config {
         // the ten-second average that has cost every investigation so far.
         bool OptFlightRecorder = false;
         int  FlightRecorderKey = 0x91;   // VK_SCROLL
+        // Alternates one feature on and off inside a session, so its frame
+        // times can be compared against a control that saw the same zone, the
+        // same addons and the same play. Between two sessions nothing is held
+        // still, which is why no optimization here has a measured gain.
+        bool OptAbTest = false;
+        int  AbTestPeriodMs = 20000;
+        char AbTestSubject[32] = {};
 
         // UI & Lua
         bool OptUIFrameBatch = false;
