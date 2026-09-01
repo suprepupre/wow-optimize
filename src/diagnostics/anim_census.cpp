@@ -71,6 +71,8 @@
 #include <cmath>
 
 #include "anim_census.h"
+#include "session_verdict.h"
+#include "frame_bench.h"
 #include "../core/world_position.h"
 #include "crash_dumper.h"
 #include "config.h"
@@ -483,10 +485,32 @@ void LogStats() {
         (unsigned long long)g_frames, (unsigned long long)g_idleFrames);
 
     if (g_sampledCount > 0) {
+        double msPerFrame = avgNs * avgCalls / 1e6;
         Log("[AnimCensus] %.2f us per model measured over %llu sampled calls, so "
             "about %.2f ms/frame at the average model count",
-            avgNs / 1000.0, (unsigned long long)g_sampledCount,
-            avgNs * avgCalls / 1e6);
+            avgNs / 1000.0, (unsigned long long)g_sampledCount, msPerFrame);
+
+        // The arithmetic that has to hold: one part of a frame cannot take longer
+        // than the frame. This instrument once reported 72 ms of animation inside
+        // a 53 ms frame, because it closed its frame on a tick that a busy client
+        // stops running - so its frame count fell while the per-frame work it
+        // divided by that count did not, and every figure above inflated together.
+        //
+        // FrameBench counts presented frames from D3D9 Present and is the honest
+        // denominator to check against. A zero median means it has not measured
+        // anything yet, which is not the same as a fast frame, so nothing is said.
+        double frameMs = FrameBench::MedianMs();
+        if (frameMs > 0.0 && msPerFrame > frameMs) {
+            Verdict::Add(Verdict::Warn,
+                         "the animation census claims %.1f ms per frame inside a "
+                         "%.1f ms frame - suspect its frame count",
+                         msPerFrame, frameMs);
+            Log("[AnimCensus] that is more than the whole frame: FrameBench has "
+                "the median at %.2f ms. One part of a frame cannot outlast it, so "
+                "the frame count here is wrong rather than the timing - the last "
+                "time this happened the census was closing its frame on a tick a "
+                "busy client stops running.", frameMs);
+        }
     }
 
     uint64_t entries = g_workCalls + g_skipFlag + g_skipStamp;
