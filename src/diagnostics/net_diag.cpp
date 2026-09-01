@@ -36,6 +36,7 @@
 #include "crash_dumper.h"
 #include "config.h"
 #include "session_verdict.h"
+#include "flight_recorder.h"
 #include "MinHook.h"
 #include "version.h"
 
@@ -58,6 +59,11 @@ static closesocket_fn orig_closesocket = nullptr;
 static send_fn        orig_send        = nullptr;
 
 static bool g_active = false;
+
+// A flight-recorder column. The question a drop always raises is whether
+// traffic thinned out before it or stopped dead, and a per-window byte
+// count cannot answer that.
+static int g_frSlotRecv = -1;
 
 // Hot path state. Four writes per receive, no locks - these are counters read
 // only when something has already gone wrong.
@@ -209,6 +215,9 @@ static void ReportDisconnect(const char* how, int err) {
     }
 
     CrashDumper::DumpTrace(12, 30000);
+    // Nobody reacts to a disconnect in time to press a key, so the ring is
+    // written out here instead.
+    FlightRecorder::Mark("the connection ended");
     Log("!!! END DISCONNECT REPORT !!!");
 }
 
@@ -228,6 +237,7 @@ static int WINAPI Hooked_recv(SOCKET s, char* buf, int len, int flags) {
         if (g_firstRecvTick == 0) g_firstRecvTick = now;
         InterlockedIncrement(&g_recvCalls);
         g_recvBytes += (uint64_t)r;
+        FlightRecorder::Bump(g_frSlotRecv);
     } else if (r == 0) {
         if (IsWatched(s)) ReportDisconnect("the server closed the connection cleanly", 0);
     } else {
@@ -254,6 +264,7 @@ static int WINAPI Hooked_WSARecv(SOCKET s, LPWSABUF bufs, DWORD count,
             if (g_firstRecvTick == 0) g_firstRecvTick = now;
             InterlockedIncrement(&g_recvCalls);
             g_recvBytes += (uint64_t)*got;
+            FlightRecorder::Bump(g_frSlotRecv);
         } else if (IsWatched(s)) {
             ReportDisconnect("the server closed the connection cleanly", 0);
         }
@@ -336,6 +347,8 @@ bool Init() {
         Log("[NetDiag] No socket entry points could be hooked");
         return false;
     }
+
+    g_frSlotRecv = FlightRecorder::RegisterSlot("recv");
 
     g_active = true;
     Log("[NetDiag] Watching the receive path, %d/4 entry points - reports once if "

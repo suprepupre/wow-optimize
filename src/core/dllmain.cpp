@@ -22,6 +22,9 @@
 // Depends on nothing, and the freeze watchdog below reports to it hundreds of
 // lines before the rest of these headers are reached.
 #include "session_verdict.h"
+// Same reason as session_verdict.h: the freeze watchdog reports to it hundreds
+// of lines before the rest of these headers are reached.
+#include "flight_recorder.h"
 #include "ui_cache.h"
 #include "api_cache.h"
 #include "lua_fastpath.h"
@@ -467,6 +470,10 @@ static void CaptureFreezeLocation(DWORD mainTid) {
         // The one line a freeze report is read for. Deduplicated by text, so a
         // stall that recurs at the same address becomes one counted entry.
         Verdict::Add(Verdict::Bad, "main thread was stuck at %s", buf);
+        // Read from the watchdog thread while the main thread is stuck, which is
+        // the one moment nothing is writing the ring - and the one moment the
+        // player could not press the key even if they wanted to.
+        FlightRecorder::Mark("the main thread stopped responding");
         int shown = 0, rejected = 0;
         for (int i = 0; i < rawCount && shown < 6; i++) {
             uintptr_t v = rawStack[i];
@@ -698,7 +705,6 @@ static void StopFreezeWatchdog() {
 #include "addon_profiler.h"
 #include "lua_compile_census.h"
 #include "shadow_state_probe.h"
-#include "flight_recorder.h"
 #include "ab_test.h"
 #include "crt_memcpy_fast.h"
 #include "frame_script_dispatch.h"
