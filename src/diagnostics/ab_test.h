@@ -28,6 +28,20 @@ bool IsSubject(const char* name);
 // Counts the call, so the report can say the subject was actually reached.
 bool StandAside();
 
+// Timing the subject's own work, for features too small for frame time to see.
+//
+// A feature worth 0.8% of main-thread time moves a 16 ms frame by 0.13 ms, which
+// is well inside the frame-to-frame spread of real play - no number of stints
+// recovers it. Timing the replaced function directly does recover it, because
+// the noise there is a few cycles rather than a whole frame's worth of unrelated
+// work.
+//
+// TickIn returns 0 on the calls it is not sampling, and TickOut does nothing
+// with a 0. One call in 256 is sampled, so a function running thousands of times
+// a frame still yields thousands of samples an hour at no measurable cost.
+unsigned long long TickIn();
+void TickOut(unsigned long long t);
+
 // One presented frame. Called from the frame boundary; it reads the clock
 // itself so it does not depend on another module being switched on.
 void OnFrame();

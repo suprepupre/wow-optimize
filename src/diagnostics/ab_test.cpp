@@ -64,6 +64,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <intrin.h>
 
 #include "ab_test.h"
 #include "config.h"
@@ -79,6 +80,8 @@ constexpr int    kSettleFrames = 12;   // discarded after every flip
 
 struct Phase {
     uint64_t frames    = 0;
+    uint64_t workCalls = 0;        // sampled calls into the subject's hot path
+    uint64_t workTicks = 0;        // and their total, in TSC ticks
     double   sumMs     = 0.0;
     double   maxMs     = 0.0;
     uint32_t hist[kBuckets] = {};
@@ -93,6 +96,18 @@ DWORD    g_periodMs = 20000;
 bool     g_onNow    = true;
 bool     g_claimed  = false;    // some module answered to the configured name
 uint64_t g_standAside = 0;      // hot-path calls the subject handed back
+
+// One call in 256 is timed. A power of two so the test is an AND, and a plain
+// counter because this is a hot path and a lock-prefixed increment there has
+// eaten whole optimizations in this project before.
+constexpr uint32_t kSampleMask = 255;
+uint32_t g_sampleSeq = 0;
+
+// A sample that spans a context switch or a hardware interrupt is not a
+// measurement of this function, and one of them is worth thousands of honest
+// samples to the mean. Anything past this is thrown away and counted.
+constexpr uint64_t kTickCeiling = 200000;   // ~50 us on any plausible clock
+uint64_t g_ticksDiscarded = 0;
 DWORD    g_phaseStart = 0;
 int      g_settle   = 0;
 uint64_t g_dropped  = 0;
@@ -167,6 +182,21 @@ bool StandAside() {
     if (g_onNow) return false;
     ++g_standAside;
     return true;
+}
+
+unsigned long long TickIn() {
+    if (!g_active) return 0;
+    if ((++g_sampleSeq & kSampleMask) != 0) return 0;
+    return __rdtsc();
+}
+
+void TickOut(unsigned long long t) {
+    if (!t) return;
+    uint64_t d = __rdtsc() - t;
+    if (d == 0 || d > kTickCeiling) { ++g_ticksDiscarded; return; }
+    Phase& p = g_onNow ? g_on : g_off;
+    ++p.workCalls;
+    p.workTicks += d;
 }
 
 void OnFrame() {
@@ -278,6 +308,31 @@ void LogStats() {
             "closest thing to a controlled figure this project can produce.",
             d < 0 ? -d : d, d > 0 ? "faster" : "slower",
             meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
+
+        // The function's own cost, which is the number that resolves a feature
+        // too small for frame time to see. Ticks rather than nanoseconds: the TSC
+        // frequency is not the performance-counter frequency and this project has
+        // no honest conversion for it, so the ratio is reported and the absolute
+        // figure is left in the unit it was measured in.
+        if (g_on.workCalls && g_off.workCalls) {
+            double tOn  = (double)g_on.workTicks  / (double)g_on.workCalls;
+            double tOff = (double)g_off.workTicks / (double)g_off.workCalls;
+            Log("[AbTest]   the replaced call itself: %.0f ticks with the feature "
+                "on over %llu samples, %.0f ticks without it over %llu. That is "
+                "%.2fx. One call in 256 is timed, and %llu sample(s) were thrown "
+                "away for spanning something other than this function.",
+                tOn, (unsigned long long)g_on.workCalls,
+                tOff, (unsigned long long)g_off.workCalls,
+                tOn != 0.0 ? tOff / tOn : 0.0,
+                (unsigned long long)g_ticksDiscarded);
+            Log("[AbTest]   frame time is the figure that matters to a player, but "
+                "a feature worth under a percent of main-thread time cannot show "
+                "there. When the two disagree, this line is the one measuring the "
+                "feature and the frame line is measuring the session.");
+        } else if (g_on.workCalls || g_off.workCalls) {
+            Log("[AbTest]   the call was timed in only one of the two halves, so "
+                "there is nothing to compare it against.");
+        }
 
         uint32_t stints = g_on.stints + g_off.stints;
         if (stints < 8) {

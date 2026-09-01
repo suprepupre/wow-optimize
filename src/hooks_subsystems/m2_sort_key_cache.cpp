@@ -175,15 +175,10 @@ inline int Compare(void* a, void* b) {
 
 }  // namespace
 
-int __stdcall Hooked_Compare(void* a, void* b) {
+int __stdcall Hooked_CompareBody(void* a, void* b) {
     g_calls++;
     if (g_dead || !a || !b) return orig_Compare(a, b);
 
-    // Under the A/B harness this feature alternates on and off in stints
-    // so its frame times can be compared against the client doing the same
-    // work in the same zone. One predictable branch on a false global when
-    // no test names this module.
-    if (g_abSubject && AbTest::StandAside()) return orig_Compare(a, b);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         int mine;
@@ -218,6 +213,24 @@ int __stdcall Hooked_Compare(void* a, void* b) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return orig_Compare(a, b);
     }
+}
+
+// The detour proper, kept apart from the body above for one reason: the
+// A/B harness times the call, and a scope guard that closed the sample on
+// every return path cannot be used in a function containing __try - MSVC
+// refuses object unwinding alongside SEH. A wrapper has no __try of its own,
+// so one pair of reads covers every path the body can take, including the
+// ones it takes out of an exception handler.
+//
+// When no test names this module the whole thing is a branch on a false
+// global followed by a direct call.
+int __stdcall Hooked_Compare(void* a, void* b) {
+    if (!g_abSubject) return Hooked_CompareBody(a, b);
+    unsigned long long t = AbTest::TickIn();
+    int r = AbTest::StandAside() ? orig_Compare(a, b)
+                                       : Hooked_CompareBody(a, b);
+    AbTest::TickOut(t);
+    return r;
 }
 
 bool Init() {

@@ -312,7 +312,7 @@ void Retire(const char* why) {
         "runs from here on; nothing is left half-applied.", why);
 }
 
-uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
+uint32_t* __fastcall Hooked_RelinkBody(void* self, void* edx) {
     (void)edx;
     // Counted before anything can return, including after this module has
     // retired, because every other counter here stops the moment it does.
@@ -332,16 +332,6 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     g_invocations++;
     if (g_dead || !self) return orig_Relink(self, edx);
 
-    // The A/B harness, when this is the feature it was pointed at. It
-    // alternates whole stints of running and not running, so the frame times
-    // either way come from the same zone, the same addons and the same play.
-    // That is the only route by which anything here gets a measured gain
-    // instead of a plausible story, and this module targets the largest
-    // single entry in the profile, so it goes first.
-    if (g_abSubject && AbTest::StandAside()) {
-        g_abOffCalls++;
-        return orig_Relink(self, edx);
-    }
 
     uintptr_t This = (uintptr_t)self;
     uint32_t* result;
@@ -445,6 +435,24 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     }
     ++g_fastTaken;
     return result;
+}
+
+// The detour proper. Kept apart from the body because the A/B harness times the
+// call, and a scope guard closing that sample on every return path cannot live
+// in a function containing __try - MSVC refuses object unwinding alongside SEH.
+// One pair of reads here covers every path the body can take.
+uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
+    if (!g_abSubject) return Hooked_RelinkBody(self, edx);
+    unsigned long long t = AbTest::TickIn();
+    uint32_t* r;
+    if (AbTest::StandAside()) {
+        g_abOffCalls++;
+        r = orig_Relink(self, edx);
+    } else {
+        r = Hooked_RelinkBody(self, edx);
+    }
+    AbTest::TickOut(t);
+    return r;
 }
 
 } // namespace

@@ -155,15 +155,10 @@ inline void* Evaluate(void* t, const void* key) {
 
 }  // namespace
 
-void* __cdecl Hooked_HGet(void* t, const void* key) {
+void* __cdecl Hooked_HGetBody(void* t, const void* key) {
     g_calls++;
     if (g_dead || !t || !key) return orig_HGet(t, key);
 
-    // Under the A/B harness this feature alternates on and off in stints
-    // so its frame times can be compared against the client doing the same
-    // work in the same zone. One predictable branch on a false global when
-    // no test names this module.
-    if (g_abSubject && AbTest::StandAside()) return orig_HGet(t, key);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         void* mine;
@@ -197,6 +192,25 @@ void* __cdecl Hooked_HGet(void* t, const void* key) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return orig_HGet(t, key);
     }
+}
+
+// The detour proper, kept apart from the body above for one reason: the
+// A/B harness times the call, and a scope guard that closed the sample on
+// every return path cannot be used in a function containing __try - MSVC
+// refuses object unwinding alongside SEH. A wrapper has no __try of its own,
+// so one pair of reads covers every path the body can take, including the
+// ones it takes out of an exception handler.
+//
+// When no test names this module the whole thing is a branch on a false
+// global followed by a direct call.
+void* __cdecl Hooked_HGet(void* t, const void* key) {
+    if (!g_abSubject) return Hooked_HGetBody(t, key);
+    // Named abTick, not t: the parameter of this function is already t.
+    unsigned long long abTick = AbTest::TickIn();
+    void* r = AbTest::StandAside() ? orig_HGet(t, key)
+                                   : Hooked_HGetBody(t, key);
+    AbTest::TickOut(abTick);
+    return r;
 }
 
 bool Init() {

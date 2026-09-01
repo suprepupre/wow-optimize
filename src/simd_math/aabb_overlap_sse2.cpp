@@ -164,16 +164,11 @@ inline int Sse2Overlap(const float* self, const float* other) {
 
 }  // namespace
 
-int __fastcall Hooked_Overlap(const float* self, void* edx, const float* other) {
+int __fastcall Hooked_OverlapBody(const float* self, void* edx, const float* other) {
     g_calls++;
 
     if (g_dead) return orig_Overlap(self, edx, other);
 
-    // Under the A/B harness this feature alternates on and off in stints
-    // so its frame times can be compared against the client doing the same
-    // work in the same zone. One predictable branch on a false global when
-    // no test names this module.
-    if (g_abSubject && AbTest::StandAside()) return orig_Overlap(self, edx, other);
 
     int mine = Sse2Overlap(self, other);
 
@@ -202,6 +197,24 @@ int __fastcall Hooked_Overlap(const float* self, void* edx, const float* other) 
 
     if (mine) g_overlaps++;
     return mine;
+}
+
+// The detour proper, kept apart from the body above for one reason: the
+// A/B harness times the call, and a scope guard that closed the sample on
+// every return path cannot be used in a function containing __try - MSVC
+// refuses object unwinding alongside SEH. A wrapper has no __try of its own,
+// so one pair of reads covers every path the body can take, including the
+// ones it takes out of an exception handler.
+//
+// When no test names this module the whole thing is a branch on a false
+// global followed by a direct call.
+int __fastcall Hooked_Overlap(const float* self, void* edx, const float* other) {
+    if (!g_abSubject) return Hooked_OverlapBody(self, edx, other);
+    unsigned long long t = AbTest::TickIn();
+    int r = AbTest::StandAside() ? orig_Overlap(self, edx, other)
+                                       : Hooked_OverlapBody(self, edx, other);
+    AbTest::TickOut(t);
+    return r;
 }
 
 bool Init() {

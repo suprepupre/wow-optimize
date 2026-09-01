@@ -174,15 +174,10 @@ inline int Evaluate(void* frustum, void* aabb) {
 
 }  // namespace
 
-int __fastcall Hooked_IsVisible(void* frustum, void* edx, void* aabb) {
+int __fastcall Hooked_IsVisibleBody(void* frustum, void* edx, void* aabb) {
     g_calls++;
     if (g_dead || !frustum || !aabb) return orig_IsVisible(frustum, edx, aabb);
 
-    // Under the A/B harness this feature alternates on and off in stints
-    // so its frame times can be compared against the client doing the same
-    // work in the same zone. One predictable branch on a false global when
-    // no test names this module.
-    if (g_abSubject && AbTest::StandAside()) return orig_IsVisible(frustum, edx, aabb);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         int mine;
@@ -218,6 +213,24 @@ int __fastcall Hooked_IsVisible(void* frustum, void* edx, void* aabb) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return orig_IsVisible(frustum, edx, aabb);
     }
+}
+
+// The detour proper, kept apart from the body above for one reason: the
+// A/B harness times the call, and a scope guard that closed the sample on
+// every return path cannot be used in a function containing __try - MSVC
+// refuses object unwinding alongside SEH. A wrapper has no __try of its own,
+// so one pair of reads covers every path the body can take, including the
+// ones it takes out of an exception handler.
+//
+// When no test names this module the whole thing is a branch on a false
+// global followed by a direct call.
+int __fastcall Hooked_IsVisible(void* frustum, void* edx, void* aabb) {
+    if (!g_abSubject) return Hooked_IsVisibleBody(frustum, edx, aabb);
+    unsigned long long t = AbTest::TickIn();
+    int r = AbTest::StandAside() ? orig_IsVisible(frustum, edx, aabb)
+                                       : Hooked_IsVisibleBody(frustum, edx, aabb);
+    AbTest::TickOut(t);
+    return r;
 }
 
 bool Init() {
