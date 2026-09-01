@@ -9,6 +9,13 @@ body:
         hash and the log. Without them a report cannot be matched to source, and
         a fix may already exist in a build newer than the one you ran.
 
+        **If you can see the problem happening, press Scroll Lock while it is on
+        screen.** Turn on "Flight Recorder (mark a moment)" in the launcher first.
+        It writes the frames around that instant into the log. Everything else in
+        the log is averaged over ten seconds, and the second you are describing is
+        one entry in three hundred of them - four separate investigations this
+        month stalled on exactly that.
+
   - type: input
     id: build
     attributes:
@@ -24,7 +31,10 @@ body:
     id: what
     attributes:
       label: What happens
-      description: What you saw, and what you expected instead.
+      description: >
+        What you saw, and what you expected instead. If you can, give the time on
+        the clock when it happened - the log is timestamped and that one number
+        turns a search into a lookup.
     validations:
       required: true
 
@@ -72,6 +82,17 @@ body:
       required: true
 
   - type: input
+    id: marktime
+    attributes:
+      label: Clock time it happened
+      description: >
+        Local time, to the minute, of a moment the problem was visible. Optional,
+        and worth more than any other line in this form.
+      placeholder: "around 21:47, and again at 21:52"
+    validations:
+      required: false
+
+  - type: input
     id: server
     attributes:
       label: Server
@@ -84,7 +105,8 @@ body:
     attributes:
       label: Non-default settings
       description: >
-        Which launcher options you turned on or off. If you are unsure, attach
-        `wow_opt.ini` instead.
+        Attach `WTF\wow_opt.ini` rather than describing it. Every option is in
+        that one file, the log prints what it actually resolved to, and the two
+        being compared has already caught a setting that read as on and was off.
     validations:
       required: false
