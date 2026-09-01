@@ -8171,7 +8171,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
         // when any caller changes thread affinity.
         InstallWineSTIPNoop();
     }
-    g_threadAffOk = Config::g_settings.OptDefragLf && !Config::g_settings.OptCompatMode && InstallThreadAffinity();
+    g_threadAffOk = Config::g_settings.OptThreadAffinity && !Config::g_settings.OptCompatMode && InstallThreadAffinity();
 
     Log("--- VA Arena ---");
     vaOk = InstallVAArena();
@@ -8560,7 +8560,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- Render Hooks (backbuffer) ---");
-    bool renderHooksOk = Config::g_settings.OptDefragLf && InstallRenderHooks(); // BISECT
+    bool renderHooksOk = Config::g_settings.OptRenderHooks && InstallRenderHooks(); // BISECT
 
     Log("");
     Log("--- SIMD Hooks (SSE2 matrix, frustum, color) ---");
@@ -8581,7 +8581,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- Async Hooks (worker pool, particle, prefetch) ---");
-    bool asyncHooksOk = Config::g_settings.OptDefragLf && InstallAsyncHooks(); // BISECT
+    bool asyncHooksOk = Config::g_settings.OptAsyncWorkerPool && InstallAsyncHooks(); // BISECT
 
     Log("");
     Log("--- Loading Defragmenter & Pre-committer ---");

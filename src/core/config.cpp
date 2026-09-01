@@ -65,6 +65,9 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "NoClientPatches", &Settings::OptNoClientPatches },
     { "General", "FlightRecorder", &Settings::OptFlightRecorder },
     { "General", "AbTest", &Settings::OptAbTest },
+    { "General", "RenderHooks", &Settings::OptRenderHooks },
+    { "General", "AsyncWorkerPool", &Settings::OptAsyncWorkerPool },
+    { "General", "ThreadAffinity", &Settings::OptThreadAffinity },
     { "UI_Lua", "UIFrameBatch", &Settings::OptUIFrameBatch },
     { "UI_Lua", "AddonDispatcher", &Settings::OptAddonDispatcher },
     { "UI_Lua", "UIFrameAccessorFast", &Settings::OptUIFrameAccessorFast },
@@ -509,6 +512,15 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptNoClientPatches     = GetPrivateProfileIntA("General", "NoClientPatches", 0, iniPath.c_str()) != 0;
         g_settings.OptFlightRecorder      = GetPrivateProfileIntA("General", "FlightRecorder", 0, iniPath.c_str()) != 0;
         g_settings.OptAbTest              = GetPrivateProfileIntA("General", "AbTest", 0, iniPath.c_str()) != 0;
+        // Inheriting DefragLf when absent. A new key defaulting to zero would
+        // silently remove a running feature from everyone who never wrote it,
+        // which is exactly the 3.18.1 regression.
+        {
+            const int inherit = g_settings.OptDefragLf ? 1 : 0;
+            g_settings.OptRenderHooks     = GetPrivateProfileIntA("General", "RenderHooks", inherit, iniPath.c_str()) != 0;
+            g_settings.OptAsyncWorkerPool = GetPrivateProfileIntA("General", "AsyncWorkerPool", inherit, iniPath.c_str()) != 0;
+            g_settings.OptThreadAffinity  = GetPrivateProfileIntA("General", "ThreadAffinity", inherit, iniPath.c_str()) != 0;
+        }
         g_settings.AbTestPeriodMs         = GetPrivateProfileIntA("General", "AbTestPeriodMs", 20000, iniPath.c_str());
         GetPrivateProfileStringA("General", "AbTestSubject", "",
                                  g_settings.AbTestSubject,

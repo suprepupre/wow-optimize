@@ -119,6 +119,13 @@ namespace Config {
         // times can be compared against a control that saw the same zone, the
         // same addons and the same play. Between two sessions nothing is held
         // still, which is why no optimization here has a measured gain.
+        // Three things the Lock-Free Heap Defragmenter switch used to gate that
+        // have nothing to do with defragmenting a heap. Each inherits DefragLf
+        // when its own key is absent, so nobody loses a feature they were
+        // already running by updating.
+        bool OptRenderHooks = false;
+        bool OptAsyncWorkerPool = false;
+        bool OptThreadAffinity = false;
         bool OptAbTest = false;
         int  AbTestPeriodMs = 20000;
         char AbTestSubject[32] = {};
