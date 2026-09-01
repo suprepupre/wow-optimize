@@ -14,6 +14,7 @@
 #include <cstring>
 #include <algorithm>
 #include "sampling_profiler.h"
+#include "session_verdict.h"
 #include "lua_addon_sampler.h"
 #include "frame_bench.h"
 #include "version.h"
@@ -1334,7 +1335,8 @@ static void DumpResults() {
         "loading/warmup where the main thread was left alone) ===",
         TOP_N, (unsigned long long)n, (unsigned long long)g_skippedSamples);
 
-    int printed = 0;
+    int    printed = 0;
+    double pctSum  = 0.0;
     for (int i = 0; i < bucketCount && printed < TOP_N; i++) {
         if (buckets[i].count == 0) break;
         double pct = 100.0 * (double)buckets[i].count / (double)n;
@@ -1402,7 +1404,30 @@ static void DumpResults() {
             Log("[SamplingProfiler] %3d. %-24s  %8llu samples (%5.2f%% total, %5.2f%% of executing)",
                 printed + 1, name, (unsigned long long)buckets[i].count, pct, workPctOfEntry);
         }
+        pctSum += pct;
         printed++;
+    }
+
+    // The arithmetic that has to hold before any of the above is worth reading.
+    //
+    // These are shares of one whole, so the fifty largest of them cannot come to
+    // a small number. When this profiler divided ring-window counts by a lifetime
+    // total, its top fifty summed to 12% and every entry was understated 5.6x -
+    // and that was found by noticing the sum, not by reading the code. A profile
+    // whose top entry was really 9.7% had already been read as flat for a week.
+    //
+    // The threshold is deliberately loose. Fifty buckets out of thousands may
+    // genuinely not reach half the profile on a flat workload, so only a sum small
+    // enough to be arithmetically suspicious says anything.
+    if (printed >= 10 && pctSum < 15.0) {
+        Verdict::Add(Verdict::Warn,
+                     "the profiler's top %d entries sum to %.0f%% of the profile, "
+                     "too little for shares of one whole - suspect the denominator",
+                     printed, pctSum);
+        Log("[SamplingProfiler] the %d entries above sum to %.1f%% of the profile. "
+            "They are shares of one whole and cannot legitimately be this small; "
+            "the last time this happened the denominator was a lifetime sample "
+            "count while the numerators came from a ring window.", printed, pctSum);
     }
 
     // Our own hot spots at 256-byte resolution, then the client's at 512-byte.

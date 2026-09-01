@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <d3d9.h>
 #include "d3d9_state_manager.h"
+#include "session_verdict.h"
 #include "sampling_profiler.h"
 #include "font_glyph_cache.h"
 #include "texture_unload_delay.h"
@@ -926,6 +927,16 @@ void D3D9StateManager_LogStats(void) {
             draws);
     }
     if (draws && frames) {
+        // A number no client produces. This printed 34,671 draw calls a frame for
+        // a whole release because the denominator counted sleeps rather than
+        // frames, and nothing said the figure was impossible.
+        double perFrame = (double)draws / (double)frames;
+        if (perFrame > 20000.0) {
+            Verdict::Add(Verdict::Warn,
+                         "the draw census reports %.0f draw calls per frame, which "
+                         "no client produces - suspect the frame count",
+                         perFrame);
+        }
         Log("[D3D9State] draw calls: %lu over %lu frames = %.0f per frame, "
             "carrying %lu primitives = %.0f per frame and %.1f per call.",
             draws, frames, (double)draws / (double)frames,
