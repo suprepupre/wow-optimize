@@ -18,6 +18,16 @@ bool Running();
 // name to decide whether it is the one under test.
 const char* Subject();
 
+// Does the ini name this module? Call once at init and keep the answer. It also
+// records that some module claimed the name, which is what stops a typo in the
+// ini from being reported as "this feature makes no difference".
+bool IsSubject(const char* name);
+
+// For the hot path of the module that answered true above: true means stand
+// aside and let the client's own code run, because the test is in an OFF stint.
+// Counts the call, so the report can say the subject was actually reached.
+bool StandAside();
+
 // One presented frame. Called from the frame boundary; it reads the clock
 // itself so it does not depend on another module being switched on.
 void OnFrame();

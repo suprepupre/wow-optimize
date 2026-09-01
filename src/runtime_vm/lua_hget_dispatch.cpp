@@ -75,6 +75,7 @@
 #include "version.h"
 #include "config.h"
 #include "sampling_profiler.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -106,6 +107,9 @@ hget_fn orig_HGet = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 // Plain 32-bit on a path the VM takes for every table read. Lower bounds, and
@@ -154,6 +158,12 @@ inline void* Evaluate(void* t, const void* key) {
 void* __cdecl Hooked_HGet(void* t, const void* key) {
     g_calls++;
     if (g_dead || !t || !key) return orig_HGet(t, key);
+
+    // Under the A/B harness this feature alternates on and off in stints
+    // so its frame times can be compared against the client doing the same
+    // work in the same zone. One predictable branch on a false global when
+    // no test names this module.
+    if (g_abSubject && AbTest::StandAside()) return orig_HGet(t, key);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         void* mine;
@@ -212,6 +222,13 @@ bool Init() {
     if (WO_EnableHook((void*)kHGet) != MH_OK) {
         Log("[LuaHGet] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("LuaHGetDispatch");
+    if (g_abSubject) {
+        Log("[LuaHGet] under A/B test: it alternates on and off in stints "
+            "and AbTest reports the frame times either way. The correctness "
+            "checks are unaffected and still retire it on a disagreement.");
     }
 
     g_installed = true;

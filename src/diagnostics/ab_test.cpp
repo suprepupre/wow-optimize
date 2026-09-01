@@ -91,6 +91,8 @@ char     g_subject[32] = {};
 DWORD    g_periodMs = 20000;
 
 bool     g_onNow    = true;
+bool     g_claimed  = false;    // some module answered to the configured name
+uint64_t g_standAside = 0;      // hot-path calls the subject handed back
 DWORD    g_phaseStart = 0;
 int      g_settle   = 0;
 uint64_t g_dropped  = 0;
@@ -154,6 +156,18 @@ void Report(const char* label, const Phase& p) {
 bool FeatureOn() { return !g_active || g_onNow; }
 bool Running()   { return g_active; }
 const char* Subject() { return g_active ? g_subject : nullptr; }
+
+bool IsSubject(const char* name) {
+    if (!g_active || !name || lstrcmpiA(g_subject, name) != 0) return false;
+    g_claimed = true;
+    return true;
+}
+
+bool StandAside() {
+    if (g_onNow) return false;
+    ++g_standAside;
+    return true;
+}
 
 void OnFrame() {
     if (!g_active) return;
@@ -228,10 +242,34 @@ void LogStats() {
     Log("[AbTest] '%s' alternating every %u s. %llu frame(s) discarded around "
         "switches and loading screens.",
         g_subject, g_periodMs / 1000, (unsigned long long)g_dropped);
+
+    // The failure that would otherwise read as a result.
+    //
+    // If the name in the ini matches no module - a typo, a feature that was not
+    // also switched on, one that never installed on this client - then nothing
+    // behaves differently between the halves and the difference below comes out
+    // near zero. Reported without this, that is indistinguishable from "measured
+    // it, it does nothing", and it is the more likely of the two.
+    if (!g_claimed) {
+        Log("[AbTest]   NO MODULE ANSWERED TO '%s'. Nothing was alternated, both "
+            "halves are the same client doing the same thing, and the numbers "
+            "below measure only noise. Check the spelling against the launcher's "
+            "ini key, and check that the feature itself is switched on.",
+            g_subject);
+    } else if (g_standAside == 0) {
+        Log("[AbTest]   '%s' claimed the test but its hot path was never reached "
+            "during an OFF stint - so the two halves may still be identical. That "
+            "is a fact about this session's play, not about the feature.",
+            g_subject);
+    } else {
+        Log("[AbTest]   '%s' stood aside %llu time(s) during OFF stints, so the "
+            "two halves really did differ.",
+            g_subject, (unsigned long long)g_standAside);
+    }
     Report("ON", g_on);
     Report("OFF", g_off);
 
-    if (g_on.frames && g_off.frames) {
+    if (g_on.frames && g_off.frames && g_claimed && g_standAside) {
         double meanOn  = g_on.sumMs  / (double)g_on.frames;
         double meanOff = g_off.sumMs / (double)g_off.frames;
         double d = meanOff - meanOn;   // positive means ON was faster
@@ -247,9 +285,13 @@ void LogStats() {
                 "busy fight landing in one half moves the whole figure. Play "
                 "longer before reading anything into it.", stints);
         }
-    } else {
+    } else if (!g_on.frames || !g_off.frames) {
         Log("[AbTest]   one of the two halves has no frames, so no comparison is "
             "possible yet - not a difference of zero.");
+    } else {
+        Log("[AbTest]   no difference is printed, because the lines above say the "
+            "two halves were not actually different. A number here would be read "
+            "as a result and it would be noise.");
     }
 }
 

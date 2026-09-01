@@ -338,7 +338,7 @@ uint32_t* __fastcall Hooked_Relink(void* self, void* edx) {
     // That is the only route by which anything here gets a measured gain
     // instead of a plausible story, and this module targets the largest
     // single entry in the profile, so it goes first.
-    if (g_abSubject && !AbTest::FeatureOn()) {
+    if (g_abSubject && AbTest::StandAside()) {
         g_abOffCalls++;
         return orig_Relink(self, edx);
     }
@@ -476,9 +476,8 @@ bool Init() {
         "main-thread profile (9.06%%). Verifying against the client for the first "
         "%ld calls before it changes anything.", (long)kLearnCalls);
 
-    const char* subject = AbTest::Subject();
-    if (subject && lstrcmpiA(subject, "LayoutRelinkFast") == 0) {
-        g_abSubject = true;
+    g_abSubject = AbTest::IsSubject("LayoutRelinkFast");
+    if (g_abSubject) {
         Log("[LayoutRelink] under A/B test: the shortcut is taken only during the "
             "test's ON stints, and the frame times either side are reported by "
             "AbTest. The verification above is unaffected - it still runs, and a "

@@ -77,6 +77,7 @@
 #include "version.h"
 #include "config.h"
 #include "sampling_profiler.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -96,6 +97,9 @@ segTest_fn orig_Test = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 unsigned long g_calls    = 0;
@@ -174,6 +178,12 @@ int __cdecl Hooked_Test(const float* box, const float* start, const float* end) 
     g_calls++;
     if (g_dead || !box || !start || !end) return orig_Test(box, start, end);
 
+    // Under the A/B harness this feature alternates on and off in stints
+    // so its frame times can be compared against the client doing the same
+    // work in the same zone. One predictable branch on a false global when
+    // no test names this module.
+    if (g_abSubject && AbTest::StandAside()) return orig_Test(box, start, end);
+
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         int mine;
         __try {
@@ -238,6 +248,13 @@ bool Init() {
     if (WO_EnableHook((void*)kTest) != MH_OK) {
         Log("[SegmentAabb] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("SegmentAabb");
+    if (g_abSubject) {
+        Log("[SegmentAabb] under A/B test: it alternates on and off in stints "
+            "and AbTest reports the frame times either way. The correctness "
+            "checks are unaffected and still retire it on a disagreement.");
     }
 
     g_installed = true;

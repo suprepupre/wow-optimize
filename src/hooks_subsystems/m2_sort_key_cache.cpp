@@ -75,6 +75,7 @@
 #include "version.h"
 #include "config.h"
 #include "sampling_profiler.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -100,6 +101,9 @@ compare_fn orig_Compare = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 // Plain 32-bit on a comparator's path. Lower bounds, and the report says so.
@@ -175,6 +179,12 @@ int __stdcall Hooked_Compare(void* a, void* b) {
     g_calls++;
     if (g_dead || !a || !b) return orig_Compare(a, b);
 
+    // Under the A/B harness this feature alternates on and off in stints
+    // so its frame times can be compared against the client doing the same
+    // work in the same zone. One predictable branch on a false global when
+    // no test names this module.
+    if (g_abSubject && AbTest::StandAside()) return orig_Compare(a, b);
+
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         int mine;
         __try {
@@ -233,6 +243,13 @@ bool Init() {
     if (WO_EnableHook((void*)kCompare) != MH_OK) {
         Log("[M2SortKey] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("M2SortKey");
+    if (g_abSubject) {
+        Log("[M2SortKey] under A/B test: it alternates on and off in stints "
+            "and AbTest reports the frame times either way. The correctness "
+            "checks are unaffected and still retire it on a disagreement.");
     }
 
     g_installed = true;

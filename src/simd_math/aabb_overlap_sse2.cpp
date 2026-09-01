@@ -105,6 +105,7 @@
 #include "version.h"
 #include "config.h"
 #include "sampling_profiler.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -125,6 +126,9 @@ overlap_fn orig_Overlap = nullptr;
 
 bool g_installed = false;
 bool g_armed     = false;
+// Set at init when the A/B harness names this module, so the hot path
+// tests a plain bool instead of calling out on every invocation.
+bool g_abSubject = false;
 bool g_dead      = false;
 
 // Plain 32-bit on a leaf this hot. A lost increment costs a number, and the
@@ -164,6 +168,12 @@ int __fastcall Hooked_Overlap(const float* self, void* edx, const float* other) 
     g_calls++;
 
     if (g_dead) return orig_Overlap(self, edx, other);
+
+    // Under the A/B harness this feature alternates on and off in stints
+    // so its frame times can be compared against the client doing the same
+    // work in the same zone. One predictable branch on a false global when
+    // no test names this module.
+    if (g_abSubject && AbTest::StandAside()) return orig_Overlap(self, edx, other);
 
     int mine = Sse2Overlap(self, other);
 
@@ -209,6 +219,13 @@ bool Init() {
     if (WO_EnableHook((void*)kOverlap) != MH_OK) {
         Log("[AabbOverlap] hook created but could not be enabled");
         return false;
+    }
+
+    g_abSubject = AbTest::IsSubject("AabbOverlap");
+    if (g_abSubject) {
+        Log("[AabbOverlap] under A/B test: it alternates on and off in stints "
+            "and AbTest reports the frame times either way. The correctness "
+            "checks are unaffected and still retire it on a disagreement.");
     }
 
     g_installed = true;
