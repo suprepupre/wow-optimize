@@ -119,6 +119,10 @@ static volatile long g_foreignDetours = 0;
 extern "C" void WowOpt_LogForeignDetour(void* target, unsigned char firstByte) {
     long n = InterlockedIncrement(&g_foreignDetours);
     if (n <= 16) {
+        Verdict::Add(Verdict::Note,
+                     "0x%08X was already detoured by something else - an overlay, "
+                     "a client extension - so our hook stood aside",
+                     (unsigned)(uintptr_t)target);
         Log("[Hooks] 0x%08X already carries a %s (0x%02X) - another party hooked "
             "it first, so this one is left alone",
             (unsigned)(uintptr_t)target,
@@ -460,6 +464,9 @@ static void CaptureFreezeLocation(DWORD mainTid) {
         char buf[MAX_PATH + 32];
         FreezeClassifyAddr(eip, buf);
         Log("!!!   STUCK AT: EIP=%s", buf);
+        // The one line a freeze report is read for. Deduplicated by text, so a
+        // stall that recurs at the same address becomes one counted entry.
+        Verdict::Add(Verdict::Bad, "main thread was stuck at %s", buf);
         int shown = 0, rejected = 0;
         for (int i = 0; i < rawCount && shown < 6; i++) {
             uintptr_t v = rawStack[i];

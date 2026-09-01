@@ -13,6 +13,7 @@
 #include "MinHook.h"
 #include "version.h"
 #include "crash_dumper.h"
+#include "session_verdict.h"
 #include <intrin.h>
 
 #include <dbghelp.h>
@@ -1173,6 +1174,20 @@ void ReportFirstChanceSummary() {
         "someone (%ld of them repeats of the previous address). These are not "
         "crashes - something is using exceptions as control flow.",
         total, (LONG)g_firstChanceRepeats);
+
+    // A count that stops moving after startup is a client that throws while
+    // setting itself up and then behaves; one that keeps climbing is something
+    // faulting on a hot path and being caught. The two read identically from a
+    // single report and differently across two, so what is worth surfacing is
+    // the growth rather than the total.
+    static LONG s_lastTotal = -1;
+    if (s_lastTotal >= 0 && total > s_lastTotal) {
+        Verdict::Add(Verdict::Warn,
+                     "fatal-class exceptions are still being raised and caught - "
+                     "%ld more since the last report, %ld in all",
+                     total - s_lastTotal, total);
+    }
+    s_lastTotal = total;
 }
 
 void ReportFeatureActivity() {
