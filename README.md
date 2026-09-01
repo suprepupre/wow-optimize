@@ -23,6 +23,7 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
+* [Unreleased](#unreleased)
 * [What's New in v3.19.1](#whats-new-in-v3191)
 * [Send me your log](#send-me-your-log)
 * [Reviews & Acknowledgments](#reviews)
@@ -34,6 +35,53 @@ The current public build is focused on real frametime stability, long-session sm
 * [Building](#building)
 * [Core Architecture](#core-architecture)
 * [Troubleshooting & Diagnostics](#troubleshooting)
+
+---
+
+## Unreleased
+
+Not a version yet - rename this heading when you tag one.
+
+### Measurement, which is what was actually missing
+
+Around fifty optimizations here, and until now not one with a measured frame-time
+gain. Nothing could hold still between two sessions - a different zone, a
+different raid, a different evening - so a difference in frame time never meant
+anything.
+
+* **A/B Test a Feature** turns one feature on and off in alternating stints while
+  you play, so both halves see the same zone, the same addons and the same
+  machine. Ten features can be tested this way, including the one that targets
+  the largest single entry in the profile. It also times the replaced call
+  directly, because a feature worth under one percent of main-thread time cannot
+  show up in frame time at all.
+* **Flight Recorder** keeps the last 512 frames and writes 240 of them to the log
+  when you press Scroll Lock. Press it the moment you see something wrong and the
+  log carries that second frame by frame instead of a ten-second average.
+* Every log now opens its periodic report with **what went wrong this session** -
+  freezes, long loads, disconnects, address space running out, a SavedVariables
+  file written under a name matching no addon. All of it was already in the logs;
+  none of it was findable.
+
+### Fixed
+
+* **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58)
+  and confirmed by asslol. See the warning at the top of this file.
+* **Shadow flicker is not what we thought.** Two testers, both directions of the
+  setting, no change - and their own logs show the mechanism firing zero times
+  while the flicker was constant. Steadier Shadows also did nothing at all unless
+  the diagnostic probe was ticked as well; that is fixed, but turn the feature
+  off, it does not help.
+* **Garbled SavedVariables names** are caught as the file is created now, with the
+  name in hex and the state of memory at that instant. One was captured: `)_.lua`,
+  two printable bytes, during a character switch.
+* **A 139-second loading screen** spent 1% of itself reading. Writes were never
+  measured; they are now, with the slowest single write and its filename.
+* **The draw-call census divided by sleeps instead of frames** and reported 34,671
+  draw calls per frame. The real figure is 1,323.
+* **The Lua compile census and Reuse Compiled Scripts were fighting over one
+  address**, so with the census on the cache installed nothing - the one
+  configuration that could weigh the cache was the one where it could not run.
 
 ---
 
