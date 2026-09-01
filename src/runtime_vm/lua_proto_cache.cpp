@@ -588,12 +588,27 @@ bool Init() {
     }
     if (WineSafe_CreateHook((void*)kLuaLLoadBuffer, (void*)Hooked_luaL_loadbuffer,
                             (void**)&orig_luaL_loadbuffer) != MH_OK) {
-        Log("[ProtoCache] luaL_loadbuffer hook NOT created");
+        // Both hooks or neither. This one anchors the Proto the parser hook
+        // keeps, and without it the collector frees a Proto still in the cache -
+        // which is the crash this module already has a story about. Leaving the
+        // parser hook created also leaves the address claimed against anything
+        // else that wants it, for a feature that is not going to run.
+        MH_RemoveHook((void*)kLuaYParser);
+        orig_luaY_parser = nullptr;
+        Log("[ProtoCache] NOT active: luaL_loadbuffer (0x%08X) is already hooked "
+            "by something else, and without it a kept Proto cannot be anchored "
+            "against the collector. If that something else is the Lua compile "
+            "census, run the two in separate sessions.",
+            (unsigned)kLuaLLoadBuffer);
         return false;
     }
     if (WO_EnableHook((void*)kLuaYParser) != MH_OK ||
         WO_EnableHook((void*)kLuaLLoadBuffer) != MH_OK) {
-        Log("[ProtoCache] hooks created but could not be enabled");
+        MH_RemoveHook((void*)kLuaYParser);
+        MH_RemoveHook((void*)kLuaLLoadBuffer);
+        orig_luaY_parser = nullptr;
+        orig_luaL_loadbuffer = nullptr;
+        Log("[ProtoCache] NOT active: hooks created but could not be enabled");
         return false;
     }
 
