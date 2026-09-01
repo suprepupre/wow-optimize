@@ -68,6 +68,7 @@
 
 #include "ab_test.h"
 #include "config.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -335,6 +336,17 @@ void LogStats() {
         }
 
         uint32_t stints = g_on.stints + g_off.stints;
+
+        // The headline, at the top of the log rather than four hundred lines
+        // down. Only once there are enough stints to mean anything - a result
+        // from three of them promoted to the summary would be read as settled.
+        if (stints >= 8) {
+            Verdict::Add(Verdict::Note,
+                         "A/B on %s: %.3f ms/frame %s with it on, over %u stints",
+                         g_subject, d < 0 ? -d : d,
+                         d > 0 ? "faster" : "slower", stints);
+        }
+
         if (stints < 8) {
             Log("[AbTest]   only %u stint(s) so far. That is too few to trust: one "
                 "busy fight landing in one half moves the whole figure. Play "

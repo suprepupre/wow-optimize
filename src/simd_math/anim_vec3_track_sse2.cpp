@@ -102,6 +102,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -273,6 +274,9 @@ void __cdecl Hooked_VecTrackBody(void* obj, void* state, void* track,
         if (memcmp(out, theirs, sizeof(theirs)) != 0) {
             memcpy(out, theirs, sizeof(theirs));
             g_dead = true;
+            Verdict::Add(Verdict::Bad,
+                         "AnimVec3Track disagreed with the client and retired itself for "
+                         "this session");
             Log("[AnimVec3Track] DISAGREED with the client after %lu checks - "
                 "retired for this session, every call now goes to the client's "
                 "own code. Client gave %08X %08X %08X (hints %u/%u), this gave "

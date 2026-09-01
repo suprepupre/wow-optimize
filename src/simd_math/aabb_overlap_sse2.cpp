@@ -106,6 +106,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -179,6 +180,9 @@ int __fastcall Hooked_OverlapBody(const float* self, void* edx, const float* oth
         g_verified++;
         if ((theirs != 0) != (mine != 0)) {
             g_dead = true;
+            Verdict::Add(Verdict::Bad,
+                         "AabbOverlap disagreed with the client and retired itself for "
+                         "this session");
             Log("[AabbOverlap] DISAGREED with the client after %lu checks "
                 "(client said %d, this said %d) - retired for this session, "
                 "every call now goes to the client's own code",

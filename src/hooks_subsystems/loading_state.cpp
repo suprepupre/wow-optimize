@@ -25,6 +25,7 @@
 #include "version.h"
 
 #include "loading_state.h"
+#include "session_verdict.h"
 #include "event_coalescer.h"
 #include "combat_log_filter.h"
 #include "runtime_vm/lua_gc_governor.h"
@@ -148,6 +149,14 @@ static void LoadTimerEnd() {
     g_ioMsTotal   += g_ioMsThisLoad;
     g_ioBytesTotal += g_ioBytesThisLoad;
     if (ms > g_loadMsWorst) g_loadMsWorst = ms;
+
+    // A load nobody would call normal. The threshold is deliberately generous:
+    // ten seconds is already something a player notices and mentions, and the
+    // reports that took weeks to diagnose were all far past it.
+    if (ms > 10000.0) {
+        Verdict::Add(ms > 60000.0 ? Verdict::Bad : Verdict::Warn,
+                     "a loading screen took %.0f s", ms / 1000.0);
+    }
 
     if (!g_readHookOn) {
         Log("[LoadingState] Load took %.0f ms - disk share not measured "

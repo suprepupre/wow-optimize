@@ -19,6 +19,9 @@
 #include <io.h>
 #include <intrin.h>
 #include <emmintrin.h>
+// Depends on nothing, and the freeze watchdog below reports to it hundreds of
+// lines before the rest of these headers are reached.
+#include "session_verdict.h"
 #include "ui_cache.h"
 #include "api_cache.h"
 #include "lua_fastpath.h"
@@ -193,6 +196,9 @@ extern "C" void WowOpt_LogDuplicateHook(void* target, void* loser) {
     }
 
     long n = InterlockedIncrement(&g_duplicateHooks);
+    Verdict::Add(Verdict::Warn,
+                 "0x%08X is hooked by two of our own modules; only the first "
+                 "installed runs", (unsigned)t);
     if (n <= 48) {
         Log("[Hooks] 0x%08X is already hooked by a DIFFERENT module of ours - the "
             "detour that lost is at %p, and only the first one installed runs",
@@ -547,8 +553,16 @@ static DWORD WINAPI FreezeWatchdogProc(LPVOID) {
 
             if (expected) {
                 Log("[FreezeWatchdog] main thread blocked %u ms during loading/transition (expected, not a hang)", elapsed);
+                // Rounded to seconds so a run of stalls of similar length becomes
+                // one counted line rather than forty near-identical ones.
+                Verdict::Add(elapsed > 20000 ? Verdict::Bad : Verdict::Warn,
+                             "main thread blocked ~%us during a load or transition",
+                             elapsed / 1000);
             } else {
                 Log("!!! FREEZE DETECTED !!! Main thread silent for %u ms (no loading/transition active)", elapsed);
+                Verdict::Add(Verdict::Bad,
+                             "main thread frozen ~%us with no load in progress",
+                             elapsed / 1000);
                 Log("!!! Last main thread tick: %u, current: %u", lastTick, GetTickCount());
                 CaptureFreezeLocation(g_mainThreadId);
                 // One address cannot tell a blocked thread from a spinning one,
@@ -3944,6 +3958,9 @@ static void NoteSavedVariablesWrite(const char* path) {
 
     if (!SavedVarsNameHasAddon(path, leaf)) {
         g_savedVarsBadNames++;
+        Verdict::Add(Verdict::Bad,
+                     "SavedVariables written under a name matching no addon "
+                     "folder: %s", leaf);
         Log("!!! [SavedVars] \"%s\" has no folder in Interface\\AddOns, so no addon "
             "can have produced it. This is the garbled-name defect, caught as the "
             "file is created.", leaf);
@@ -4774,6 +4791,15 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
             totalFree / (1024.0 * 1024.0),
             largestFree / (1024.0 * 1024.0),
            (largestFree < 64 * 1024 * 1024) ? " WARNING: fragmented" : "");
+        // The client allocates from below 2GB. A tester whose garbled addon names
+        // appeared while the largest block there was 11 MB had this line in his
+        // log nine times and nobody read it against the complaint.
+        if (largestFree < 32 * 1024 * 1024) {
+            Verdict::Add(largestFree < 16 * 1024 * 1024 ? Verdict::Bad : Verdict::Warn,
+                         "only %.0fMB largest free block below 2GB - the client "
+                         "allocates from there",
+                         largestFree / (1024.0 * 1024.0));
+        }
     }    
     Log("[Stats] ====================================");
 
@@ -5074,6 +5100,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     WowOpt_ReportForeignDetours();
     ApiCache::LogStats();
     TextureUnloadDelay::LogStats();
+    Verdict::LogStats();
     NetDiag::LogStats();
     // Said every report, not once at startup, because the whole value of this
     // mode is that a log from it cannot be read as a log from a normal run.

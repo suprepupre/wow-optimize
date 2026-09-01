@@ -35,6 +35,7 @@
 #include "net_diag.h"
 #include "crash_dumper.h"
 #include "config.h"
+#include "session_verdict.h"
 #include "MinHook.h"
 #include "version.h"
 
@@ -166,6 +167,7 @@ static void ReportDisconnect(const char* how, int err) {
         return;
     }
 
+    Verdict::Add(Verdict::Bad, "disconnected: %s", how);
     Log("!!! DISCONNECT !!! (connection %ld) %s%s%s", g_connSeq, how,
         (err && *ErrorName(err)) ? " - " : "",
         (err && *ErrorName(err)) ? ErrorName(err) : "");

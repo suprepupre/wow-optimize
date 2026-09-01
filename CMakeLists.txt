@@ -121,6 +121,8 @@ add_library(wow_optimize SHARED
     src/diagnostics/flight_recorder.h
     src/diagnostics/ab_test.cpp
     src/diagnostics/ab_test.h
+    src/diagnostics/session_verdict.cpp
+    src/diagnostics/session_verdict.h
     src/hooks_subsystems/strncmp_sse2.cpp
     src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp

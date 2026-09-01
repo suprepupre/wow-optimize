@@ -39,6 +39,7 @@
 #include "version.h"
 #include "config.h"
 #include "flight_recorder.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -436,6 +437,12 @@ void LogStats() {
     // compiler is, and it is the only figure that decides whether a cache is
     // worth its risk.
     double msTotal = g_msFirst + g_msRepeat;
+    if (g_msRepeat > 250.0) {
+        Verdict::Add(Verdict::Note,
+                     "%.0f ms of this session went into recompiling Lua the client "
+                     "had already compiled", g_msRepeat);
+    }
+
     if (g_timedFirst + g_timedRepeat == 0) {
         Log("[LuaCompile] no compile was timed - the outer entry point was never "
             "reached, so there is no time figure here, not a zero one");

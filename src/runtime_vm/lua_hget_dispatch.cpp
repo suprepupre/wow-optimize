@@ -76,6 +76,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -172,6 +173,9 @@ void* __cdecl Hooked_HGetBody(void* t, const void* key) {
 
         if (mine != theirs) {
             g_dead = true;
+            Verdict::Add(Verdict::Bad,
+                         "LuaHGetDispatch disagreed with the client and retired itself for "
+                         "this session");
             Log("[LuaHGet] DISAGREED with the client after %lu lookups - retired "
                 "for this session, every lookup now goes to the client's own "
                 "code. It returned %p and this returned %p.",

@@ -76,6 +76,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -192,6 +193,9 @@ int __stdcall Hooked_CompareBody(void* a, void* b) {
 
         if ((mine != 0) != (theirs != 0)) {
             g_dead = true;
+            Verdict::Add(Verdict::Bad,
+                         "M2SortKey disagreed with the client and retired itself for "
+                         "this session");
             Log("[M2SortKey] DISAGREED with the client after %lu comparisons - "
                 "retired for this session, every comparison now goes to the "
                 "client's own code. It answered %d and this answered %d.",

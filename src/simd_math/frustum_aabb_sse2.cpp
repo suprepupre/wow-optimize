@@ -80,6 +80,7 @@
 #include "config.h"
 #include "sampling_profiler.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -191,6 +192,9 @@ int __fastcall Hooked_IsVisibleBody(void* frustum, void* edx, void* aabb) {
 
         if (mine != theirs) {
             g_dead = true;
+            Verdict::Add(Verdict::Bad,
+                         "FrustumAabb disagreed with the client and retired itself for "
+                         "this session");
             Log("[FrustumAabb] DISAGREED with the client after %lu tests - retired "
                 "for this session, every test now goes to the client's own code. "
                 "It answered %d and this answered %d.", g_verified, theirs, mine);

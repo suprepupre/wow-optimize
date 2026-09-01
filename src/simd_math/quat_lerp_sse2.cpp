@@ -82,6 +82,7 @@
 #include "version.h"
 #include "config.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
