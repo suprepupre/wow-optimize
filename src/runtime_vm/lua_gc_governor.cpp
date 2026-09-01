@@ -1,4 +1,5 @@
 #include "lua_gc_governor.h"
+#include "ab_test.h"
 #include "version.h"
 #include "lua_optimize.h"
 #include "../diagnostics/sampling_profiler.h"
@@ -16,6 +17,31 @@ static lua_gc_fn g_lua_gc = (lua_gc_fn)0x0084ED50;
 // Frames on which a collection was declined because a loading screen was up.
 // Counted so the guard can be told apart from a guard that never fires.
 static unsigned long g_declinedLoading = 0;
+
+// The A/B subject state, when the harness names this feature.
+//
+// This is the one default-on feature in the project with a crash dump behind it
+// and no measured payoff, and the evidence about the payoff does not agree with
+// itself. In the one uncapped session profiled here, with this governor asking
+// for nothing, steady-state collection was 0.04% of executing time. The note at
+// the head of StepTimed cites 10.96% and 7.90% from one tester profile and 2.24%
+// from another with the same settings - and those are suspected vsync-capped,
+// where the profiler warns its shares are shares of a spin.
+//
+// Neither figure settles the feature, because a share of the whole cannot rule
+// out the thing it is for: a rare full collection that pauses for seconds while
+// the steady state stays negligible. That is a tail, and only a tail measurement
+// answers it. Flipping a default that everyone runs on a mean instead is exactly
+// the move this project has regretted before, so it gets measured.
+//
+// Unlike the maths replacements, this one carries state across a phase boundary:
+// it stops the automatic collector. An OFF stint therefore has to hand the
+// collector back - restart it and put it at the stock 200/200 - and an ON stint
+// has to take it again. Both transitions cost a frame, which is what the
+// harness's settle window is for.
+bool          g_abSubject   = false;
+int           g_abLastPhase = -1;   // -1 nothing seen yet, 0 off, 1 on
+unsigned long g_abHandbacks = 0;
 
 typedef int (__cdecl *lua_getfield_fn)(void* L, int idx, const char* k);
 static lua_getfield_fn g_lua_getfield = (lua_getfield_fn)0x0084E590;
@@ -49,6 +75,13 @@ static double g_lastMemoryKB = 0.0;
 
 bool Init() {
     g_initialized = true;
+    g_abSubject = AbTest::IsSubject("LuaGcManual");
+    if (g_abSubject) {
+        Log("[GCGovernor] under A/B test: during OFF stints the automatic "
+            "collector is handed back at the stock 200/200 and nothing here "
+            "steps it, during ON stints this governor takes it again. Both "
+            "transitions cost a frame, which the harness discards.");
+    }
     Log("[GCGovernor] Adaptive GC Governor Initialized");
     // Stated once so a log says what this does without anyone reading the source.
     // Lua 5.1 ships with a pause of 200, meaning a new cycle starts once memory
@@ -124,6 +157,19 @@ void LogStats() {
             "looked");
     }
 
+    if (g_abSubject) {
+        Log("[GCGovernor] A/B: the collector was handed back to the client %lu "
+            "time(s). What is known going in: in the one uncapped session "
+            "profiled here, with this governor asking for nothing, steady-state "
+            "collection was 0.04%% of executing time. Other sessions put the mark "
+            "phase at 2.24%% and 10.96%%, and those are suspected to be "
+            "vsync-capped, where the profiler's shares are shares of a spin. "
+            "Either way a rare full collection can pause for seconds while the "
+            "steady state stays negligible, and the pause is what this feature "
+            "exists for - so read p95 and p99 below, not the mean.",
+            g_abHandbacks);
+    }
+
     // Those numbers are this module's own work and nothing else. Lowering the
     // pause below the stock 200 makes the client start a new collection cycle
     // sooner, and all of that work is the client's, in its own functions, where
@@ -184,6 +230,25 @@ void OnFrame(double frameMs) {
 
     void* L = *(void**)0x00D3F78C;
     if (!L) return;
+
+    // The A/B phase, when the harness names this feature. Handing the collector
+    // back is not optional on the way out: this governor stops it, and a stint
+    // that merely skipped stepping would leave the VM with no collector running
+    // at all, which measures something nobody wants.
+    if (g_abSubject) {
+        const int phase = AbTest::FeatureOn() ? 1 : 0;
+        if (phase != g_abLastPhase) {
+            g_abLastPhase = phase;
+            if (phase == 0) {
+                g_lua_gc(L, 1, 0);            // LUA_GCRESTART
+                g_lua_gc(L, 6, 200);          // LUA_GCSETPAUSE
+                g_lua_gc(L, 7, 200);          // LUA_GCSETSTEPMUL
+                g_abHandbacks++;
+            }
+            g_lastMemoryKB = GetLuaMemoryKB(L);
+        }
+        if (phase == 0) return;
+    }
 
     // The control case. Stock Lua is 200/200 and no manual stepping at all, so
     // one session with this on and one with it off is the whole experiment.
