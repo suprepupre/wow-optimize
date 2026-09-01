@@ -22,6 +22,9 @@ void HeapCompactor_Shutdown();
 
 // Diagnostic queries
 extern "C" SIZE_T HeapCompactor_GetLargestFreeBlock();
+// The low half on its own. The client allocates from below 2GB, so a caller
+// describing how much room was left at some moment wants this, not the total.
+extern "C" SIZE_T HeapCompactor_GetLargestFreeLowHalf();
 extern "C" void HeapCompactor_GetStats(uint64_t* checks, uint64_t* compactions,
                                         SIZE_T* lastBlock, SIZE_T* minBlock, SIZE_T* maxBlock);
 

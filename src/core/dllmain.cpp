@@ -3872,20 +3872,104 @@ static bool PathPassesThroughMPQ(const char* path) {
 // the moment the client creates it, with a timestamp, so the next report can be
 // read rather than guessed at. Names are remembered so a file reopened every few
 // seconds is logged once.
+// A name the client wrote that no addon could have produced.
+//
+// The first capture: on 2026-09-01 a tester's client opened ")_.lua" for writing,
+// between DBM-ChamberOfAspects.lua and Overachiever_Tabs.lua, during a character
+// switch. Every other name in that session was clean. Two characters, both
+// printable, so no test on the bytes alone would have caught it - the only thing
+// wrong with ")_" is that there is no addon called that.
+//
+// So the test is exactly that. A SavedVariables file is named after a folder in
+// Interface\AddOns, and the path being opened carries the client's own root, so
+// the folder can be looked for rather than guessed at. The account-wide
+// SavedVariables.lua is the one file with no addon behind it.
+//
+// Returns true when the name is real, and also when the check could not be made.
+static bool SavedVarsNameHasAddon(const char* path, const char* leaf) {
+    // "...\WTF\Account\..." - everything before \WTF\ is the client's root.
+    const char* wtf = nullptr;
+    for (const char* p = path; p[0] && p[1] && p[2] && p[3] && p[4]; p++) {
+        if (p[0] == '\\' &&
+            (p[1] == 'W' || p[1] == 'w') && (p[2] == 'T' || p[2] == 't') &&
+            (p[3] == 'F' || p[3] == 'f') && p[4] == '\\') { wtf = p; break; }
+    }
+    if (!wtf) return true;                       // not a path we can check
+
+    size_t rootLen = (size_t)(wtf - path);
+    size_t leafLen = strlen(leaf);
+    if (leafLen < 5 || _stricmp(leaf + leafLen - 4, ".lua") != 0) return true;
+    if (_stricmp(leaf, "SavedVariables.lua") == 0) return true;
+
+    static const char kSub[] = "\\Interface\\AddOns\\";
+    const size_t kSubLen = sizeof(kSub) - 1;
+    size_t nameLen = leafLen - 4;
+    char probe[MAX_PATH];
+    if (rootLen + kSubLen + nameLen + 1 > sizeof(probe)) return true;
+
+    memcpy(probe, path, rootLen);
+    memcpy(probe + rootLen, kSub, kSubLen);
+    memcpy(probe + rootLen + kSubLen, leaf, nameLen);
+    probe[rootLen + kSubLen + nameLen] = 0;
+
+    return GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES;
+}
+
+static unsigned g_savedVarsBadNames = 0;
+
 static void NoteSavedVariablesWrite(const char* path) {
     if (!path) return;
     const char* leaf = strrchr(path, '\\');
     leaf = leaf ? leaf + 1 : path;
 
-    static char s_seen[64][64];
+    // Widened past the sixty-four it held: one session logged about seventy
+    // distinct files, and the table filling silently turned the dedupe off, so
+    // every reopen from that point on would have been logged again.
+    static char s_seen[192][64];
     static int  s_count = 0;
+    static bool s_full = false;
     for (int i = 0; i < s_count; i++)
         if (strcmp(s_seen[i], leaf) == 0) return;
-    if (s_count < 64) {
+    if (s_count < 192) {
         strncpy(s_seen[s_count], leaf, sizeof(s_seen[0]) - 1);
         s_seen[s_count][sizeof(s_seen[0]) - 1] = 0;
         s_count++;
+    } else if (!s_full) {
+        s_full = true;
+        Log("[SavedVars] more than 192 distinct names - from here a reopened file "
+            "is logged again rather than once");
     }
+
+    if (!SavedVarsNameHasAddon(path, leaf)) {
+        g_savedVarsBadNames++;
+        Log("!!! [SavedVars] \"%s\" has no folder in Interface\\AddOns, so no addon "
+            "can have produced it. This is the garbled-name defect, caught as the "
+            "file is created.", leaf);
+        Log("!!!   full path: %s", path);
+
+        char hex[3 * 48 + 1];
+        int n = 0;
+        for (const unsigned char* q = (const unsigned char*)leaf; *q && n < 48; q++, n++)
+            sprintf(hex + n * 3, "%02X ", *q);
+        hex[n * 3] = 0;
+        Log("!!!   the name as bytes: %s", hex);
+
+        // Whether the client had run out of room when it built that string. It
+        // allocates from below 2GB, and a garbled name appearing while the
+        // largest block there is a few megabytes is a different situation from
+        // one appearing with room to spare. Nothing has ever recorded which.
+        PROCESS_MEMORY_COUNTERS pmc = {};
+        pmc.cb = sizeof(pmc);
+        unsigned wsMb = GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))
+                      ? (unsigned)(pmc.WorkingSetSize / (1024 * 1024)) : 0u;
+        Log("!!!   at that moment: working set %u MB, largest free block below "
+            "2GB %u MB. Bad names so far this session: %u.",
+            wsMb,
+            (unsigned)(HeapCompactor_GetLargestFreeLowHalf() / (1024 * 1024)),
+            g_savedVarsBadNames);
+        return;
+    }
+
     Log("[SavedVars] client opened for writing: %s", leaf);
 }
 

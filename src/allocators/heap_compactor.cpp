@@ -372,6 +372,15 @@ extern "C" SIZE_T HeapCompactor_GetLargestFreeBlock() {
     return GetLargestFreeBlock();
 }
 
+// The low half separately, which is the number that matters: the client
+// allocates from below 2GB and a caller that wants to say how much room was left
+// at some moment needs that figure rather than the whole address space.
+extern "C" SIZE_T HeapCompactor_GetLargestFreeLowHalf() {
+    SIZE_T low = 0;
+    GetLargestFreeBlock(&low);
+    return low;
+}
+
 // Cheap cached read (no VirtualQuery walk) for per-frame consumers like the GC
 // step. Returns the last value the monitor sampled; 0 means "not sampled yet".
 extern "C" SIZE_T HeapCompactor_GetCachedLargestBlock() {
