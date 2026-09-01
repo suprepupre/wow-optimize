@@ -88,7 +88,20 @@ constexpr uintptr_t ADDR_Fn1      = 0x00D4315C;
 constexpr uintptr_t ADDR_Fn2      = 0x00D43160;
 constexpr uintptr_t ADDR_Fn3      = 0x00D43164;
 
-// The cascade cache, which is where the flicker actually lives.
+// The cascade cache, which was where the flicker was thought to live.
+//
+// It is not, and the numbers below now say so. Two testers ran sessions with the
+// recentre distance halved and again with it doubled, and neither changed what
+// they see. In prince's two sessions on 40967a5d cascades 0 and 1 flipped their
+// buffers exactly zero times from start to finish and cascade 2 flipped six times
+// in total, while he reported the problem throughout. A mechanism that fires zero
+// times cannot be producing a symptom that is continuously present.
+//
+// So the cache is measured and mostly exonerated, the hold is a dial that moves
+// nothing anyone can see, and whatever makes shadows flash in and out is
+// somewhere this module does not yet look. Left in place because the counters
+// below are what established that, and removing them would only make the next
+// person guess it again.
 //
 // Every input to the pass has now been measured across two five-hour sessions
 // and every one is constant: entered on 100% of frames, ran on 100%, quality 4
@@ -237,6 +250,7 @@ float    g_extent[kCascades]     = {};       // the half-size the cascade covers
 // nothing here writes anything.
 bool     g_holdActive = false;
 uint32_t g_holdWrites = 0;
+uint32_t g_holdWritesTotal = 0;   // never reset, so a zero window still has a number behind it
 float    g_holdFrom[kCascades] = {};
 float    g_holdTo[kCascades]   = {};
 // A ratchet, and how it was found.
@@ -366,6 +380,7 @@ extern "C" void __cdecl ShadowProbe_NoteCascade(const float* pos) {
                 if (want != thr) {
                     *(volatile float*)(ADDR_Threshold + off) = want;
                     g_holdWrites++;
+                    g_holdWritesTotal++;
                 }
             }
 
@@ -560,12 +575,21 @@ void OnFrame() {
             "while moving against 1.0 standing still for cascade 0. That is the "
             "flicker, and it is the client's own cache.");
         if (g_holdActive) {
-            Log("[ShadowProbe]     hold wrote %u time(s) this window. Stock -> "
-                "held, as distances: cascade 0 %.1f -> %.1f yards, 1 %.1f -> "
-                "%.1f, 2 %.1f -> %.1f. Stock is the client's own value, captured "
-                "once - computing from the current one is what made this ratchet "
-                "to the cap in prince's first run.",
-                g_holdWrites,
+            // A write only happens when the value in the client differs from the
+            // target, so once each cascade is set the count is zero for the rest
+            // of the session. Printed on its own that read as the hold doing
+            // nothing, next to thresholds that proved it had - so the session
+            // total is printed beside it and the line says which number means
+            // what.
+            Log("[ShadowProbe]     hold wrote %u time(s) this window, %u this "
+                "session. It writes only when the client's value differs from the "
+                "target, so zero for the window with the distances below already "
+                "changed means it is set and holding, not idle. Stock -> held, as "
+                "distances: cascade 0 %.1f -> %.1f yards, 1 %.1f -> %.1f, 2 %.1f "
+                "-> %.1f. Stock is the client's own value, captured once - "
+                "computing from the current one is what made this ratchet to the "
+                "cap in prince's first run.",
+                g_holdWrites, g_holdWritesTotal,
                 sqrt((double)g_holdFrom[0]), sqrt((double)g_holdTo[0]),
                 sqrt((double)g_holdFrom[1]), sqrt((double)g_holdTo[1]),
                 sqrt((double)g_holdFrom[2]), sqrt((double)g_holdTo[2]));
