@@ -41,6 +41,13 @@ namespace Config {
         bool OptDefragLf = false;
         bool OptVulkanDXVK = false;
         bool OptTimingFix = false;
+        // Six crash guards, not one, and the key is named after the first of
+        // them: the CVar null write. It also gates the Lua table read guard, the
+        // GUID type check that crashes on battleground load, the object reaper's
+        // null write on unlink, and two more null and bounds checks. The launcher
+        // entry says so now - it used to read "Null Pointer CVar Safeguard", and a
+        // tester turning that off to isolate something would have lost five
+        // unrelated crash fixes without being told.
         bool OptCvarNullGuard = true; // Safe default: enabled
         // Null-callback crash in the client's device callback list. On by
         // default: on a healthy client it is one read-only pointer walk per

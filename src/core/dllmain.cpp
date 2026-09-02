@@ -7365,7 +7365,21 @@ static DWORD WINAPI MainThread(LPVOID param) {
 #if !TEST_DISABLE_CVAR_NULL_GUARD
     // Was installed unconditionally, so a log could read CvarNullGuard=0 and
     // still show "[CvarGuard] ACTIVE". The setting has existed all along.
-    if (Config::g_settings.OptCvarNullGuard) InstallCvarNullGuard();
+    // Six guards hang off this one switch and the log should say so, because the
+    // switch is named after the first of them. A reader who turns off "Client
+    // Crash Guards" to isolate a problem is turning off all six, and one who
+    // turned off the old "Null Pointer CVar Safeguard" was doing that without
+    // knowing it.
+    if (Config::g_settings.OptCvarNullGuard) {
+        Log("[CrashGuards] ON - this one switch covers the CVar null write, the "
+            "Lua table read, the GUID type check that crashes on battleground "
+            "load, the object reaper unlink, and two further null and bounds "
+            "checks. Each reports separately below.");
+        InstallCvarNullGuard();
+    } else {
+        Log("[CrashGuards] OFF - all six client crash guards are disabled, not "
+            "just the CVar one the key is named after.");
+    }
 #endif
     if (Config::g_settings.OptVulkanDXVK) {
         InstallD3DEvictPatch();
