@@ -357,7 +357,6 @@ namespace WowOptimizeLauncher {
                 { "Memory Pressure Governor", new SettingItem("General", "MemoryPressure", true, null, "Sheds caches and adjusts texture footprint dynamically under critical 32-bit virtual address (VA) space limits.") },
                 { "Heap Compactor", new SettingItem("General", "HeapCompactor", true, null, "Defragments the client heap every 5 seconds to prevent Out-Of-Memory (OOM) crashes during teleports.") },
                 { "Lock-Free Heap Defragmenter", new SettingItem("General", "DefragLf", false, null, "Experimental defragmentation on the main thread using lock-free structures. Bypasses standard heap serialization. Skipped by Enable All: experimental, and it bypasses heap serialization.", true) },
-                { "Render Hooks", new SettingItem("General", "RenderHooks", false, null, "Frame timing and render-path instrumentation. Nothing to do with defragmenting a heap, which is what the switch that used to gate it is called - if you have never set this key it follows whatever the Lock-Free Heap Defragmenter is set to, so nothing changes for you by updating.") },
                 { "Async Worker Pool", new SettingItem("General", "AsyncWorkerPool", false, null, "Background worker threads used by the async subsystems. Also gated by the Lock-Free Heap Defragmenter until now, for no reason anyone recorded. Inherits that setting when its own key is absent. Forced off under Wine and Rosetta, where the workers blocked the main thread.") },
                 { "Thread Affinity", new SettingItem("General", "ThreadAffinity", false, null, "Pins client threads to cores chosen from the CPU topology. The third thing the Lock-Free Heap Defragmenter used to gate. Inherits that setting when absent, and Compatibility Mode still overrides it off.") },
                 { "D3D9Ex Vulkan DXVK Support", new SettingItem("General", "VulkanDXVK", false, null, "Optimizes DLL hook integration to work cleanly with DXVK (requires placing a d3d9.dll Vulkan wrapper in the game folder).") },
@@ -1242,7 +1241,6 @@ namespace WowOptimizeLauncher {
             InheritIfAbsent(present, "Win32ApiCaches", "TimingFix");
             InheritIfAbsent(present, "DebugApiHooks", "CvarNullGuard");
             InheritIfAbsent(present, "LockSpinHooks", "DefragLf");
-            InheritIfAbsent(present, "RenderHooks", "DefragLf");
             InheritIfAbsent(present, "AsyncWorkerPool", "DefragLf");
             InheritIfAbsent(present, "ThreadAffinity", "DefragLf");
             InheritIfAbsent(present, "SimdGeometry", "StrStrSse2");

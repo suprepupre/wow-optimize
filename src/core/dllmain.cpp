@@ -9012,7 +9012,8 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] D3D9 State Manager (15 hooks)",   d3d9StateOk ? " OK " : "SKIP");
     Log("  [%s] Render Hooks (anim+backbuffer)",    renderHooksOk ? " OK " : "SKIP");
     Log("  [%s] SIMD Hooks (SSE2 matrix+frustum)", simdHooksOk ? " OK " : "SKIP");
-    Log("  [%s] Logic Hooks (CT+UI+heartbeat)",    logicHooksOk ? " OK " : "SKIP");
+    Log("  [%s] Logic Hooks (CT+UI+heartbeat) - installs no hooks, see above",
+        logicHooksOk ? " OK " : "SKIP");
     Log("  [%s] Memory Hooks (slabs+GUID)",        memHooksOk ? " OK " : "SKIP");
     Log("  [%s] Async Hooks (workers+particles)",  asyncHooksOk ? " OK " : "SKIP");
 

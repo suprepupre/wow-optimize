@@ -78,8 +78,20 @@ bool InstallRenderHooks(void) {
         Log("[RenderHooks] Waiting for D3D9 state manager to patch device");
     }
 
-    Log("[RenderHooks] Initialized - backbuffer lock skip");
-    return true;
+    // What this function does and what its switch controls, said plainly because
+    // a commit yesterday split a launcher tickbox out for it on the belief that it
+    // gated the render path. It does not.
+    //
+    // Nothing is installed here - there is no CreateHook in this file. The one
+    // piece of real work the module does is in OnFrameRenderHooks, which clears
+    // the render-state dedup cache once a frame, and that is called
+    // unconditionally from the frame pump rather than through this switch. So the
+    // switch decides whether these two log lines appear and nothing else, and the
+    // "backbuffer lock skip" this line used to claim was never implemented.
+    Log("[RenderHooks] NOT ACTIVE: no hook is installed here and there never was "
+        "a backbuffer lock skip. The per-frame render-state cache clear this "
+        "module does do runs from the frame pump regardless of this switch.");
+    return false;
 }
 
 void ShutdownRenderHooks(void) {

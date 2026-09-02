@@ -137,6 +137,12 @@ namespace Config {
         // left "SSE2 Boyer-Moore strstr" off, which is its default, silently lost
         // both. Inherits that switch when its own key is absent.
         bool OptSimdGeometry = false;
+        // Kept as an ini key with no tickbox: it gates InstallRenderHooks, which
+        // installs nothing. The one real thing that module does - clearing the
+        // render-state dedup cache once a frame - runs from the frame pump and is
+        // not gated at all. A tickbox for it was added and then removed the same
+        // day, because a switch that changes only whether a log line appears is
+        // worse than no switch.
         bool OptRenderHooks = false;
         bool OptAsyncWorkerPool = false;
         bool OptThreadAffinity = false;

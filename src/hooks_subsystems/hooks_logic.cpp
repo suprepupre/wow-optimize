@@ -753,14 +753,29 @@ bool InstallLogicHooks(void) {
     // DISABLED: Invariant script cache hooks cause ERROR #134 (stack leak on SEH paths).
     // The lua_pushnumber_ + fallback-to-original pattern leaks stack slots when exceptions
     // occur mid-push. These hooks provide marginal benefit (caching simple int lookups).
+    // Nothing is installed here, and the line below used to say so only as a
+    // "(0 hooks active)" at the end of a sentence naming four features.
+    //
+    // This module has no CreateHook call anywhere in its 805 lines. The combat
+    // text dispatch hook, the UI layout hook, the network heartbeat hook and the
+    // invariant script cache hooks were all either never written or disabled -
+    // the script one says so on the line above. What is left maintains two caches
+    // that nothing outside this file reads and flushes a packet queue that
+    // nothing fills, once a frame, for as long as the session lasts.
+    //
+    // It is left in place rather than deleted because deleting eight hundred
+    // lines is a change that wants a session behind it, and it is reported as
+    // doing nothing rather than as four features by name, because a reader who
+    // believes a feature runs is worse off than one who knows it does not.
     int installed = 0;
     Log("[LogicHooks] Invariant script cache hooks DISABLED (stack leak safety)");
 
 
-    Log("[LogicHooks] Initialized — combat text batching, UI layout cache, "
-        "network heartbeat filter, invariant script cache (%d hooks active)", installed);
-
-    return true;
+    Log("[LogicHooks] NOT ACTIVE: %d hooks installed. Combat text batching, the "
+        "UI layout cache, the network heartbeat filter and the invariant script "
+        "cache are named in this module and none of them runs - there is no hook "
+        "in it anywhere. The caches it keeps are read by nothing.", installed);
+    return false;
 }
 
 void ShutdownLogicHooks(void) {
