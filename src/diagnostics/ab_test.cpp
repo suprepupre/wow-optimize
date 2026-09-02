@@ -143,12 +143,22 @@ int      g_rotIndex = 0;        // which offered subject is currently measured
 int      g_rotStints = 0;       // stints spent on it so far
 constexpr int kStintsPerSubject = 8;   // four ON/OFF pairs before moving on
 
-void NoteOffered(const char* name) {
-    if (!name || g_offeredCount >= kMaxOffered) return;
+// Returns the slot this name occupies, or -1 when it could not be recorded.
+//
+// The caller used to assume the slot was always g_offeredCount - 1, which is
+// wrong twice: a name already present returns without adding, so that index
+// belongs to a different module, and past the cap nothing is added at all and the
+// index is the last registered subject's. Either way a flag pointer or a stats
+// slot would have been written over someone else's. Fifteen subjects is nowhere
+// near the cap of thirty-two, so this would have stayed invisible until it was
+// not.
+int NoteOffered(const char* name) {
+    if (!name) return -1;
     for (int i = 0; i < g_offeredCount; ++i)
-        if (lstrcmpiA(g_offered[i], name) == 0) return;
+        if (lstrcmpiA(g_offered[i], name) == 0) return i;
+    if (g_offeredCount >= kMaxOffered) return -1;
     lstrcpynA(g_offered[g_offeredCount], name, (int)sizeof(g_offered[0]));
-    ++g_offeredCount;
+    return g_offeredCount++;
 }
 
 void LogOffered(const char* lead) {
@@ -247,21 +257,29 @@ bool IsSubject(const char* name, bool* flag) {
     // so a session with a mistyped subject can still print the list of names that
     // would have worked.
     if (!Config::g_settings.OptAbTest) return false;
-    NoteOffered(name);
-    if (flag && g_offeredCount > 0) g_flag[g_offeredCount - 1] = flag;
-    if (!g_active || !name) return false;
+    const int slot = NoteOffered(name);
+    if (slot < 0) {
+        // Past the cap. Registering it as a subject would mean sharing another
+        // module's flag and stats, so it is left out and said out loud rather
+        // than quietly measured as somebody else.
+        Log("[AbTest] '%s' could not register - only %d subjects fit, so it "
+            "cannot be tested this session", name ? name : "(null)", kMaxOffered);
+        return false;
+    }
+    if (flag) g_flag[slot] = flag;
+    if (!g_active) return false;
 
     if (g_rotate) {
         // Everything registered is a subject; which one is live is decided by the
         // rotation below, and the first registered starts.
         g_claimed = true;
-        if ((g_offeredCount - 1) != g_rotIndex) return false;
+        if (slot != g_rotIndex) return false;
         CountOpeningStint();
         return true;
     }
     if (lstrcmpiA(g_subject, name) != 0) return false;
     g_claimed = true;
-    g_rotIndex = g_offeredCount - 1;   // so the stats land in this subject's slot
+    g_rotIndex = slot;                 // so the stats land in this subject's slot
     CountOpeningStint();
     return true;
 }
