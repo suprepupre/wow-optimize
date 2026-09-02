@@ -127,6 +127,11 @@ anything.
   for** - thirteen options the DLL reads, every numeric key, and AbTestSubject,
   which the A/B test needs and which its own tooltip tells you to set by hand.
   Keys the launcher does not own are kept now.
+* **This tool was causing a 40 ms stall of its own**, every five minutes, on the
+  main thread, against a frame median near ten. Its five-minute report walked
+  the whole address space for figures another thread had already collected, and
+  so did the SavedVariables check - during a character switch, the heaviest
+  transition the client makes. Neither does now.
 * **Three modules announced features they do not implement.** One is 805 lines
   with no hook in it, naming four features; one claimed a "backbuffer lock skip"
   that was never written; one committed half a megabyte at startup for an
