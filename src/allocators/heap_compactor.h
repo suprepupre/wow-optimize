@@ -25,6 +25,10 @@ extern "C" SIZE_T HeapCompactor_GetLargestFreeBlock();
 // The low half on its own. The client allocates from below 2GB, so a caller
 // describing how much room was left at some moment wants this, not the total.
 extern "C" SIZE_T HeapCompactor_GetLargestFreeLowHalf();
+// The same figure from the monitor thread's last walk, with its age. No
+// VirtualQuery, so it is safe to call from inside a frame. Age 0 with a result
+// of 0 means the monitor has not run yet, not that nothing is free.
+extern "C" SIZE_T HeapCompactor_GetLastLowHalf(unsigned long* ageMsOut);
 extern "C" void HeapCompactor_GetStats(uint64_t* checks, uint64_t* compactions,
                                         SIZE_T* lastBlock, SIZE_T* minBlock, SIZE_T* maxBlock);
 

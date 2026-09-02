@@ -84,6 +84,15 @@ extern "C" void mi_collect(bool force);
 // Suspecting is not measuring, so it is timed and the region count is reported
 // with it. If it comes back at two milliseconds the suspicion is wrong and the
 // stall is somewhere else in the report.
+// The monitor thread's most recent walk, for the report to read instead of
+// walking again on the main thread. Written by one thread and read by another;
+// they are plain SIZE_T on 32-bit x86, so a read cannot tear, and a report that
+// caught a value mid-update would be one monitor interval out of date rather than
+// wrong.
+static volatile SIZE_T g_lastWalkFree = 0;
+static volatile SIZE_T g_lastWalkLow  = 0;
+static volatile DWORD  g_lastWalkTick = 0;
+
 static double   g_walkMsWorst = 0.0;
 static double   g_walkMsTotal = 0.0;
 static unsigned g_walkCount   = 0;
@@ -189,6 +198,14 @@ static DWORD WINAPI MonitorThread(LPVOID) {
         SIZE_T largestLow = 0;
         SIZE_T largestFree = GetLargestFreeBlock(&largestLow);
         g_checksPerformed++;
+
+        // Published for the report, which used to walk the address space again on
+        // the main thread to get the same two numbers. This thread has just paid
+        // for that walk off the main thread; there is no reason to pay again
+        // inside a frame.
+        g_lastWalkFree = largestFree;
+        g_lastWalkLow  = largestLow;
+        g_lastWalkTick = GetTickCount();
 
         // The low half is what actually runs out, and it is what the trigger
         // reads now.
@@ -390,8 +407,30 @@ void HeapCompactor_Shutdown() {
 // Printed from the periodic report, not from Shutdown: this DLL exits through
 // TerminateProcess and a teardown-only counter never reaches a log.
 extern "C" void HeapCompactor_LogStats() {
-    SIZE_T low = 0;
-    SIZE_T all = GetLargestFreeBlock(&low);
+    // Read the monitor thread's last walk rather than walking again here.
+    //
+    // This function runs on the main thread from the periodic report, and the
+    // walk it used to do is VirtualQuery over the whole address space, one call
+    // per region. Tester logs carry "periodic maintenance took 42.6 ms" against a
+    // frame median near ten, and the session that recorded it had the low half
+    // fragmented to a 19 MB largest block - tens of thousands of regions.
+    //
+    // The monitor thread walks every ten seconds anyway and now publishes what it
+    // found. A report reading that is at most one interval out of date, which for
+    // a figure printed every five minutes is nothing, and the age is printed so
+    // nobody has to assume it.
+    //
+    // Before the monitor has run once there is nothing to read, and the walk
+    // happens here - once, at the first report.
+    SIZE_T low = 0, all = 0;
+    DWORD  ageMs = 0;
+    if (g_lastWalkTick) {
+        all   = g_lastWalkFree;
+        low   = g_lastWalkLow;
+        ageMs = GetTickCount() - g_lastWalkTick;
+    } else {
+        all = GetLargestFreeBlock(&low);
+    }
 
     // Printed before the numbers it produced, because if this walk is what a
     // tester is seeing as a forty-millisecond stall then it is the more important
@@ -404,6 +443,10 @@ extern "C" void HeapCompactor_LogStats() {
             "against it.",
             g_walkCount, g_walkMsTotal, g_walkMsWorst, g_walkRegionsWorst);
     }
+    Log("[HeapCompactor] the figures below are %lu ms old - taken by the monitor "
+        "thread, not walked again here. That walk is VirtualQuery over the whole "
+        "address space and this function runs inside a frame.",
+        (unsigned long)ageMs);
     Log("[HeapCompactor] %uMB largest free below 2GB, %uMB across all address "
         "space; %llu compactions, %lluKB recovered, next attempt no sooner than "
         "%us%s",
@@ -424,6 +467,19 @@ extern "C" SIZE_T HeapCompactor_GetLargestFreeLowHalf() {
     SIZE_T low = 0;
     GetLargestFreeBlock(&low);
     return low;
+}
+
+// The same figure without the walk, for callers on the main thread.
+//
+// Returns the monitor thread's last result and how old it is, or 0 with an age of
+// 0 when the monitor has not run yet - which is a different fact from "no memory
+// left" and the caller has to be able to tell them apart. The walk is
+// VirtualQuery over the whole address space and costs tens of milliseconds on a
+// fragmented one; that is not a price a diagnostic should charge inside a frame.
+extern "C" SIZE_T HeapCompactor_GetLastLowHalf(unsigned long* ageMsOut) {
+    if (!g_lastWalkTick) { if (ageMsOut) *ageMsOut = 0; return 0; }
+    if (ageMsOut) *ageMsOut = (unsigned long)(GetTickCount() - g_lastWalkTick);
+    return g_lastWalkLow;
 }
 
 // Cheap cached read (no VirtualQuery walk) for per-frame consumers like the GC

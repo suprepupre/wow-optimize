@@ -4024,11 +4024,26 @@ static void NoteSavedVariablesWrite(const char* path) {
         pmc.cb = sizeof(pmc);
         unsigned wsMb = GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))
                       ? (unsigned)(pmc.WorkingSetSize / (1024 * 1024)) : 0u;
-        Log("!!!   at that moment: working set %u MB, largest free block below "
-            "2GB %u MB. Bad names so far this session: %u.",
-            wsMb,
-            (unsigned)(HeapCompactor_GetLargestFreeLowHalf() / (1024 * 1024)),
-            g_savedVarsBadNames);
+        // The cached figure, not a fresh walk. This fires during a character
+        // switch - already the heaviest transition the client makes, and the one
+        // a tester reported as a 139-second loading screen - and a VirtualQuery
+        // pass over a fragmented address space costs tens of milliseconds. Ten
+        // seconds of staleness changes nothing about "was it out of room"; adding
+        // a stall to the moment being investigated changes the thing being
+        // measured.
+        unsigned long vaAgeMs = 0;
+        SIZE_T lowFree = HeapCompactor_GetLastLowHalf(&vaAgeMs);
+        if (vaAgeMs == 0 && lowFree == 0) {
+            Log("!!!   at that moment: working set %u MB. The free-space figure is "
+                "not available - the heap monitor had not run yet, which is not "
+                "the same as no memory being free. Bad names so far: %u.",
+                wsMb, g_savedVarsBadNames);
+        } else {
+            Log("!!!   at that moment: working set %u MB, largest free block below "
+                "2GB %u MB as of %lu ms earlier. Bad names so far this session: %u.",
+                wsMb, (unsigned)(lowFree / (1024 * 1024)), vaAgeMs,
+                g_savedVarsBadNames);
+        }
         return;
     }
 
