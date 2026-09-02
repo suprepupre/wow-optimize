@@ -121,6 +121,7 @@
 #include "version.h"
 #include "config.h"
 #include "ab_test.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -254,6 +255,10 @@ static unsigned RunCore(float* dst, const unsigned short* batch,
             TransposeSse(s, b);
             if (memcmp(a, b, sizeof(a)) != 0) {
                 ++g_mismatched;
+                if (g_mismatched == 1)
+                    Verdict::Add(Verdict::Bad,
+                                 "BoneMatrixUpload read the bone matrix layout "
+                                 "wrongly and retired itself for this session");
                 // Hand back the client's answer. Unpatching from inside the
                 // patched code is not safe, so the flag is set and every bone
                 // after this one takes the scalar path; the report says so.
@@ -473,6 +478,9 @@ void LogStats() {
         Log("[BoneUpload] %d loop(s) patched, and neither has run. That is a "
             "measurement: either nothing skinned was drawn, or the patches are "
             "not on the path they were read from.", patched);
+        Verdict::Add(Verdict::Warn,
+                     "BoneMatrixUpload patched the client and neither loop ran - "
+                     "five bytes of wow.exe were changed for nothing");
         return;
     }
 
