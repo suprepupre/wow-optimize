@@ -424,12 +424,23 @@ static volatile DWORD g_memFrameIndex = 0;
 
 bool InstallMemoryHooks(void) {
     // Initialize aligned slabs
-    if (!InitAlignedSlabs()) {
-        Log("[MemoryHooks] WARNING: Aligned slab init failed — falling back to HeapAlloc");
-    } else {
-        Log("[MemoryHooks] Aligned slabs: %d tiers (64B–8192B), %zu KB total",
-            SLAB_TIERS, (SLAB_SIZE * SLAB_TIERS) / 1024);
-    }
+    // The slabs are not allocated, because nothing allocates from them.
+    //
+    // InitAlignedSlabs used to VirtualAlloc eight tiers of 64 KB with MEM_COMMIT
+    // at startup - half a megabyte of committed memory - and Aligned64Alloc and
+    // Aligned64Free, the only two functions that touch them, have no caller
+    // anywhere in this project. Nor does the GUID cache below: InsertGuid,
+    // LookupGuid and RemoveGuid are each defined once and called from nothing,
+    // because the three addresses they would have been hooked at are unfilled
+    // placeholders and say so on the lines below.
+    //
+    // Half a megabyte is not much until you read a tester log where the low 2 GB
+    // has 149 MB free and a largest block of 19 MB. It was committed for a
+    // feature that cannot run.
+    Log("[MemoryHooks] aligned slabs NOT allocated: %d tiers of %zu KB would "
+        "have been committed at startup and nothing in this project allocates "
+        "from them - Aligned64Alloc has no caller.",
+        SLAB_TIERS, SLAB_SIZE / 1024);
 
     // Initialize GUID cache
     memset(g_guidCache, 0, sizeof(g_guidCache));
