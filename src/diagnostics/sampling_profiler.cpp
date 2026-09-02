@@ -255,6 +255,12 @@ static void BuildKnownFuncTable() {
         // was.
         { 0x0082F0F0,  6267, "M2_AnimateModel" },        // bone tracks + matrix per bone
         { 0x00828680,   885, "M2_AnimTrackQuat" },
+        // 3.35% of executing time in the corrected profile, and it showed as
+        // "wow!0x00829D29" - a raw address that cost a func_profile call to place.
+        // The loop it names transposes a 4x4 bone matrix into three vec4s with
+        // twelve x87 load/store pairs; BoneMatrixUpload replaces it.
+        { 0x00829BA0,   660, "M2_BoneMatrixUpload" },
+        { 0x00829E40,   247, "M2_BoneMatrixUploadOuter" },  // its only caller
         // Quaternion track, not a vector one: it unpacks each component from
         // a uint16 as (double)v * 0.000030518044 - 1.0, eight or sixteen times
         // per call, each through a store and an fild.
