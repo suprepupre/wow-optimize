@@ -45,6 +45,7 @@
 #include <cstring>
 
 #include "session_verdict.h"
+#include "config.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -126,6 +127,36 @@ void LogStats() {
     ReleaseSRWLockShared(&g_lock);
 
     Log("[Verdict] === WHAT WENT WRONG THIS SESSION ===");
+
+    // What was armed, in one line, because answering "was the A/B test even on"
+    // has meant grepping a hundred-and-thirty-eight-line settings dump on every
+    // log read this week. A measurement that was off finds nothing and says
+    // nothing, and that has to be distinguishable from finding nothing.
+    {
+        char armed[256];
+        int w = _snprintf(armed, sizeof(armed) - 1, "[Verdict] measuring:");
+        const struct { bool on; const char* name; } m[] = {
+            { Config::g_settings.OptAbTest,           "A/B test" },
+            { Config::g_settings.OptFlightRecorder,   "flight recorder" },
+            { Config::g_settings.OptLuaCompileCensus, "Lua compile census" },
+            { Config::g_settings.OptSamplingProfiler, "sampling profiler" },
+            { Config::g_settings.OptShadowStateProbe, "shadow probe" },
+            { Config::g_settings.OptNetDiag,          "disconnect watch" },
+            { Config::g_settings.OptNoClientPatches,  "NO CLIENT PATCHES" },
+        };
+        int any = 0;
+        for (int i = 0; i < (int)(sizeof(m) / sizeof(m[0])); ++i) {
+            if (!m[i].on) continue;
+            if (w > 0 && w < (int)sizeof(armed) - 40)
+                w += _snprintf(armed + w, sizeof(armed) - 1 - w, "%s %s",
+                               any ? "," : "", m[i].name);
+            ++any;
+        }
+        armed[sizeof(armed) - 1] = 0;
+        if (any) Log("%s", armed);
+        else     Log("[Verdict] measuring: nothing. Every instrument is off, so "
+                     "an empty report below says nothing about the session.");
+    }
 
     if (used == 0) {
         Log("[Verdict] Nothing was flagged. That is a report from the instruments "
