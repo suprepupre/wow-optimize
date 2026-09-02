@@ -212,7 +212,8 @@ anything.
   three stores. Nothing in it is computed, only copied, so the result is the
   same bit for bit - and it still checks the first twenty thousand bones both
   ways, byte for byte, because the layout could be misread where the maths
-  cannot be wrong.
+  cannot be wrong. There turned out to be two copies of that loop in two draw
+  paths; both are covered.
 * **Spread Model Animation** now decides by distance from the camera rather than
   by how crowded the scene is, after proving at runtime which field carries the
   position. Models within 40 yards are never throttled.
