@@ -64,11 +64,17 @@
 // The x87 stack is balanced in the original and untouched here, so it is
 // unchanged either way. No MMX, so no emms.
 //
-// One thing the replacement does that the client does not: the two loads that
-// reach the bone index table, [edi+150h] and [+7Ch], are loop-invariant and the
-// client repeats them every bone. Nothing in the loop writes them and the loop
-// calls nothing, so they are read once. That is two loads a bone on top of the
-// transpose, and it is the only behavioural difference.
+// Three loads are hoisted that the client repeats every bone: [edi+150h] and
+// the [+7Ch] behind it, which reach the bone index table, and [esi+0Ch], the
+// count it re-reads for the loop condition. Nothing in the loop writes any of
+// them and the loop calls nothing, so reading them once is the same program.
+// That is the only behavioural difference between the two versions.
+//
+// This is a raw write, not a MinHook detour, so the duplicate-hook detector
+// does not see it. A detour on sub_829BA0 itself would not collide - that lands
+// on the function's first bytes and this is 354 bytes in - but a second tool
+// patching the same loop would, silently. The byte check catches that only if
+// the other tool got there first.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
