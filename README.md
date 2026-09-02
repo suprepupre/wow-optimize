@@ -59,9 +59,17 @@ anything.
   when you press Scroll Lock. Press it the moment you see something wrong and the
   log carries that second frame by frame instead of a ten-second average.
 * Every log now opens its periodic report with **what went wrong this session** -
-  freezes, long loads, disconnects, address space running out, a SavedVariables
-  file written under a name matching no addon. All of it was already in the logs;
+  freezes and where the thread was stuck, long loads, disconnects, address space
+  running out, a SavedVariables file written under a name matching no addon, an
+  address something else had already hooked. All of it was already in the logs;
   none of it was findable.
+* The recorder writes itself out for the three events **nobody can react to**: a
+  disconnect, a freeze - the client is not reading your keyboard then - and a
+  SavedVariables file written under a bad name, which you would only notice by
+  looking at the folder days later.
+* Three instruments now catch their own impossible numbers: shares that do not
+  sum, a per-frame draw count no client produces, and work that does not fit in
+  the frame it claims to sit in. All three of those shipped, once each.
 
 ### Fixed
 
@@ -79,6 +87,14 @@ anything.
   measured; they are now, with the slowest single write and its filename.
 * **The draw-call census divided by sleeps instead of frames** and reported 34,671
   draw calls per frame. The real figure is 1,323.
+* **The Lua VM garbage collector was being stepped during loading screens**, while
+  the client builds large tables and while every other cache here stands aside.
+  Also settled: the frame limiter, which the one crash dump with this DLL in the
+  stack pointed at, is a safe place to collect from after all - all three of its
+  callers run it immediately after the frame is presented.
+* **The Lock-Free Heap Defragmenter switch also gated the render hooks, the async
+  worker pool and thread affinity.** Three separate options now, each inheriting
+  the old setting, so nothing changes for you by updating.
 * **The Lua compile census and Reuse Compiled Scripts were fighting over one
   address**, so with the census on the cache installed nothing - the one
   configuration that could weigh the cache was the one where it could not run.
