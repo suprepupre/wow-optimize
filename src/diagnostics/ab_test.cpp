@@ -232,6 +232,16 @@ bool FeatureOn() { return !g_active || g_onNow; }
 bool Running()   { return g_active; }
 const char* Subject() { return g_active ? g_subject : nullptr; }
 
+// The opening stint. Init cannot count it, because in a named run the slot the
+// subject will occupy is not known until that module registers - counting it in
+// slot 0 put it against whichever module happened to register first.
+static void CountOpeningStint() {
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+    g_on[g_rotIndex].stints = 1;
+}
+
 bool IsSubject(const char* name, bool* flag) {
     // Recorded whether or not it matches, and whether or not a test is running,
     // so a session with a mistyped subject can still print the list of names that
@@ -245,11 +255,14 @@ bool IsSubject(const char* name, bool* flag) {
         // Everything registered is a subject; which one is live is decided by the
         // rotation below, and the first registered starts.
         g_claimed = true;
-        return (g_offeredCount - 1) == g_rotIndex;
+        if ((g_offeredCount - 1) != g_rotIndex) return false;
+        CountOpeningStint();
+        return true;
     }
     if (lstrcmpiA(g_subject, name) != 0) return false;
     g_claimed = true;
     g_rotIndex = g_offeredCount - 1;   // so the stats land in this subject's slot
+    CountOpeningStint();
     return true;
 }
 
@@ -339,7 +352,8 @@ bool Init() {
         g_periodMs = (DWORD)Config::g_settings.AbTestPeriodMs;
         if (g_periodMs < 5000)   g_periodMs = 5000;
         if (g_periodMs > 120000) g_periodMs = 120000;
-        g_on[0].stints = 1;
+        // The opening stint is counted by CountOpeningStint when the first
+        // module registers, because only then is the slot known.
         Log("[AbTest] ACTIVE, rotating: every feature that registers gets %d "
             "stints of %u s in turn, so one session measures all of them "
             "instead of one per session. Only the subject being measured "
@@ -368,7 +382,8 @@ bool Init() {
 
     g_active = true;
     g_onNow = true;
-    g_on[0].stints = 1;
+    // Same here: CountOpeningStint puts it in the slot the named subject
+    // turns out to occupy.
 
     Log("[AbTest] ACTIVE on '%s': it runs for %u s, then does not for %u s, and "
         "so on for the session. Frame times are collected separately for the two "
@@ -513,9 +528,25 @@ void LogStats() {
             "share of the session, and the stint counts below are what say "
             "whether that share was enough.", kStintsPerSubject);
     }
+    // Which name a slot is reported under.
+    //
+    // Rotating, every slot is a real subject and carries its own name. Named, only
+    // one slot is used - and when the name in the ini matched nothing, the frames
+    // landed in slot 0 while slot 0 belongs to whichever module registered first.
+    // Printing "NO MODULE ANSWERED TO 'AnimQuatUnpack'" when the ini said
+    // "AnimQatUnpack" would name the wrong thing entirely, so a named run reports
+    // under the configured name whatever slot the frames are in.
     for (int i = 0; i < g_offeredCount; ++i) {
         if (!g_on[i].frames && !g_off[i].frames) continue;
-        ReportSubject(i, g_offered[i]);
+        ReportSubject(i, g_rotate ? g_offered[i] : g_subject);
+    }
+
+    // A named run whose subject matched nothing has no frames anywhere - the
+    // loop above prints nothing, and silence would read as a clean run.
+    if (!g_rotate && !g_claimed) {
+        Log("[AbTest] NO MODULE ANSWERED TO '%s'. Nothing was alternated and "
+            "nothing was measured.", g_subject);
+        LogOffered("check the spelling against these");
     }
 }
 
