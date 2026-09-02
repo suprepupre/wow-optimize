@@ -205,6 +205,14 @@ anything.
 
 ### New, all off by default
 
+* **Bone Matrix Upload (SSE2)** - the largest entry in the measured profile
+  with nothing shipped against it, 3.35% of executing time. The game moves
+  each bone matrix into the buffer the GPU skins from with twelve x87 load and
+  store pairs; this does the same transpose with four loads, seven shuffles and
+  three stores. Nothing in it is computed, only copied, so the result is the
+  same bit for bit - and it still checks the first twenty thousand bones both
+  ways, byte for byte, because the layout could be misread where the maths
+  cannot be wrong.
 * **Spread Model Animation** now decides by distance from the camera rather than
   by how crowded the scene is, after proving at runtime which field carries the
   position. Models within 40 yards are never throttled.
