@@ -127,11 +127,17 @@ anything.
   for** - thirteen options the DLL reads, every numeric key, and AbTestSubject,
   which the A/B test needs and which its own tooltip tells you to set by hand.
   Keys the launcher does not own are kept now.
-* **This tool was causing a 40 ms stall of its own**, every five minutes, on the
-  main thread, against a frame median near ten. Its five-minute report walked
-  the whole address space for figures another thread had already collected, and
-  so did the SavedVariables check - during a character switch, the heaviest
-  transition the client makes. Neither does now.
+* **This tool was walking the whole address space on the main thread, inside a
+  frame, up to once a second** - to publish one fragmentation number the
+  companion addon displays. On a fragmented 3GB space that walk is tens of
+  thousands of system calls. The same walk, once every five minutes from the
+  periodic report, is what put "STALL periodic maintenance took 42.6 ms" in
+  tester logs against a frame median near ten; the once-a-second one had been
+  running the whole time without ever making a spike large enough to name. Four
+  copies existed. Three were on the main thread and two of those are gone,
+  replaced by a reading a background thread already takes every ten seconds.
+  The third is the stutter snapshot, which needs detail no cached value has -
+  it now prints what collecting it cost.
 * **Three modules announced features they do not implement.** One is 805 lines
   with no hook in it, naming four features; one claimed a "backbuffer lock skip"
   that was never written; one committed half a megabyte at startup for an
