@@ -230,6 +230,28 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         Log("[Config]   [General] SessionLogsToKeep=%d", g_settings.SessionLogsToKeep);
         Log("[Config] %d set in the file, %d left at defaults.", fromFile, defaulted);
 
+        // The settings with no tickbox.
+        //
+        // Every one of these is read above and can be set, and none of them has
+        // an entry in the launcher - so a tester who is asked to try one has no
+        // way to find it, and until this session the launcher's Save deleted the
+        // line if they wrote it by hand. Listing them is not an invitation to
+        // turn them all on: they are off by default because several have frozen
+        // or crashed a client, and the two that did are named.
+        //
+        // Kept in step by the release check that compares the launcher's
+        // SettingItem list against the keys Config::Load reads. A name here that
+        // has since gained a tickbox is wrong in the harmless direction; one
+        // missing from here is the defect the check exists to catch.
+        Log("[Config] Settings with no launcher entry, set by hand in the ini "
+            "and now preserved when the launcher saves: AddonDispatcher, "
+            "AsyncTerrainLoader, CrtMimalloc, D3d9RenderThread, MimallocLarge, "
+            "MpqAsyncDecompress, NameplateMT, PacketOffload, RcuObjMgr, "
+            "SavedVarsAsync, UnitAuraFast, VaArena, WorldStateCoalesce. "
+            "MimallocLarge has a known heap crash and D3d9RenderThread moves "
+            "draw submission off the main thread; the rest are off because "
+            "nothing has measured them, not because they are known bad.");
+
         if (haveFile) ReportDuplicateKeys(path);
     }
 

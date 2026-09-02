@@ -10600,10 +10600,16 @@ static bool InstallVAArena() {
     return false;
 #else
     // Opt-in: the arena hooks VirtualAlloc/VirtualFree process-wide, so it stays
-    // off unless a tester explicitly enables it in the launcher. Default users
-    // are unaffected - we return before reserving anything or installing hooks.
+    // off unless a tester enables it deliberately. Default users are unaffected -
+    // we return before reserving anything or installing hooks.
+    //
+    // The line below used to name a launcher tickbox called "Segregated VA
+    // Arena". There is no such entry and there never was, so the one instruction
+    // it gave a tester was to look for something that does not exist. The key is
+    // real; only the place to set it was wrong.
     if (!Config::g_settings.OptVaArena) {
-        Log("VA Arena: DISABLED (opt-in; enable 'Segregated VA Arena' in the launcher to test)");
+        Log("VA Arena: DISABLED (opt-in, and there is no tickbox for it - set "
+            "VaArena=1 under [General] in wow_opt.ini, in the WTF folder)");
         return false;
     }
 
