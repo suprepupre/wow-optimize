@@ -495,6 +495,35 @@ static void ReportSubject(int i, const char* name) {
                     "a feature worth under a percent of main-thread time cannot show "
                     "there. When the two disagree, this line is the one measuring the "
                     "feature and the frame line is measuring the session.");
+
+                // The calibration case, checked rather than left for a reader to
+                // remember. MatrixVectorSse2 was measured at 3.333 ns against
+                // 2.497 ns for the code it replaces, output bit-identical - it is
+                // slower, and the harness has to say so. A calibration case only
+                // helps if somebody notices the answer, so it goes to the summary
+                // at the top of the log either way.
+                if (lstrcmpiA(name, "MatrixVectorSse2") == 0) {
+                    if (tOn < tOff) {
+                        Verdict::Add(Verdict::Warn,
+                                     "the A/B harness reports MatrixVectorSse2 as "
+                                     "FASTER, and it is known to be slower - "
+                                     "suspect the measurement, not the feature");
+                        Log("[AbTest]   THIS IS THE CALIBRATION CASE AND IT CAME OUT "
+                            "BACKWARDS. A standalone harness measured this "
+                            "replacement at 3.333 ns against 2.497 ns for the code "
+                            "it replaces, with output bit-identical. Something here "
+                            "is measuring wrongly and every other figure in this "
+                            "report is suspect.");
+                    } else {
+                        Verdict::Add(Verdict::Note,
+                                     "the A/B harness got the calibration case "
+                                     "right: MatrixVectorSse2 measured slower, "
+                                     "which is what it is");
+                        Log("[AbTest]   this is the calibration case and it came out "
+                            "the right way round - slower, which is what it is. "
+                            "That is one reason to believe the other numbers here.");
+                    }
+                }
             } else if (g_on[i].workCalls || g_off[i].workCalls) {
                 Log("[AbTest]   the call was timed in only one of the two halves, so "
                     "there is nothing to compare it against.");
