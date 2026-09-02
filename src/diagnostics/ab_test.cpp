@@ -64,6 +64,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <intrin.h>
 
 #include "ab_test.h"
@@ -109,6 +110,43 @@ uint32_t g_sampleSeq = 0;
 // samples to the mean. Anything past this is thrown away and counted.
 constexpr uint64_t kTickCeiling = 200000;   // ~50 us on any plausible clock
 uint64_t g_ticksDiscarded = 0;
+
+// Every name a module offered this session.
+//
+// The subject is set by hand in the ini, and nothing anywhere tells the reader
+// what the valid names are - so a typo, or a guess, produces a session that
+// measures nothing and a report that can only say so. The modules know their own
+// names because they pass them to IsSubject; collecting them costs one string
+// copy each at startup and turns the harness into its own documentation.
+constexpr int kMaxOffered = 32;
+char     g_offered[kMaxOffered][32] = {};
+int      g_offeredCount = 0;
+bool     g_wantList = false;    // AbTest on, no subject named
+
+void NoteOffered(const char* name) {
+    if (!name || g_offeredCount >= kMaxOffered) return;
+    for (int i = 0; i < g_offeredCount; ++i)
+        if (lstrcmpiA(g_offered[i], name) == 0) return;
+    lstrcpynA(g_offered[g_offeredCount], name, (int)sizeof(g_offered[0]));
+    ++g_offeredCount;
+}
+
+void LogOffered(const char* lead) {
+    if (g_offeredCount == 0) {
+        Log("[AbTest] %s - and no module offered a name, which means none of the "
+            "features that can be tested were switched on either", lead);
+        return;
+    }
+    char line[512];
+    int w = _snprintf(line, sizeof(line) - 1, "[AbTest] %s. Offered this session:", lead);
+    for (int i = 0; i < g_offeredCount && w > 0 && w < (int)sizeof(line) - 40; ++i)
+        w += _snprintf(line + w, sizeof(line) - 1 - w, " %s", g_offered[i]);
+    line[sizeof(line) - 1] = 0;
+    Log("%s", line);
+    Log("[AbTest] Only a feature that is itself switched on can offer a name, so "
+        "this list is what could be tested with the settings you are running, not "
+        "everything that exists.");
+}
 DWORD    g_phaseStart = 0;
 int      g_settle   = 0;
 uint64_t g_dropped  = 0;
@@ -174,6 +212,10 @@ bool Running()   { return g_active; }
 const char* Subject() { return g_active ? g_subject : nullptr; }
 
 bool IsSubject(const char* name) {
+    // Recorded whether or not it matches, and whether or not a test is running,
+    // so a session with a mistyped subject can still print the list of names that
+    // would have worked.
+    if (Config::g_settings.OptAbTest) NoteOffered(name);
     if (!g_active || !name || lstrcmpiA(g_subject, name) != 0) return false;
     g_claimed = true;
     return true;
@@ -241,9 +283,14 @@ bool Init() {
 
     lstrcpynA(g_subject, Config::g_settings.AbTestSubject, (int)sizeof(g_subject));
     if (!g_subject[0]) {
+        // Not a failure to report and forget. The modules initialise after this
+        // and will offer their names, so the list is printed from LogStats rather
+        // than here, where it would be empty.
+        g_wantList = true;
         Log("[AbTest] NOT active: AbTest is on but AbTestSubject names no feature, "
-            "so there is nothing to alternate. Put a feature name in wow_opt.ini, "
-            "for example AbTestSubject=LayoutRelinkFast.");
+            "so there is nothing to alternate. Set AbTestSubject in wow_opt.ini; "
+            "the names that would have worked are listed in the periodic report "
+            "below.");
         return false;
     }
 
@@ -268,7 +315,11 @@ bool Init() {
 
 void LogStats() {
     if (!Config::g_settings.OptAbTest) return;
-    if (!g_active) { Log("[AbTest] not running - nothing measured"); return; }
+    if (!g_active) {
+        if (g_wantList) LogOffered("no subject was named, so nothing was measured");
+        else            Log("[AbTest] not running - nothing measured");
+        return;
+    }
 
     Log("[AbTest] '%s' alternating every %u s. %llu frame(s) discarded around "
         "switches and loading screens.",
@@ -284,9 +335,8 @@ void LogStats() {
     if (!g_claimed) {
         Log("[AbTest]   NO MODULE ANSWERED TO '%s'. Nothing was alternated, both "
             "halves are the same client doing the same thing, and the numbers "
-            "below measure only noise. Check the spelling against the launcher's "
-            "ini key, and check that the feature itself is switched on.",
-            g_subject);
+            "below measure only noise.", g_subject);
+        LogOffered("check the spelling against these");
     } else if (g_standAside == 0) {
         Log("[AbTest]   '%s' claimed the test but its hot path was never reached "
             "during an OFF stint - so the two halves may still be identical. That "
