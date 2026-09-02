@@ -516,7 +516,7 @@ bool Init() {
         "main-thread profile (9.06%%). Verifying against the client for the first "
         "%ld calls before it changes anything.", (long)kLearnCalls);
 
-    g_abSubject = AbTest::IsSubject("LayoutRelinkFast");
+    g_abSubject = AbTest::IsSubject("LayoutRelinkFast", &g_abSubject);
     if (g_abSubject) {
         Log("[LayoutRelink] under A/B test: the shortcut is taken only during the "
             "test's ON stints, and the frame times either side are reported by "

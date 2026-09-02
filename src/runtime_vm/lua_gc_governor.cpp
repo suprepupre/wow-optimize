@@ -81,7 +81,7 @@ static double g_lastMemoryKB = 0.0;
 bool Init() {
     g_initialized = true;
     g_frSlotStep = FlightRecorder::RegisterSlot("gcstep");
-    g_abSubject = AbTest::IsSubject("LuaGcManual");
+    g_abSubject = AbTest::IsSubject("LuaGcManual", &g_abSubject);
     if (g_abSubject) {
         Log("[GCGovernor] under A/B test: during OFF stints the automatic "
             "collector is handed back at the stock 200/200 and nothing here "

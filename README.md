@@ -51,10 +51,14 @@ anything.
 
 * **A/B Test a Feature** turns one feature on and off in alternating stints while
   you play, so both halves see the same zone, the same addons and the same
-  machine. Ten features can be tested this way, including the one that targets
-  the largest single entry in the profile. It also times the replaced call
-  directly, because a feature worth under one percent of main-thread time cannot
-  show up in frame time at all.
+  machine. Fifteen features can be tested this way, including the one that
+  targets the largest single entry in the profile and the two the client calls
+  most - 268 and 155 million times a session. Set it to `all` and it takes each
+  in turn, so one long session measures every one of them. It also times the
+  replaced call directly, because a feature worth under one percent of
+  main-thread time cannot show up in frame time at all. One subject has a known
+  answer and is there to check the measurement itself: a replacement already
+  measured as slower than the code it replaces.
 * **Flight Recorder** keeps the last 512 frames and writes 240 of them to the log
   when you press Scroll Lock. Press it the moment you see something wrong and the
   log carries that second frame by frame instead of a ten-second average. **On by

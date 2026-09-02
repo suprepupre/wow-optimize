@@ -265,7 +265,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("FrustumAabb");
+    g_abSubject = AbTest::IsSubject("FrustumAabb", &g_abSubject);
     if (g_abSubject) {
         Log("[FrustumAabb] under A/B test: it alternates on and off in stints "
             "and AbTest reports the frame times either way. The correctness "

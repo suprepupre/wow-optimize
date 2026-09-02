@@ -18,10 +18,18 @@ bool Running();
 // name to decide whether it is the one under test.
 const char* Subject();
 
-// Does the ini name this module? Call once at init and keep the answer. It also
-// records that some module claimed the name, which is what stops a typo in the
-// ini from being reported as "this feature makes no difference".
-bool IsSubject(const char* name);
+// Register this module as a possible subject and hand over the flag its hot path
+// tests. Call once at init.
+//
+// The flag is owned by the harness from that point on. With one subject named in
+// the ini it is set once and never changes. With AbTestSubject=all the harness
+// rotates: the flag of the subject currently being measured is true and every
+// other one is false, so only one feature alternates at a time and none of them
+// confound each other. A module needs no idea which mode it is in.
+//
+// Returns the flag's initial value, so a caller can log that it is the subject
+// without reading the flag back.
+bool IsSubject(const char* name, bool* flag);
 
 // For the hot path of the module that answered true above: true means stand
 // aside and let the client's own code run, because the test is in an OFF stint.

@@ -242,7 +242,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("LuaHGetDispatch");
+    g_abSubject = AbTest::IsSubject("LuaHGetDispatch", &g_abSubject);
     if (g_abSubject) {
         Log("[LuaHGet] under A/B test: it alternates on and off in stints "
             "and AbTest reports the frame times either way. The correctness "

@@ -267,7 +267,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("SegmentAabb");
+    g_abSubject = AbTest::IsSubject("SegmentAabb", &g_abSubject);
     if (g_abSubject) {
         Log("[SegmentAabb] under A/B test: it alternates on and off in stints "
             "and AbTest reports the frame times either way. The correctness "

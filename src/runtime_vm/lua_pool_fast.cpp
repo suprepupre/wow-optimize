@@ -379,7 +379,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("LuaPoolFast");
+    g_abSubject = AbTest::IsSubject("LuaPoolFast", &g_abSubject);
     if (g_abSubject) {
         Log("[LuaPoolFast] under A/B test: it alternates on and off in stints, "
             "and AbTest reports both the frame times and the cost of this "

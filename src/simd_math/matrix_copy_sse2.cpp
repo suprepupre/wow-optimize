@@ -1201,7 +1201,7 @@ static float* __fastcall Hooked_MatTranslateLocal(float* self, void* edx, float*
 // Install hooks
 // ================================================================
 bool InstallMatrixCopySSE2() {
-    g_abSubject = AbTest::IsSubject("M2MatrixSimd");
+    g_abSubject = AbTest::IsSubject("M2MatrixSimd", &g_abSubject);
     if (g_abSubject) {
         Log("[MatrixSSE2] under A/B test: the copy, the identity and the "
             "multiply alternate on and off in stints, and AbTest reports both "

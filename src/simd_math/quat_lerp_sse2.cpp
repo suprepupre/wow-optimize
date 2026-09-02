@@ -282,7 +282,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("QuatLerpSse2");
+    g_abSubject = AbTest::IsSubject("QuatLerpSse2", &g_abSubject);
     if (g_abSubject) {
         Log("[QuatLerp] under A/B test: it alternates on and off in stints, "
             "and AbTest reports both the frame times and the cost of this "

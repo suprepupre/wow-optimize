@@ -205,7 +205,7 @@ bool Init() {
     // Installed independently now, and 0x004C3420 is left to the module that owns
     // it rather than fought over.
     bool mulOk = false;
-    g_abSubject = AbTest::IsSubject("MatrixVectorSse2");
+    g_abSubject = AbTest::IsSubject("MatrixVectorSse2", &g_abSubject);
     if (g_abSubject) {
         Log("[SimdMathFast] under A/B test, and this is the calibration case: "
             "a standalone harness measured this replacement at 3.333 ns "

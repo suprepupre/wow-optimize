@@ -95,9 +95,13 @@ bool     g_active   = false;
 char     g_subject[32] = {};
 DWORD    g_periodMs = 20000;
 
+// How many subjects can register. Declared here because the per-subject arrays
+// below are sized by it.
+constexpr int kMaxOffered = 32;
+
 bool     g_onNow    = true;
 bool     g_claimed  = false;    // some module answered to the configured name
-uint64_t g_standAside = 0;      // hot-path calls the subject handed back
+uint64_t g_standAside[kMaxOffered] = {};   // hot-path calls each subject handed back
 
 // One call in 256 is timed. A power of two so the test is an AND, and a plain
 // counter because this is a hot path and a lock-prefixed increment there has
@@ -118,10 +122,26 @@ uint64_t g_ticksDiscarded = 0;
 // measures nothing and a report that can only say so. The modules know their own
 // names because they pass them to IsSubject; collecting them costs one string
 // copy each at startup and turns the harness into its own documentation.
-constexpr int kMaxOffered = 32;
 char     g_offered[kMaxOffered][32] = {};
+bool*    g_flag[kMaxOffered] = {};   // the hot-path flag each module handed over
 int      g_offeredCount = 0;
 bool     g_wantList = false;    // AbTest on, no subject named
+
+// Rotation: measure every subject in one session instead of one per session.
+//
+// A tester gives this project maybe one session a week. Fifteen subjects at that
+// rate is months, and the answer to most of them is wanted before deciding what
+// to build next. With AbTestSubject=all the harness measures one subject for a
+// few stints, then hands its flag back and takes the next.
+//
+// Only one subject alternates at a time, so none of them confounds another - the
+// rest run exactly as their own switches say. The cost is samples per subject: a
+// two-hour session gives each of fifteen roughly eight minutes, which is thin,
+// and the stint counts printed per subject are what says so.
+bool     g_rotate = false;
+int      g_rotIndex = 0;        // which offered subject is currently measured
+int      g_rotStints = 0;       // stints spent on it so far
+constexpr int kStintsPerSubject = 8;   // four ON/OFF pairs before moving on
 
 void NoteOffered(const char* name) {
     if (!name || g_offeredCount >= kMaxOffered) return;
@@ -151,8 +171,9 @@ DWORD    g_phaseStart = 0;
 int      g_settle   = 0;
 uint64_t g_dropped  = 0;
 
-Phase    g_on;
-Phase    g_off;
+// One pair per registered subject, so a rotating session keeps them apart.
+Phase    g_on[kMaxOffered];
+Phase    g_off[kMaxOffered];
 
 LARGE_INTEGER g_freq = {};
 LARGE_INTEGER g_last = {};
@@ -211,19 +232,30 @@ bool FeatureOn() { return !g_active || g_onNow; }
 bool Running()   { return g_active; }
 const char* Subject() { return g_active ? g_subject : nullptr; }
 
-bool IsSubject(const char* name) {
+bool IsSubject(const char* name, bool* flag) {
     // Recorded whether or not it matches, and whether or not a test is running,
     // so a session with a mistyped subject can still print the list of names that
     // would have worked.
-    if (Config::g_settings.OptAbTest) NoteOffered(name);
-    if (!g_active || !name || lstrcmpiA(g_subject, name) != 0) return false;
+    if (!Config::g_settings.OptAbTest) return false;
+    NoteOffered(name);
+    if (flag && g_offeredCount > 0) g_flag[g_offeredCount - 1] = flag;
+    if (!g_active || !name) return false;
+
+    if (g_rotate) {
+        // Everything registered is a subject; which one is live is decided by the
+        // rotation below, and the first registered starts.
+        g_claimed = true;
+        return (g_offeredCount - 1) == g_rotIndex;
+    }
+    if (lstrcmpiA(g_subject, name) != 0) return false;
     g_claimed = true;
+    g_rotIndex = g_offeredCount - 1;   // so the stats land in this subject's slot
     return true;
 }
 
 bool StandAside() {
     if (g_onNow) return false;
-    ++g_standAside;
+    ++g_standAside[g_rotIndex];
     return true;
 }
 
@@ -237,7 +269,7 @@ void TickOut(unsigned long long t) {
     if (!t) return;
     uint64_t d = __rdtsc() - t;
     if (d == 0 || d > kTickCeiling) { ++g_ticksDiscarded; return; }
-    Phase& p = g_onNow ? g_on : g_off;
+    Phase& p = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
     ++p.workCalls;
     p.workTicks += d;
 }
@@ -261,14 +293,32 @@ void OnFrame() {
         g_onNow = !g_onNow;
         g_phaseStart = now;
         g_settle = kSettleFrames;
-        ++(g_onNow ? g_on : g_off).stints;
+
+        // Hand the feature back and take the next one, when rotating. The
+        // move happens on an ON boundary so every subject is left switched
+        // on when it is not being measured, which is what its own setting
+        // asked for.
+        if (g_rotate && g_onNow && ++g_rotStints >= kStintsPerSubject) {
+            g_rotStints = 0;
+            if (g_flag[g_rotIndex]) *g_flag[g_rotIndex] = false;
+            int next = g_rotIndex;
+            for (int n = 0; n < g_offeredCount; ++n) {
+                next = (next + 1) % (g_offeredCount ? g_offeredCount : 1);
+                if (g_flag[next]) break;
+            }
+            g_rotIndex = next;
+            if (g_flag[g_rotIndex]) *g_flag[g_rotIndex] = true;
+            Log("[AbTest] now measuring '%s'", g_offered[g_rotIndex]);
+        }
+
+        ++(g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex]).stints;
     }
 
     if (first)         { ++g_dropped; return; }   // no previous frame to measure from
     if (g_settle > 0)  { --g_settle; ++g_dropped; return; }
     if (frameMs <= 0.0 || frameMs > 2000.0) { ++g_dropped; return; }  // a load, not a frame
 
-    Add(g_onNow ? g_on : g_off, frameMs);
+    Add(g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex], frameMs);
 }
 
 bool Init() {
@@ -282,6 +332,24 @@ bool Init() {
     }
 
     lstrcpynA(g_subject, Config::g_settings.AbTestSubject, (int)sizeof(g_subject));
+    if (lstrcmpiA(g_subject, "all") == 0 || lstrcmpiA(g_subject, "*") == 0) {
+        g_rotate = true;
+        g_active = true;
+        g_onNow = true;
+        g_periodMs = (DWORD)Config::g_settings.AbTestPeriodMs;
+        if (g_periodMs < 5000)   g_periodMs = 5000;
+        if (g_periodMs > 120000) g_periodMs = 120000;
+        g_on[0].stints = 1;
+        Log("[AbTest] ACTIVE, rotating: every feature that registers gets %d "
+            "stints of %u s in turn, so one session measures all of them "
+            "instead of one per session. Only the subject being measured "
+            "alternates; the rest run exactly as their own switches say, so "
+            "none of them confounds another. Each gets a share of the "
+            "session, and the per-subject stint counts are what say whether "
+            "the share was enough to read anything into.",
+            kStintsPerSubject, g_periodMs / 1000);
+        return true;
+    }
     if (!g_subject[0]) {
         // Not a failure to report and forget. The modules initialise after this
         // and will offer their names, so the list is printed from LogStats rather
@@ -300,7 +368,7 @@ bool Init() {
 
     g_active = true;
     g_onNow = true;
-    g_on.stints = 1;
+    g_on[0].stints = 1;
 
     Log("[AbTest] ACTIVE on '%s': it runs for %u s, then does not for %u s, and "
         "so on for the session. Frame times are collected separately for the two "
@@ -311,6 +379,119 @@ bool Init() {
     Log("[AbTest]   the feature must still be enabled by its own switch. This "
         "decides when it does its work, not whether it installed.");
     return true;
+}
+
+// One subject's result. Split out because a rotating session has several and
+// the checks below - did anything claim it, did its hot path ever stand aside -
+// have to be made per subject, not once for the run.
+static void ReportSubject(int i, const char* name) {
+        // The failure that would otherwise read as a result.
+        //
+        // If the name in the ini matches no module - a typo, a feature that was not
+        // also switched on, one that never installed on this client - then nothing
+        // behaves differently between the halves and the difference below comes out
+        // near zero. Reported without this, that is indistinguishable from "measured
+        // it, it does nothing", and it is the more likely of the two.
+        if (!g_claimed) {
+            Log("[AbTest]   NO MODULE ANSWERED TO '%s'. Nothing was alternated, both "
+                "halves are the same client doing the same thing, and the numbers "
+                "below measure only noise.", name);
+            LogOffered("check the spelling against these");
+        } else if (g_standAside[i] == 0) {
+            Log("[AbTest]   '%s' claimed the test but its hot path was never reached "
+                "during an OFF stint - so the two halves may still be identical. That "
+                "is a fact about this session's play, not about the feature.",
+                name);
+        } else {
+            Log("[AbTest]   '%s' stood aside %llu time(s) during OFF stints, so the "
+                "two halves really did differ.",
+                name, (unsigned long long)g_standAside[i]);
+        }
+        Report("ON", g_on[i]);
+        Report("OFF", g_off[i]);
+
+        if (g_on[i].frames && g_off[i].frames && g_claimed && g_standAside[i]) {
+            double meanOn  = g_on[i].sumMs  / (double)g_on[i].frames;
+            double meanOff = g_off[i].sumMs / (double)g_off[i].frames;
+            double d = meanOff - meanOn;   // positive means ON was faster
+            Log("[AbTest]   ON is %.3f ms %s per frame on the mean (%+.1f%%). Both "
+                "halves come from the same session and the same play, so this is the "
+                "closest thing to a controlled figure this project can produce.",
+                d < 0 ? -d : d, d > 0 ? "faster" : "slower",
+                meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
+
+            // The tail, differenced rather than left for the reader.
+            //
+            // The mean is the wrong figure for anything whose job is to remove a rare
+            // stall - the GC governor exists for exactly that - and several reports in
+            // this project tell the reader to look at p95 and p99 without ever
+            // subtracting one from the other. A percentile that landed in the overflow
+            // bucket has no number, so that pair is skipped rather than differenced
+            // against a made-up 120.
+            struct { const char* name; double frac; } tails[] = {
+                { "p50", 0.50 }, { "p95", 0.95 }, { "p99", 0.99 }
+            };
+            for (int t = 0; t < 3; ++t) {
+                double a = 0.0, b = 0.0;
+                if (!Percentile(g_on[i], tails[t].frac, &a)) continue;
+                if (!Percentile(g_off[i], tails[t].frac, &b)) continue;
+                double diff = b - a;   // positive means ON was faster
+                Log("[AbTest]   %s: %.2f ms with it on against %.2f without, so ON is "
+                    "%.2f ms %s there",
+                    tails[t].name, a, b, diff < 0 ? -diff : diff,
+                    diff > 0 ? "faster" : "slower");
+            }
+
+            // The function's own cost, which is the number that resolves a feature
+            // too small for frame time to see. Ticks rather than nanoseconds: the TSC
+            // frequency is not the performance-counter frequency and this project has
+            // no honest conversion for it, so the ratio is reported and the absolute
+            // figure is left in the unit it was measured in.
+            if (g_on[i].workCalls && g_off[i].workCalls) {
+                double tOn  = (double)g_on[i].workTicks  / (double)g_on[i].workCalls;
+                double tOff = (double)g_off[i].workTicks / (double)g_off[i].workCalls;
+                Log("[AbTest]   the replaced call itself: %.0f ticks with the feature "
+                    "on over %llu samples, %.0f ticks without it over %llu. That is "
+                    "%.2fx. One call in 256 is timed, and %llu sample(s) were thrown "
+                    "away for spanning something other than this function.",
+                    tOn, (unsigned long long)g_on[i].workCalls,
+                    tOff, (unsigned long long)g_off[i].workCalls,
+                    tOn != 0.0 ? tOff / tOn : 0.0,
+                    (unsigned long long)g_ticksDiscarded);
+                Log("[AbTest]   frame time is the figure that matters to a player, but "
+                    "a feature worth under a percent of main-thread time cannot show "
+                    "there. When the two disagree, this line is the one measuring the "
+                    "feature and the frame line is measuring the session.");
+            } else if (g_on[i].workCalls || g_off[i].workCalls) {
+                Log("[AbTest]   the call was timed in only one of the two halves, so "
+                    "there is nothing to compare it against.");
+            }
+
+            uint32_t stints = g_on[i].stints + g_off[i].stints;
+
+            // The headline, at the top of the log rather than four hundred lines
+            // down. Only once there are enough stints to mean anything - a result
+            // from three of them promoted to the summary would be read as settled.
+            if (stints >= 8) {
+                Verdict::Add(Verdict::Note,
+                             "A/B on %s: %.3f ms/frame %s with it on, over %u stints",
+                             name, d < 0 ? -d : d,
+                             d > 0 ? "faster" : "slower", stints);
+            }
+
+            if (stints < 8) {
+                Log("[AbTest]   only %u stint(s) so far. That is too few to trust: one "
+                    "busy fight landing in one half moves the whole figure. Play "
+                    "longer before reading anything into it.", stints);
+            }
+        } else if (!g_on[i].frames || !g_off[i].frames) {
+            Log("[AbTest]   one of the two halves has no frames, so no comparison is "
+                "possible yet - not a difference of zero.");
+        } else {
+            Log("[AbTest]   no difference is printed, because the lines above say the "
+                "two halves were not actually different. A number here would be read "
+                "as a result and it would be noise.");
+        }
 }
 
 void LogStats() {
@@ -325,112 +506,16 @@ void LogStats() {
         "switches and loading screens.",
         g_subject, g_periodMs / 1000, (unsigned long long)g_dropped);
 
-    // The failure that would otherwise read as a result.
-    //
-    // If the name in the ini matches no module - a typo, a feature that was not
-    // also switched on, one that never installed on this client - then nothing
-    // behaves differently between the halves and the difference below comes out
-    // near zero. Reported without this, that is indistinguishable from "measured
-    // it, it does nothing", and it is the more likely of the two.
-    if (!g_claimed) {
-        Log("[AbTest]   NO MODULE ANSWERED TO '%s'. Nothing was alternated, both "
-            "halves are the same client doing the same thing, and the numbers "
-            "below measure only noise.", g_subject);
-        LogOffered("check the spelling against these");
-    } else if (g_standAside == 0) {
-        Log("[AbTest]   '%s' claimed the test but its hot path was never reached "
-            "during an OFF stint - so the two halves may still be identical. That "
-            "is a fact about this session's play, not about the feature.",
-            g_subject);
-    } else {
-        Log("[AbTest]   '%s' stood aside %llu time(s) during OFF stints, so the "
-            "two halves really did differ.",
-            g_subject, (unsigned long long)g_standAside);
+    if (g_rotate) {
+        Log("[AbTest] rotating: every registered subject gets %d stints in turn, "
+            "so one session measures all of them instead of one. Only one "
+            "alternates at a time, so none confounds another - but each gets a "
+            "share of the session, and the stint counts below are what say "
+            "whether that share was enough.", kStintsPerSubject);
     }
-    Report("ON", g_on);
-    Report("OFF", g_off);
-
-    if (g_on.frames && g_off.frames && g_claimed && g_standAside) {
-        double meanOn  = g_on.sumMs  / (double)g_on.frames;
-        double meanOff = g_off.sumMs / (double)g_off.frames;
-        double d = meanOff - meanOn;   // positive means ON was faster
-        Log("[AbTest]   ON is %.3f ms %s per frame on the mean (%+.1f%%). Both "
-            "halves come from the same session and the same play, so this is the "
-            "closest thing to a controlled figure this project can produce.",
-            d < 0 ? -d : d, d > 0 ? "faster" : "slower",
-            meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
-
-        // The tail, differenced rather than left for the reader.
-        //
-        // The mean is the wrong figure for anything whose job is to remove a rare
-        // stall - the GC governor exists for exactly that - and several reports in
-        // this project tell the reader to look at p95 and p99 without ever
-        // subtracting one from the other. A percentile that landed in the overflow
-        // bucket has no number, so that pair is skipped rather than differenced
-        // against a made-up 120.
-        struct { const char* name; double frac; } tails[] = {
-            { "p50", 0.50 }, { "p95", 0.95 }, { "p99", 0.99 }
-        };
-        for (int t = 0; t < 3; ++t) {
-            double a = 0.0, b = 0.0;
-            if (!Percentile(g_on, tails[t].frac, &a)) continue;
-            if (!Percentile(g_off, tails[t].frac, &b)) continue;
-            double diff = b - a;   // positive means ON was faster
-            Log("[AbTest]   %s: %.2f ms with it on against %.2f without, so ON is "
-                "%.2f ms %s there",
-                tails[t].name, a, b, diff < 0 ? -diff : diff,
-                diff > 0 ? "faster" : "slower");
-        }
-
-        // The function's own cost, which is the number that resolves a feature
-        // too small for frame time to see. Ticks rather than nanoseconds: the TSC
-        // frequency is not the performance-counter frequency and this project has
-        // no honest conversion for it, so the ratio is reported and the absolute
-        // figure is left in the unit it was measured in.
-        if (g_on.workCalls && g_off.workCalls) {
-            double tOn  = (double)g_on.workTicks  / (double)g_on.workCalls;
-            double tOff = (double)g_off.workTicks / (double)g_off.workCalls;
-            Log("[AbTest]   the replaced call itself: %.0f ticks with the feature "
-                "on over %llu samples, %.0f ticks without it over %llu. That is "
-                "%.2fx. One call in 256 is timed, and %llu sample(s) were thrown "
-                "away for spanning something other than this function.",
-                tOn, (unsigned long long)g_on.workCalls,
-                tOff, (unsigned long long)g_off.workCalls,
-                tOn != 0.0 ? tOff / tOn : 0.0,
-                (unsigned long long)g_ticksDiscarded);
-            Log("[AbTest]   frame time is the figure that matters to a player, but "
-                "a feature worth under a percent of main-thread time cannot show "
-                "there. When the two disagree, this line is the one measuring the "
-                "feature and the frame line is measuring the session.");
-        } else if (g_on.workCalls || g_off.workCalls) {
-            Log("[AbTest]   the call was timed in only one of the two halves, so "
-                "there is nothing to compare it against.");
-        }
-
-        uint32_t stints = g_on.stints + g_off.stints;
-
-        // The headline, at the top of the log rather than four hundred lines
-        // down. Only once there are enough stints to mean anything - a result
-        // from three of them promoted to the summary would be read as settled.
-        if (stints >= 8) {
-            Verdict::Add(Verdict::Note,
-                         "A/B on %s: %.3f ms/frame %s with it on, over %u stints",
-                         g_subject, d < 0 ? -d : d,
-                         d > 0 ? "faster" : "slower", stints);
-        }
-
-        if (stints < 8) {
-            Log("[AbTest]   only %u stint(s) so far. That is too few to trust: one "
-                "busy fight landing in one half moves the whole figure. Play "
-                "longer before reading anything into it.", stints);
-        }
-    } else if (!g_on.frames || !g_off.frames) {
-        Log("[AbTest]   one of the two halves has no frames, so no comparison is "
-            "possible yet - not a difference of zero.");
-    } else {
-        Log("[AbTest]   no difference is printed, because the lines above say the "
-            "two halves were not actually different. A number here would be read "
-            "as a result and it would be noise.");
+    for (int i = 0; i < g_offeredCount; ++i) {
+        if (!g_on[i].frames && !g_off[i].frames) continue;
+        ReportSubject(i, g_offered[i]);
     }
 }
 

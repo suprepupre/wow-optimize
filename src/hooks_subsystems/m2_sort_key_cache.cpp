@@ -262,7 +262,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("M2SortKey");
+    g_abSubject = AbTest::IsSubject("M2SortKey", &g_abSubject);
     if (g_abSubject) {
         Log("[M2SortKey] under A/B test: it alternates on and off in stints "
             "and AbTest reports the frame times either way. The correctness "

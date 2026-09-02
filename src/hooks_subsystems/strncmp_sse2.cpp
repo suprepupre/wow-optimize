@@ -226,7 +226,7 @@ bool Init() {
     }
 
     g_active = true;
-    g_abSubject = AbTest::IsSubject("StrncmpSse2");
+    g_abSubject = AbTest::IsSubject("StrncmpSse2", &g_abSubject);
     if (g_abSubject) {
         Log("[StrncmpSSE2] under A/B test: it alternates on and off in stints and "
             "AbTest reports the cost of the call each way. At 268 million calls in "

@@ -141,7 +141,7 @@ bool InstallHotFunctionOptimizations() {
     
     g_featureToken = CrashDumper::FeatureTokenForCounting("HotFunctions");
     SamplingProfiler::RegisterSelfSymbol("memset_SSE2", (const void*)&Hooked_memset);
-    g_abSubject = AbTest::IsSubject("FastMemsetOpt");
+    g_abSubject = AbTest::IsSubject("FastMemsetOpt", &g_abSubject);
     if (g_abSubject) {
         Log("[FastMemset] under A/B test: it alternates on and off in stints and "
             "AbTest reports the cost of the call each way. 155 million calls in a "

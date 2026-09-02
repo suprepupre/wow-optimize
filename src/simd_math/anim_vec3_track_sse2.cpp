@@ -337,7 +337,7 @@ bool Init() {
         return false;
     }
 
-    g_abSubject = AbTest::IsSubject("AnimVec3Track");
+    g_abSubject = AbTest::IsSubject("AnimVec3Track", &g_abSubject);
     if (g_abSubject) {
         Log("[AnimVec3Track] under A/B test: it alternates on and off in stints, "
             "and AbTest reports both the frame times and the cost of this "
