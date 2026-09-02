@@ -6661,6 +6661,20 @@ static bool InstallSysMetricsCache() {
 typedef BOOL (WINAPI* IsDebuggerPresent_fn)();
 static IsDebuggerPresent_fn orig_IsDebuggerPresent = nullptr;
 
+// The only hook here whose reason was never written down, and the one whose
+// shape most invites the wrong reading.
+//
+// For anyone playing normally it does nothing at all: no debugger is attached,
+// so the real IsDebuggerPresent already returns FALSE and the detour returns the
+// same answer through one more jump. It changes something only when a debugger
+// IS attached, and then what it changes is the client's own reaction to that.
+//
+// It stays because removing it is not free either: some overlays and injectors
+// set the debug flag on a process nobody is debugging, and the client taking its
+// debugger path in that case is a behaviour change for a tester rather than a
+// fix. It is not a performance hook, it never was, and it is not evidence of one
+// - said plainly so the next reader does not have to guess, and so nobody counts
+// it among the optimizations.
 static BOOL WINAPI hooked_IsDebuggerPresent() { return FALSE; }
 
 static bool InstallNoDebuggerPresent() {
