@@ -23,7 +23,6 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
-* [Unreleased](#unreleased)
 * [What's New in v3.19.1](#whats-new-in-v3191)
 * [Send me your log](#send-me-your-log)
   * [Measuring rather than reporting](#if-you-want-to-measure-something-rather-than-report-a-bug)
@@ -39,9 +38,7 @@ The current public build is focused on real frametime stability, long-session sm
 
 ---
 
-## Unreleased
-
-Not a version yet - rename this heading when you tag one.
+## What's New in v3.19.1
 
 ### Measurement, which is what was actually missing
 
@@ -108,6 +105,16 @@ anything.
   while the flicker was constant. Steadier Shadows also did nothing at all unless
   the diagnostic probe was ticked as well; that is fixed, but turn the feature
   off, it does not help.
+* **Garbled SavedVariables names: the cause, measured.** Reported by
+  [txtsd](https://github.com/txtsd), who had `ElvUI.lua` written to disk as
+  `)_.lua`. His log shows the client with **one megabyte** as the largest block
+  it could allocate below 2GB, for fifteen minutes, with a UI reload - which is
+  when SavedVariables are written - landing inside that window. Two things were
+  supposed to react to that and neither did: both were reading the free space
+  across the *whole* address space, which said 1237MB in the same second. A
+  32-bit client allocates from the low half. Both read the low half now, and
+  the memory governor sheds its caches and collects when it is genuinely short
+  instead of sleeping through it.
 * **Garbled SavedVariables names** are caught as the file is created now, with the
   name in hex and the state of memory at that instant. One was captured: `)_.lua`,
   two printable bytes, during a character switch.
@@ -156,13 +163,6 @@ anything.
 * **The Lua compile census and Reuse Compiled Scripts were fighting over one
   address**, so with the census on the cache installed nothing - the one
   configuration that could weigh the cache was the one where it could not run.
-
----
-
-## What's New in v3.19.1
-
-### Fixed
-
 * **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58).
   Dropped from the server in raids and battlegrounds. Measured: the server closes
   the connection while the client is running fine, so it is the DLL patching
