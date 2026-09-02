@@ -510,7 +510,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptVaArena             = GetPrivateProfileIntA("General", "VaArena", 0, iniPath.c_str()) != 0;
         g_settings.OptCompatMode          = GetPrivateProfileIntA("General", "CompatMode", 0, iniPath.c_str()) != 0;
         g_settings.OptNoClientPatches     = GetPrivateProfileIntA("General", "NoClientPatches", 0, iniPath.c_str()) != 0;
-        g_settings.OptFlightRecorder      = GetPrivateProfileIntA("General", "FlightRecorder", 0, iniPath.c_str()) != 0;
+        g_settings.OptFlightRecorder      = GetPrivateProfileIntA("General", "FlightRecorder", 1, iniPath.c_str()) != 0;
         g_settings.OptAbTest              = GetPrivateProfileIntA("General", "AbTest", 0, iniPath.c_str()) != 0;
         // Inheriting DefragLf when absent. A new key defaulting to zero would
         // silently remove a running feature from everyone who never wrote it,

@@ -45,7 +45,22 @@
 // with the ring, and a dump that spans a gap still subtracts correctly across it.
 //
 // 512 frames at 24 columns is 48 KB, and the per-frame cost is one memcpy of 96
-// bytes. It is off by default anyway.
+// bytes and one clock read.
+//
+// ---------------------------------------------------------------------------
+// Why this one is on by default
+//
+// Almost nothing in this project is, and the reason here is the auto-marks. A
+// disconnect, a freeze and a SavedVariables file written under a name matching no
+// addon are the three events a player cannot press a key for - during a freeze
+// the client is not reading the keyboard at all, and a bad filename is discovered
+// days later by looking at a folder. Those three are also the three that have
+// cost the most time to investigate.
+//
+// Left off, the most useful instrument built for these reports would reach only
+// the people who read a changelog and went looking for the tickbox, and every
+// report would still open with a request for another log. It writes nothing at
+// all until something marks it.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -120,6 +135,19 @@ void OnFrame() {
     ++g_written;
 }
 
+// Which thread this runs on, and the one race it has.
+//
+// The key press and the SavedVariables mark are on the main thread, so the ring
+// is not being written while it is read. The freeze mark is on the watchdog
+// thread, and that is the safest of the three: the main thread is stuck, which is
+// why the mark exists, so it is not writing either. The disconnect mark runs on
+// whichever thread called recv - the main thread on this client, but that is not
+// guaranteed, so one entry may be read while it is being written.
+//
+// The cost of that is one frame's row showing a torn count, in a dump of two
+// hundred and forty. Taking a lock on the per-frame write to prevent it would put
+// a lock on the frame boundary of every session to protect a diagnostic, which is
+// the wrong trade. Said here rather than left for someone to wonder about.
 void Mark(const char* why) {
     if (!g_active) {
         Log("[FlightRec] mark requested but the recorder is off - nothing to show");

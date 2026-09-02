@@ -113,7 +113,16 @@ namespace Config {
         // Per-frame ring the player dumps with a key when something looks
         // wrong, so a report carries the frames around the moment instead of
         // the ten-second average that has cost every investigation so far.
-        bool OptFlightRecorder = false;
+        //
+        // On by default, which is unusual here and deliberate. It writes nothing
+        // at all until a mark, and the three events it marks by itself - a
+        // disconnect, a freeze, a SavedVariables file written under a name
+        // matching no addon - are exactly the ones nobody can press a key for.
+        // Left off, the most useful thing built for these reports would only ever
+        // reach the handful of people who read a changelog and went looking for
+        // the tickbox. The cost when nothing marks it is a 96-byte copy and one
+        // clock read a frame.
+        bool OptFlightRecorder = true;
         int  FlightRecorderKey = 0x91;   // VK_SCROLL
         // Alternates one feature on and off inside a session, so its frame
         // times can be compared against a control that saw the same zone, the
