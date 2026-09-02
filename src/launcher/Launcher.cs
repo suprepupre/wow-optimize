@@ -1129,31 +1129,31 @@ namespace WowOptimizeLauncher {
                 + "switches itself off if it disagrees, and the log names which - "
                 + "but if the client misbehaves, this is why.\r\n\r\n"
                 + "Play normally for at least forty-five minutes, then send the log "
-                + "from the Logs folder. Set them up now?",
+                + "from the Logs folder. Set them up and save now?",
                 "Set up a measurement run",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (answer != DialogResult.Yes) return;
 
             int turnedOn = 0;
             int notFound = 0;
-            foreach (SettingItem item in settingsMap.Values) {
-                if (item.Ctrl == null) continue;
-                if (item.Key == "AbTest") { item.Ctrl.Checked = true; }
-            }
+            SettingItem ab = FindByKey("AbTest");
+            if (ab != null && ab.Ctrl != null) ab.Ctrl.Checked = true;
             for (int i = 0; i < AbSubjectKeys.Length; i++) {
-                bool found = false;
-                foreach (SettingItem item in settingsMap.Values) {
-                    if (item.Ctrl == null || item.Key != AbSubjectKeys[i]) continue;
-                    found = true;
-                    if (!item.Ctrl.Checked) { item.Ctrl.Checked = true; turnedOn++; }
-                }
-                if (!found) notFound++;
+                SettingItem item = FindByKey(AbSubjectKeys[i]);
+                if (item == null || item.Ctrl == null) { notFound++; continue; }
+                if (!item.Ctrl.Checked) { item.Ctrl.Checked = true; turnedOn++; }
             }
+
+            // Saved here rather than left to the tester. A tester on issue #58
+            // ran a whole session with the settings he thought he had chosen and
+            // wrote back "last time I forgot to save the config" - a week gone to
+            // an unpressed button. Nothing this does is worth losing that way.
+            SaveSettings();
 
             // A key in the list with no tickbox is a defect in this file, not in
             // the run, and saying nothing about it is how it would survive.
             string note = "A/B test on, " + turnedOn.ToString()
-                + " feature(s) newly switched on. Press SAVE, then play.";
+                + " feature(s) newly switched on, and the file is saved. Play.";
             if (notFound > 0) {
                 note = note + "\r\n\r\n" + notFound.ToString()
                     + " of the sixteen has no entry in this launcher and was not "
