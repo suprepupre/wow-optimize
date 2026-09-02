@@ -26,6 +26,7 @@ The current public build is focused on real frametime stability, long-session sm
 * [Unreleased](#unreleased)
 * [What's New in v3.19.1](#whats-new-in-v3191)
 * [Send me your log](#send-me-your-log)
+  * [Measuring rather than reporting](#if-you-want-to-measure-something-rather-than-report-a-bug)
 * [Reviews & Acknowledgments](#reviews)
 * [Current Feature Set](#current-feature-set)
 * [Installation](#installation)
@@ -208,6 +209,36 @@ a bug, say what you saw and roughly when; the log has timestamps and the two
 together usually locate it.
 
 If you would rather not share it publicly, that is fine — say so in an issue.
+
+### If you want to measure something rather than report a bug
+
+Every optimization here is off by default because none of them had a measured
+gain, and until recently none could be measured: comparing two sessions compares
+two different evenings, not two settings. One session that alternates a feature
+on and off compares the same zone, the same addons and the same machine against
+itself.
+
+In the launcher, tick **A/B Test a Feature**. Then open `WTF\wow_opt.ini` and add
+one line under `[General]`:
+
+```ini
+AbTestSubject=all
+```
+
+Play for as long as you normally would - an hour is thin, two is better - and
+send the log. Every feature that is switched on will have been measured against
+the client doing the same work, and the report says per feature when there were
+too few turns for the number to mean anything.
+
+To measure one feature properly instead of all of them roughly, put its ini key
+there instead - `AbTestSubject=LayoutRelinkFast` - and make sure that feature is
+switched on too. The switch decides whether it installs; this decides when it
+does its work. If the name is wrong the report lists the ones it would have
+accepted.
+
+One of them is there to check the instrument rather than the feature:
+`MatrixVectorSse2` is already known to be slower than the code it replaces, so
+if a report calls that one faster, the measurement is what is wrong.
 
 ---
 
