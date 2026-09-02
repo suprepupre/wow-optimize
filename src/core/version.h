@@ -634,6 +634,7 @@
 // re-verified safe against disassembly and re-enabled via their own G-flags.
 // The crash root causes were the LuaStackFast / pushnumber / pushvalue /
 // inline-batch-dangerous groups (confirmed at luaD_precall 0x5565E9).
+#define TEST_DISABLE_BONE_MATRIX_UPLOAD  0  // enabled: the bone matrix transpose
 #define TEST_DISABLE_LUA_SAFE_G1         0  
 #define TEST_DISABLE_LUA_SAFE_G2         0  // enabled: Safe Group 2 hooks
 // G2A groups the three debug/execution-control hooks below it. dllmain.cpp

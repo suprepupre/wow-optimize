@@ -133,6 +133,7 @@ static const BoolSetting kBoolSettings[] = {
     { "UI_Lua", "LuaThisFast", &Settings::OptLuaThisFast },
     { "Graphics_Sound", "AnimLod", &Settings::OptAnimLod },
     { "Graphics_Sound", "CollisionOutcode", &Settings::OptCollisionOutcode },
+    { "Graphics_Sound", "BoneMatrixUpload", &Settings::OptBoneMatrixUpload },
     { "Graphics_Sound", "AabbOverlap", &Settings::OptAabbOverlap },
     { "Graphics_Sound", "AnimQuatUnpack", &Settings::OptAnimQuatUnpack },
     { "UI_Lua", "LuaPoolFast", &Settings::OptLuaPoolFast },
@@ -622,6 +623,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptLuaThisFast         = GetPrivateProfileIntA("UI_Lua", "LuaThisFast", 0, iniPath.c_str()) != 0;
         g_settings.OptAnimLod             = GetPrivateProfileIntA("Graphics_Sound", "AnimLod", 0, iniPath.c_str()) != 0;
         g_settings.OptCollisionOutcode    = GetPrivateProfileIntA("Graphics_Sound", "CollisionOutcode", 0, iniPath.c_str()) != 0;
+        g_settings.OptBoneMatrixUpload    = GetPrivateProfileIntA("Graphics_Sound", "BoneMatrixUpload", 0, iniPath.c_str()) != 0;
         g_settings.OptAabbOverlap         = GetPrivateProfileIntA("Graphics_Sound", "AabbOverlap", 0, iniPath.c_str()) != 0;
         g_settings.OptAnimQuatUnpack      = GetPrivateProfileIntA("Graphics_Sound", "AnimQuatUnpack", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaPoolFast     = GetPrivateProfileIntA("UI_Lua", "LuaPoolFast", 0, iniPath.c_str()) != 0;

@@ -365,6 +365,13 @@ namespace Config {
         // applied, so this is bit-exact rather than close. Opt-in, and it
         // predicts the client's whole output and compares before trusting itself.
         bool OptCollisionOutcode = false;
+        // The bone matrix upload loop inside sub_829BA0, 3.35% of executing
+        // time and the largest entry in the corrected profile with nothing
+        // shipped against it. Twelve x87 load/store pairs a bone transpose a
+        // 4x4 into three vec4s; four loads, seven shuffles and three stores do
+        // the same. No arithmetic anywhere in it, so bit-exact by construction.
+        // Opt-in, and it does the first bones both ways and compares.
+        bool OptBoneMatrixUpload = false;
         // The box-overlap predicate (sub_78F370) that seventeen culling and
         // pick functions call once per scene node per pass. Six x87 compares,
         // each leaving the FPU through fnstsw and a data-dependent branch,

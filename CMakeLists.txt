@@ -142,6 +142,7 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_pool_fast.cpp
     src/runtime_vm/lua_proto_cache.cpp
     src/simd_math/quat_lerp_sse2.cpp
+    src/simd_math/bone_matrix_upload_sse2.cpp
     src/hooks_subsystems/render_null_guard.cpp
     src/hooks_subsystems/device_callback_guard.cpp
     src/hooks_subsystems/layout_relink_fast.cpp

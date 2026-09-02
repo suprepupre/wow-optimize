@@ -42,6 +42,7 @@
 #include "lua_proto_cache.h"
 #include "anim_lod.h"
 #include "collision_outcode_sse2.h"
+#include "bone_matrix_upload_sse2.h"
 #include "aabb_overlap_sse2.h"
 #include "anim_quat_unpack_sse2.h"
 #include "anim_vec3_track_sse2.h"
@@ -5207,6 +5208,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     LuaProtoCache::LogStats();
     AnimLod::LogStats();
     CollisionOutcode::LogStats();
+    BoneMatrixUpload::LogStats();
     AabbOverlap::LogStats();
     AnimQuatUnpack::LogStats();
     AnimVec3Track::LogStats();
@@ -7827,6 +7829,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     LuaProtoCache::Init();
     AnimLod::Init();
     CollisionOutcode::Init();
+    BoneMatrixUpload::Init();
     AabbOverlap::Init();
     AnimQuatUnpack::Init();
     AnimVec3Track::Init();
