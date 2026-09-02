@@ -59,7 +59,8 @@ anything.
   replaced call directly, because a feature worth under one percent of
   main-thread time cannot show up in frame time at all. One subject has a known
   answer and is there to check the measurement itself: a replacement already
-  measured as slower than the code it replaces.
+  measured as slower than the code it replaces. The report checks that one for
+  you and says at the top of the log whether it came out the right way round.
 * **Flight Recorder** keeps the last 512 frames and writes 240 of them to the log
   when you press Scroll Lock. Press it the moment you see something wrong and the
   log carries that second frame by frame instead of a ten-second average. **On by
