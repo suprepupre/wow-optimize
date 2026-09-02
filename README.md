@@ -138,6 +138,10 @@ anything.
 * **Two functions were replaced by whichever module happened to initialise
   first.** The frustum test had two implementations and only one of them checks
   itself against the game; that one wins now regardless of link order.
+* **Reuse Compiled Scripts now reports what it saves in milliseconds**, not in
+  kilobytes of source. Kilobytes were never a saving, and neither was "88% of
+  compiled chunks are source already compiled" - the figure the feature was
+  built on. It times a parse and a reuse separately and states the difference.
 * **The Lua compile census and Reuse Compiled Scripts were fighting over one
   address**, so with the census on the cache installed nothing - the one
   configuration that could weigh the cache was the one where it could not run.
