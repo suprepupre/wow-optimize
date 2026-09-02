@@ -81,6 +81,25 @@ anything.
 
 ### Fixed
 
+* **The DLL no longer needs the Visual C++ Redistributable.** It was built to
+  ask for the static runtime and a CMake policy silently ignored that, so every
+  release so far linked against MSVCP140 and VCRUNTIME140. Imports are down from
+  sixteen to six, all of them Windows' own.
+* **Combat Log Filter did nothing unless a second, unlisted option was also on.**
+  Reported by Anarom, who found the workaround before we found the cause.
+* **The version the DLL reported was two releases behind its own startup banner**,
+  so the in-game update check told people they were current when they were not.
+* **The startup summary called settings you had turned off "failures".** Every
+  log opened with a list of things that looked broken and were simply switched
+  off.
+* **Five files could pull in the C++ threading library**, which crashes during
+  early init under Wine and Proton - the rule against it existed and was not
+  being enforced.
+* **A hook that was slower than the code it replaced** was running 5257 times a
+  frame, and had been gated behind an unrelated string-search option so nobody
+  noticed.
+* **The Lua memory pool had two allocators hooked onto it**, one of them a second
+  copy this project built without noticing the first.
 * **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58)
   and confirmed by asslol. See the warning at the top of this file.
 * **Shadow flicker is not what we thought.** Two testers, both directions of the
