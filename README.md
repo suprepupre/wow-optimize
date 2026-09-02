@@ -5,7 +5,8 @@
 
 > [!WARNING]
 > **On WoW Circle the DLL gets you disconnected** - Turning on **No Client Patches** in the launcher stops it, and
-> also turns every optimization off. Or use the `!LuaBoost` addon without the DLL.
+> also turns every optimization off.   
+Or use the `!LuaBoost` addon without the DLL.
 
 # wow_optimize
 
@@ -40,193 +41,56 @@ The current public build is focused on real frametime stability, long-session sm
 
 ## What's New in v3.19.1
 
-### Measurement, which is what was actually missing
+### New
 
-Around fifty optimizations here, and until now not one with a measured frame-time
-gain. Nothing could hold still between two sessions - a different zone, a
-different raid, a different evening - so a difference in frame time never meant
-anything.
-
-* **A/B Test a Feature** turns one feature on and off in alternating stints while
-  you play, so both halves see the same zone, the same addons and the same
-  machine. Fifteen features can be tested this way, including the one that
-  targets the largest single entry in the profile and the two the client calls
-  most - 268 and 155 million times a session. Set it to `all` and it takes each
-  in turn, so one long session measures every one of them. It also times the
-  replaced call directly, because a feature worth under one percent of
-  main-thread time cannot show up in frame time at all. One subject has a known
-  answer and is there to check the measurement itself: a replacement already
-  measured as slower than the code it replaces. The report checks that one for
-  you and says at the top of the log whether it came out the right way round.
-* **Flight Recorder** keeps the last 512 frames and writes 240 of them to the log
-  when you press Scroll Lock. Press it the moment you see something wrong and the
-  log carries that second frame by frame instead of a ten-second average. **On by
-  default**, and it writes nothing until something marks it - because it also
-  marks itself for a disconnect, a freeze and a bad SavedVariables filename,
-  which are the three things you cannot press a key for.
-* Every log now opens its periodic report with **what went wrong this session** -
-  freezes and where the thread was stuck, long loads, disconnects, address space
-  running out, a SavedVariables file written under a name matching no addon, an
-  address something else had already hooked. All of it was already in the logs;
-  none of it was findable.
-* The recorder writes itself out for the three events **nobody can react to**: a
-  disconnect, a freeze - the client is not reading your keyboard then - and a
-  SavedVariables file written under a bad name, which you would only notice by
-  looking at the folder days later.
-* Three instruments now catch their own impossible numbers: shares that do not
-  sum, a per-frame draw count no client produces, and work that does not fit in
-  the frame it claims to sit in. All three of those shipped, once each.
+* **A/B Test a Feature** turns one feature on and off in stints while you play
+  and compares the two halves. Press **SET UP A MEASUREMENT RUN** in the launcher
+  and it does the setup for you.
+* **Flight Recorder** keeps the last 512 frames. Press Scroll Lock when you see
+  something wrong and they go into the log. On by default; writes nothing until
+  something marks it.
+* Every log now opens with **what went wrong this session**: freezes, long loads,
+  disconnects, address space running out, bad SavedVariables filenames.
+* **Bone Matrix Upload (SSE2)** replaces the bone matrix transpose in the draw
+  path. 3.35% of main-thread time in the profile; measured 8.6% faster per frame
+  in one session, on too few samples to call it settled. Off by default.
+* **Object Tick Prefetch** prefetches the two fields the object tick reads.
+  1.39% of main-thread time in a measured session. Off by default.
+* **No Client Patches** stops the DLL writing anything into WoW.exe. See the
+  warning at the top of this file. Off by default.
+* **Table Emptiness Census** and **Leave Lua Garbage Collection Alone** are
+  diagnostics for the Lua collector. Off by default.
 
 ### Fixed
 
-* **The DLL no longer needs the Visual C++ Redistributable.** It was built to
-  ask for the static runtime and a CMake policy silently ignored that, so every
-  release so far linked against MSVCP140 and VCRUNTIME140. Imports are down from
-  sixteen to six, all of them Windows' own.
-* **Combat Log Filter did nothing unless a second, unlisted option was also on.**
-  Reported by Anarom, who found the workaround before we found the cause.
-* **The version the DLL reported was two releases behind its own startup banner**,
-  so the in-game update check told people they were current when they were not.
-* **The startup summary called settings you had turned off "failures".** Every
-  log opened with a list of things that looked broken and were simply switched
-  off.
-* **Five files could pull in the C++ threading library**, which crashes during
-  early init under Wine and Proton - the rule against it existed and was not
-  being enforced.
-* **A hook that was slower than the code it replaced** was running 5257 times a
-  frame, and had been gated behind an unrelated string-search option so nobody
-  noticed.
-* **The Lua memory pool had two allocators hooked onto it**, one of them a second
-  copy this project built without noticing the first.
-* **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58)
-  and confirmed by asslol. See the warning at the top of this file.
-* **Shadow flicker is not what we thought.** Two testers, both directions of the
-  setting, no change - and their own logs show the mechanism firing zero times
-  while the flicker was constant. Steadier Shadows also did nothing at all unless
-  the diagnostic probe was ticked as well; that is fixed, but turn the feature
-  off, it does not help.
-* **Garbled SavedVariables names: the cause, measured.** Reported by
-  [txtsd](https://github.com/txtsd), who had `ElvUI.lua` written to disk as
-  `)_.lua`. His log shows the client with **one megabyte** as the largest block
-  it could allocate below 2GB, for fifteen minutes, with a UI reload - which is
-  when SavedVariables are written - landing inside that window. Two things were
-  supposed to react to that and neither did: both were reading the free space
-  across the *whole* address space, which said 1237MB in the same second. A
-  32-bit client allocates from the low half. Both read the low half now, and
-  the memory governor sheds its caches and collects when it is genuinely short
-  instead of sleeping through it.
-* **Garbled SavedVariables names** are caught as the file is created now, with the
-  name in hex and the state of memory at that instant. One was captured: `)_.lua`,
-  two printable bytes, during a character switch.
-* **A 139-second loading screen** spent 1% of itself reading. Writes were never
-  measured; they are now, with the slowest single write and its filename.
-* **The draw-call census divided by sleeps instead of frames** and reported 34,671
-  draw calls per frame. The real figure is 1,323.
-* **The Lua VM garbage collector was being stepped during loading screens**, while
-  the client builds large tables and while every other cache here stands aside.
-  Also settled: the frame limiter, which the one crash dump with this DLL in the
-  stack pointed at, is a safe place to collect from after all - all three of its
-  callers run it immediately after the frame is presented.
-* **The Lock-Free Heap Defragmenter switch also gated the render hooks, the async
-  worker pool and thread affinity.** Three separate options now, each inheriting
-  the old setting, so nothing changes for you by updating.
-* **Pressing Save in the launcher destroyed every setting it has no tickbox
-  for** - thirteen options the DLL reads, every numeric key, and AbTestSubject,
-  which the A/B test needs and which its own tooltip tells you to set by hand.
-  Keys the launcher does not own are kept now.
-* **This tool was walking the whole address space on the main thread, inside a
-  frame, up to once a second** - to publish one fragmentation number the
-  companion addon displays. On a fragmented 3GB space that walk is tens of
-  thousands of system calls. The same walk, once every five minutes from the
-  periodic report, is what put "STALL periodic maintenance took 42.6 ms" in
-  tester logs against a frame median near ten; the once-a-second one had been
-  running the whole time without ever making a spike large enough to name. Four
-  copies existed. Three were on the main thread and two of those are gone,
-  replaced by a reading a background thread already takes every ten seconds.
-  The third is the stutter snapshot, which needs detail no cached value has -
-  it now prints what collecting it cost.
-* **Three modules announced features they do not implement.** One is 805 lines
-  with no hook in it, naming four features; one claimed a "backbuffer lock skip"
-  that was never written; one committed half a megabyte at startup for an
-  allocator nothing calls. They no longer claim it, and that half megabyte is
-  no longer taken.
-* **The SSE2 frustum cull and quaternion normalize were switched by the string
-  search option** - which is off by default, so nobody had them. Their own
-  option now, inheriting the old one so nothing changes for you by updating.
-* **Two functions were replaced by whichever module happened to initialise
-  first.** The frustum test had two implementations and only one of them checks
-  itself against the game; that one wins now regardless of link order.
-* **Reuse Compiled Scripts now reports what it saves in milliseconds**, not in
-  kilobytes of source. Kilobytes were never a saving, and neither was "88% of
-  compiled chunks are source already compiled" - the figure the feature was
-  built on. It times a parse and a reuse separately and states the difference.
-* **The Lua compile census and Reuse Compiled Scripts were fighting over one
-  address**, so with the census on the cache installed nothing - the one
-  configuration that could weigh the cache was the one where it could not run.
-* **WoWCircle disconnects** - reported by [Flokj](https://github.com/suprepupre/wow-optimize/issues/58).
-  Dropped from the server in raids and battlegrounds. Measured: the server closes
-  the connection while the client is running fine, so it is the DLL patching
-  WoW.exe. New launcher option **No Client Patches** writes nothing into the
-  client and the disconnects stop; two players confirmed. It turns every
-  optimization off, so it is a trade, not a fix.
-* **Glowing models** - reported by [txtsd](https://github.com/txtsd). Spread Model
-  Animation skipped material and attachment animation along with the bones, so
-  characters, weapons and shoulder pads glowed. It no longer skips a model where
-  either of those would have run.
-* **Crash in the game's error formatter.** Reuse Compiled Scripts detected a new
-  Lua state by comparing one address, and the game's Lua memory pool hands out
-  the old address again. Four of six state changes were missed and freed scripts
-  were served from the cache. It now hears about every state change directly.
-* **The DLL could load itself into its own launcher.** `version.dll` sits beside
-  the launcher, so Windows resolved it there too. It checks which process it is
-  in now.
-* **Lua VM: stop the automatic GC** gated nothing - the collector was driven
-  entirely by the Adaptive GC Governor tickbox.
-* **UI Frame Batch** had no launcher entry and could only be set by editing the
-  ini. Split into **Cache Script Handlers** and **Unit API Fast Path**, both
-  inheriting the old setting.
-* **Terrain Read-Ahead** was compiled out of every build while still appearing as
-  a setting, and read its position from an address the game never writes.
-* **Wrong numbers in the log**: the feature counts ("98/100 installed" when three
-  were), the CVar watchdog reporting a corrupted client in every log ever
-  collected, three modules reading the world position from a dead address, the
-  draw-call census dividing by sleeps instead of frames, and short sessions
-  printing no report at all. All corrected.
-* **The freeze watchdog** only captured a stall past 45 seconds, so the eleven to
-  fourteen second freezes people actually report were never diagnosed. Eight
-  seconds now.
-
-### Faster
-
-* Roughly 120 locked instructions removed from hot paths - every call to every
-  hooked game function was paying one or two to keep a counter.
-* The bone rotation blend and the point transform are now bit-exact against the
-  game's own answer, verified in-game with no tolerance.
-
-### New, all off by default
-
-* **Bone Matrix Upload (SSE2)** - the largest entry in the measured profile
-  with nothing shipped against it, 3.35% of executing time. The game moves
-  each bone matrix into the buffer the GPU skins from with twelve x87 load and
-  store pairs; this does the same transpose with four loads, seven shuffles and
-  three stores. Nothing in it is computed, only copied, so the result is the
-  same bit for bit - and it still checks the first twenty thousand bones both
-  ways, byte for byte, because the layout could be misread where the maths
-  cannot be wrong. There turned out to be two copies of that loop in two draw
-  paths; both are covered.
-* **Spread Model Animation** now decides by distance from the camera rather than
-  by how crowded the scene is, after proving at runtime which field carries the
-  position. Models within 40 yards are never throttled.
-* **Object Tick Prefetch** - the game walks a list of objects every frame and
-  pokes each one, and the two fields it touches are in different cache lines.
-  1.39% of main-thread time in a measured session, spent waiting. It changes
-  nothing the game computes and refuses to install unless the function is
-  byte-for-byte the one it was written against.
-* **Table Emptiness Census** and **Leave Lua Garbage Collection Alone** are
-  diagnostics, not optimizations. Garbage collection is the most expensive Lua
-  work in every profile taken here, ahead of running scripts, and neither how
-  much of it is wasted nor how much of it this tool causes has ever been
-  measured. These two answer that.
+* **Garbled SavedVariables filenames**, reported by
+  [txtsd](https://github.com/txtsd) - `ElvUI.lua` written as `)_.lua`. The client
+  had run out of contiguous memory below 2GB and nothing here reacted, because
+  the two things watching it were reading the wrong half of the address space.
+* **WoWCircle disconnects**, reported by
+  [Flokj](https://github.com/suprepupre/wow-optimize/issues/58) and confirmed by
+  asslol. Fixed by the new **No Client Patches** option, which turns the
+  optimizations off - a trade, not a fix.
+* **Glowing characters, weapons and shoulder pads**, reported by
+  [txtsd](https://github.com/txtsd). Spread Model Animation skipped material and
+  attachment animation along with the bones.
+* **Crash in the game's error formatter** with Reuse Compiled Scripts on.
+* **Combat Log Filter did nothing** unless a second, unrelated option was on.
+  Reported by Anarom.
+* **Freezes of eight to fifteen seconds were never captured.** The watchdog only
+  fired past 45 seconds.
+* **The DLL needed the Visual C++ Redistributable.** It does not now.
+* **Steadier Shadows did nothing** unless the diagnostic probe was also on. It
+  still does not fix the flicker; leave it off.
+* **Stalls of 40ms every five minutes** caused by this tool's own reporting.
+* **Roughly 120 locked instructions removed from hot paths.**
+* Several options were gated behind unrelated ones and are now separate, each
+  keeping your existing setting: **Render Hooks**, **Async Worker Pool**,
+  **Thread Affinity**, **SSE2 Frustum Cull and Quaternion Normalize**, **Cache
+  Script Handlers**, **Unit API Fast Path**.
+* Wrong numbers in the log: feature counts, draw calls per frame, the CVar
+  watchdog reporting a corrupted client in every log ever collected, and short
+  sessions printing no report at all.
 
 ---
 
@@ -636,11 +500,14 @@ Then inject after WoW starts.
 The optimization suite is compatible with any standard or customized WotLK 3.3.5a client (build 12340), including private servers using custom executables:
 * **Warmane** (Icecrown, Lordaeron, Onyxia) — **STRICTLY PROHIBITED (WILL RESULT IN A PERMANENT BAN)**
 * **Project Ascension** (supporting custom `Ascension.exe` launches)
-* **WoW Circle** (supporting `WoWCircle.exe` launches)
+* **WoW Circle** - **On WoW Circle the DLL gets you disconnected** - Turning on **No Client Patches** in the launcher stops it, and
+also turns every optimization off.   
+Or use the `!LuaBoost` addon without the DLL.
 * **EZ WoW**
 * **WoW Sirus** (supporting `Sirus.exe` or custom `run.exe` launches)
 * **UWow** / **Firestorm** (supporting `run.exe` launches)
 * **ChromieCraft 3.3.5a**
+
 
 1. Install the `!LuaBoost` addon into `Interface\AddOns\`.
 2. **Disable conflicting addons:** Remove or disable any third-party GC optimizers (`GarbageProtector`, `GarbageCollector`, `SmartGC`, etc.) and combat log fixes (`CombatLogFix`, etc.). The DLL handles these natively; running both causes duplicate hooks, memory corruption, or crashes.
