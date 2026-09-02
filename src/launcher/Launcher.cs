@@ -671,6 +671,14 @@ namespace WowOptimizeLauncher {
             leftPanel.Controls.Add(btnDefaults);
             y += 36;
 
+            DarkButton btnMeasure = new DarkButton(Color.FromArgb(0, 200, 120), false);
+            btnMeasure.Text = "SET UP A MEASUREMENT RUN";
+            btnMeasure.Size = new Size(btnWidth, 30);
+            btnMeasure.Location = new Point(15, y);
+            btnMeasure.Click += delegate { SetUpMeasurementRun(); };
+            leftPanel.Controls.Add(btnMeasure);
+            y += 36;
+
             DarkButton btnSaveProfile = new DarkButton(CyanAccent, false);
             btnSaveProfile.Text = "SAVE PROFILE...";
             btnSaveProfile.Size = new Size(btnWidth, 30);
@@ -1085,6 +1093,74 @@ namespace WowOptimizeLauncher {
                 if (enabled && item.Experimental) continue;
                 item.Ctrl.Checked = enabled;
             }
+        }
+
+        // The features the A/B harness can measure, by ini key.
+        //
+        // It can only alternate a feature that installed, and a feature installs
+        // only if its own switch is on. On a default install that is two of the
+        // sixteen below, so a tester who ticks A/B and plays for an hour gets a
+        // report about two things. A tester gives this project about one session a
+        // week; that is what this button is for.
+        //
+        // MatrixVectorSse2 belongs in the list precisely because it is known to be
+        // slower than the code it replaces. If a run reports it as faster, the
+        // measurement is what is wrong, and the DLL says so in the log itself.
+        private static readonly string[] AbSubjectKeys = new string[] {
+            "LayoutRelinkFast", "M2SortKey", "LuaPoolFast", "LuaHGetDispatch",
+            "QuatLerpSse2", "AnimQuatUnpack", "AnimVec3Track", "FrustumAabb",
+            "AabbOverlap", "SegmentAabb", "SimdGeometry", "FastMemsetOpt",
+            "StrncmpSse2", "LuaGcManual", "MatrixVectorSse2", "BoneMatrixUpload"
+        };
+
+        private void SetUpMeasurementRun() {
+            if (settingsMap == null) return;
+
+            DialogResult answer = MessageBox.Show(
+                "This ticks A/B Test a Feature and the sixteen features it can "
+                + "measure, and changes nothing else you have set.\r\n\r\n"
+                + "During the session each of the sixteen is switched on and off in "
+                + "turn, four times each, twenty seconds at a time - so the same "
+                + "zone, the same addons and the same machine land in both halves "
+                + "and cancel. One pass over all sixteen takes about forty-three "
+                + "minutes.\r\n\r\n"
+                + "Sixteen experimental features on at once is more than anyone "
+                + "would run for play. Each one checks itself against the game and "
+                + "switches itself off if it disagrees, and the log names which - "
+                + "but if the client misbehaves, this is why.\r\n\r\n"
+                + "Play normally for at least forty-five minutes, then send the log "
+                + "from the Logs folder. Set them up now?",
+                "Set up a measurement run",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) return;
+
+            int turnedOn = 0;
+            int notFound = 0;
+            foreach (SettingItem item in settingsMap.Values) {
+                if (item.Ctrl == null) continue;
+                if (item.Key == "AbTest") { item.Ctrl.Checked = true; }
+            }
+            for (int i = 0; i < AbSubjectKeys.Length; i++) {
+                bool found = false;
+                foreach (SettingItem item in settingsMap.Values) {
+                    if (item.Ctrl == null || item.Key != AbSubjectKeys[i]) continue;
+                    found = true;
+                    if (!item.Ctrl.Checked) { item.Ctrl.Checked = true; turnedOn++; }
+                }
+                if (!found) notFound++;
+            }
+
+            // A key in the list with no tickbox is a defect in this file, not in
+            // the run, and saying nothing about it is how it would survive.
+            string note = "A/B test on, " + turnedOn.ToString()
+                + " feature(s) newly switched on. Press SAVE, then play.";
+            if (notFound > 0) {
+                note = note + "\r\n\r\n" + notFound.ToString()
+                    + " of the sixteen has no entry in this launcher and was not "
+                    + "set. That is a bug here - please mention it with the log.";
+            }
+            MessageBox.Show(note, "Measurement run",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ToggleTabFeatures(string section, bool enabled) {
