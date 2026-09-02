@@ -122,6 +122,7 @@
 #include "config.h"
 #include "ab_test.h"
 #include "session_verdict.h"
+#include "flight_recorder.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -203,6 +204,12 @@ static unsigned g_scalarBones = 0;   // bones the A/B control half did
 // patches, the calls and the hoisted loads are in both.
 static bool g_abSubject = false;
 
+// A flight recorder column. Skinning load is the one thing a player describing
+// a stutter in a raid is usually standing in the middle of, and a per-frame bone
+// count is what says whether the frame they marked had five hundred of them or
+// five thousand. A ten-second average cannot show that.
+static int g_frSlot = -1;
+
 static inline void TransposeScalar(const float* s, float* d) {
     d[0]  = s[0];  d[1]  = s[4];  d[2]  = s[8];   d[3]  = s[12];
     d[4]  = s[1];  d[5]  = s[5];  d[6]  = s[9];   d[7]  = s[13];
@@ -237,6 +244,7 @@ static unsigned RunCore(float* dst, const unsigned short* batch,
 
     ++g_calls[site];
     g_bones[site] += count;
+    FlightRecorder::Bump(g_frSlot, count);
     if (count > g_maxBones[site]) g_maxBones[site] = count;
 
     const bool control = g_abSubject && AbTest::StandAside();
@@ -427,6 +435,7 @@ bool Init() {
     }
 
     g_abSubject = AbTest::IsSubject("BoneMatrixUpload", &g_abSubject);
+    g_frSlot    = FlightRecorder::RegisterSlot("bones");
 
     Log("[BoneUpload] ACTIVE on %d of %d bone matrix upload loops. The one in "
         "sub_829BA0 is 3.35%% of executing time in the corrected profile and the "
