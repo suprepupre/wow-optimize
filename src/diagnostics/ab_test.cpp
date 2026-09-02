@@ -360,6 +360,28 @@ void LogStats() {
             d < 0 ? -d : d, d > 0 ? "faster" : "slower",
             meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
 
+        // The tail, differenced rather than left for the reader.
+        //
+        // The mean is the wrong figure for anything whose job is to remove a rare
+        // stall - the GC governor exists for exactly that - and several reports in
+        // this project tell the reader to look at p95 and p99 without ever
+        // subtracting one from the other. A percentile that landed in the overflow
+        // bucket has no number, so that pair is skipped rather than differenced
+        // against a made-up 120.
+        struct { const char* name; double frac; } tails[] = {
+            { "p50", 0.50 }, { "p95", 0.95 }, { "p99", 0.99 }
+        };
+        for (int t = 0; t < 3; ++t) {
+            double a = 0.0, b = 0.0;
+            if (!Percentile(g_on, tails[t].frac, &a)) continue;
+            if (!Percentile(g_off, tails[t].frac, &b)) continue;
+            double diff = b - a;   // positive means ON was faster
+            Log("[AbTest]   %s: %.2f ms with it on against %.2f without, so ON is "
+                "%.2f ms %s there",
+                tails[t].name, a, b, diff < 0 ? -diff : diff,
+                diff > 0 ? "faster" : "slower");
+        }
+
         // The function's own cost, which is the number that resolves a feature
         // too small for frame time to see. Ticks rather than nanoseconds: the TSC
         // frequency is not the performance-counter frequency and this project has
