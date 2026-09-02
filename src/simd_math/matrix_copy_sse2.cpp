@@ -10,6 +10,7 @@
 #include <cmath>
 #include "version.h"
 #include "matrix_copy_sse2.h"
+#include "ab_test.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -68,7 +69,16 @@ static const __m128 kIdentityRow3 = { 0.0f, 0.0f, 0.0f, 1.0f };
 // Original does 16 scalar FPU load/store pairs.
 // 4x SSE2 unaligned 128-bit moves cover all 64 bytes.
 // ================================================================
-static float* __fastcall HookMatrixCopy(float* self, void* /*edx*/, float* src) {
+// Set at init when the A/B harness names this module.
+//
+// These three hooks sit on the busiest maths in the client - 247 call sites for
+// the copy, 66 for the multiply, 53 for the identity - and none has ever been
+// measured against the client doing the same work. Each stands aside on an OFF
+// stint and is timed on both, because none is a large enough share of a frame
+// for frame time on its own to separate.
+static bool g_abSubject = false;
+
+static float* __fastcall HookMatrixCopyBody(float* self, void* /*edx*/, float* src) {
     ++g_matcopy_calls;
 
     uintptr_t s = (uintptr_t)self;
@@ -89,12 +99,24 @@ static float* __fastcall HookMatrixCopy(float* self, void* /*edx*/, float* src) 
     return pOrigMatCopy(self, nullptr, src);
 }
 
+// The detour proper. Split from the body so the A/B harness can time the
+// call: a scope guard closing that sample on every return path cannot live in
+// a function containing __try, which the body does.
+static float* __fastcall HookMatrixCopy(float* self, void* edx, float* src) {
+    if (!g_abSubject) return HookMatrixCopyBody(self, edx, src);
+    unsigned long long abTick = AbTest::TickIn();
+    float* r = AbTest::StandAside() ? pOrigMatCopy(self, edx, src)
+                                    : HookMatrixCopyBody(self, edx, src);
+    AbTest::TickOut(abTick);
+    return r;
+}
+
 // ================================================================
 // sub_407F40: 4x4 matrix identity (53 xrefs)
 // Original writes 16 immediate floats through the FPU.
 // 4x SSE2 stores from compile-time constants.
 // ================================================================
-static float* __fastcall HookMatrixIdentity(float* self, void* /*edx*/) {
+static float* __fastcall HookMatrixIdentityBody(float* self, void* /*edx*/) {
     ++g_matident_calls;
 
     uintptr_t s = (uintptr_t)self;
@@ -111,6 +133,18 @@ static float* __fastcall HookMatrixIdentity(float* self, void* /*edx*/) {
     }
 
     return pOrigMatIdentity(self, nullptr);
+}
+
+// The detour proper. Split from the body so the A/B harness can time the
+// call: a scope guard closing that sample on every return path cannot live in
+// a function containing __try, which the body does.
+static float* __fastcall HookMatrixIdentity(float* self, void* edx) {
+    if (!g_abSubject) return HookMatrixIdentityBody(self, edx);
+    unsigned long long abTick = AbTest::TickIn();
+    float* r = AbTest::StandAside() ? pOrigMatIdentity(self, edx)
+                                    : HookMatrixIdentityBody(self, edx);
+    AbTest::TickOut(abTick);
+    return r;
 }
 
 // ================================================================
@@ -216,7 +250,7 @@ static bool SelfTestMatrixMultiply() {
     return true;
 }
 
-static float* __cdecl HookMatrixMultiply(float* result, float* a, float* b) {
+static float* __cdecl HookMatrixMultiplyBody(float* result, float* a, float* b) {
     ++g_matmul_calls;
 
     uintptr_t r = (uintptr_t)result, pa = (uintptr_t)a, pb = (uintptr_t)b;
@@ -234,6 +268,18 @@ static float* __cdecl HookMatrixMultiply(float* result, float* a, float* b) {
         }
     }
     return pOrigMatMul(result, a, b);
+}
+
+// The detour proper. Split from the body so the A/B harness can time the
+// call: a scope guard closing that sample on every return path cannot live in
+// a function containing __try, which the body does.
+static float* __cdecl HookMatrixMultiply(float* result, float* a, float* b) {
+    if (!g_abSubject) return HookMatrixMultiplyBody(result, a, b);
+    unsigned long long abTick = AbTest::TickIn();
+    float* r = AbTest::StandAside() ? pOrigMatMul(result, a, b)
+                                    : HookMatrixMultiplyBody(result, a, b);
+    AbTest::TickOut(abTick);
+    return r;
 }
 
 #if !TEST_DISABLE_QUAT_MATRIX_SSE2
@@ -1155,6 +1201,14 @@ static float* __fastcall Hooked_MatTranslateLocal(float* self, void* edx, float*
 // Install hooks
 // ================================================================
 bool InstallMatrixCopySSE2() {
+    g_abSubject = AbTest::IsSubject("M2MatrixSimd");
+    if (g_abSubject) {
+        Log("[MatrixSSE2] under A/B test: the copy, the identity and the "
+            "multiply alternate on and off in stints, and AbTest reports both "
+            "the frame times and the cost of each call either way. The "
+            "correctness checks are unaffected.");
+    }
+
 #if !TEST_DISABLE_MATRIX_COPY
     struct HookDef {
         void*       addr;
