@@ -10797,6 +10797,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             // Dynamic FreeLibrary - safe to clean up
             __try {
 #if !TEST_DISABLE_SAMPLING_PROFILER
+            // Puts ten bytes of wow.exe back. It matters only on a real
+            // DLL_PROCESS_DETACH, and this DLL usually leaves through
+            // TerminateProcess, where nothing here runs and nothing needs to.
+            BoneMatrixUpload::Shutdown();
             SamplingProfiler::Shutdown();
 #endif
             TextureUnloadDelay::Shutdown();
