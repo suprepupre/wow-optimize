@@ -363,8 +363,35 @@ static HRESULT __stdcall Hooked_SetTexture(void* dev, DWORD stage, void* tex) {
     CheckDeviceChange(dev);
     ++g_statCalls[3];
 
-    // Measurement only. The pointer is compared and counted, never acted on, so
-    // an address that has been recycled costs a wrong count and nothing else.
+    // The recycling argument, written out because the measurement below exists to
+    // decide whether to act on it and the reasoning should not be invented on the
+    // day the number arrives.
+    //
+    // The stated risk is that a texture is freed and a new one lands at the same
+    // address, so a cached pointer matches an object that is no longer the one
+    // the client means. That cannot happen to this particular cache.
+    //
+    // SetTexture AddRefs the texture it binds and Releases the one it replaces.
+    // So while a stage holds pointer P, the device itself holds a reference to P,
+    // and P cannot be freed - its address cannot be recycled while it is the
+    // thing this cache would compare against. The moment the client binds
+    // something else to that stage, the old texture may be freed, and that is
+    // also the moment the cache entry is overwritten with the new pointer. The
+    // cache mirrors exactly what the device is holding a reference to.
+    //
+    // What else the call does, since skipping an engine call on "it only skips
+    // work" has been wrong three times here: it AddRefs the new and Releases the
+    // old, which for new == old is a no-op in net, and it marks the stage dirty
+    // for the next draw, which is what we would be avoiding on purpose.
+    //
+    // Two things that are NOT settled and would have to be before acting:
+    // whether calls arrive from more than one thread when D3d9RenderThread is on,
+    // because none of these caches take a lock; and whether DXVK's own SetTexture
+    // does bookkeeping beyond the D3D9 contract. Until the share below says the
+    // saving is worth asking those questions, they stay unasked.
+    //
+    // Measurement only for now. The pointer is compared and counted, never acted
+    // on, so a recycled address costs a wrong count and nothing else.
     if (stage < 8) {
         ++g_texCompared;
         if (g_shadowTexValid[stage] && g_shadowTex[stage] == tex) ++g_texWouldSkip;
