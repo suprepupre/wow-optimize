@@ -4718,8 +4718,20 @@ static void ConfigureMimalloc() {
         for (int i = 0; i < SEEDS_PER_SIZE; i++) if (batch[i]) mi_free(batch[i]);
     }
 
-    Log("mimalloc v%d.%d.%d configured (eager commit, reset purge, pre-warmed 32MB + 23 size classes)",
-        mi_version() / 100, (mi_version() % 100) / 10, mi_version() % 10);
+    // This line said "eager commit" while the option four lines below it is set
+    // to 0, and it is the line a reader reaches for when working out where two
+    // gigabytes of address space went. It now states the options as set, and
+    // says what reset purge costs: freed pages give physical memory back and
+    // keep their address space, which on a 32-bit client is the scarce half.
+    Log("mimalloc v%d.%d.%d configured (arena eager commit OFF, purge by "
+        "MEM_RESET after %dms, large OS pages %s, pre-warmed 32MB + 23 size "
+        "classes). Reset purge returns physical pages and keeps the address "
+        "space, which is deliberate - MEM_DECOMMIT unmapped buffers a GL driver "
+        "was still reading on its own thread - but it means freed memory does "
+        "not raise the largest free block below 2GB. Only a collect does.",
+        mi_version() / 100, (mi_version() % 100) / 10, mi_version() % 10,
+        (int)mi_option_get(mi_option_purge_delay),
+        TEST_ENABLE_LARGE_PAGES ? "allowed" : "off");
 }
 
 static void AdjustMimallocForMultiClient() {

@@ -14,7 +14,7 @@
 #include "version.h"
 
 extern "C" void Log(const char* fmt, ...);
-extern "C" SIZE_T HeapCompactor_GetCachedLargestBlock();
+extern "C" SIZE_T HeapCompactor_GetCachedLowHalf();
 
 namespace PressureGovernor {
 
@@ -95,29 +95,36 @@ bool RegisterShedCallback(ShedCallback cb, void* ctx) {
     return true;
 }
 
-static SIZE_T GetLargestFreeBlock() {
+// The largest free run BELOW 2GB, which is where the client allocates from.
+//
+// A run that crosses the boundary is cut at it rather than carried over, so a
+// large free region in the high half cannot make the low half look healthy -
+// which is exactly how this governor slept through a session that ran out.
+static SIZE_T GetLargestFreeBlockLowHalf() {
+    static const uintptr_t LOW_HALF_END = 0x80000000u;
     MEMORY_BASIC_INFORMATION mbi;
     SIZE_T largestFree = 0;
     SIZE_T currentFree = 0;
     uintptr_t addr = 0;
-    
+
     while (VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) {
+        uintptr_t base = (uintptr_t)mbi.BaseAddress;
+        if (base >= LOW_HALF_END) break;
         if (mbi.State == MEM_FREE) {
-            currentFree += mbi.RegionSize;
+            SIZE_T part = (base + mbi.RegionSize > LOW_HALF_END)
+                        ? (SIZE_T)(LOW_HALF_END - base)
+                        : mbi.RegionSize;
+            currentFree += part;
+            if (part != mbi.RegionSize) break;   // the run ends at the boundary
         } else {
-            if (currentFree > largestFree) {
-                largestFree = currentFree;
-            }
+            if (currentFree > largestFree) largestFree = currentFree;
             currentFree = 0;
         }
-        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-        if (addr < (uintptr_t)mbi.BaseAddress) break; // Overflow
+        addr = base + mbi.RegionSize;
+        if (addr < base) break; // Overflow
     }
-    
-    if (currentFree > largestFree) {
-        largestFree = currentFree;
-    }
-    
+
+    if (currentFree > largestFree) largestFree = currentFree;
     return largestFree;
 }
 
@@ -136,9 +143,21 @@ void OnFrame() {
         if ((g_frameTick & 0x3) != 0) return;
     }
 
-    SIZE_T freeBlock = HeapCompactor_GetCachedLargestBlock();
+    // The low half, not the whole address space.
+    //
+    // This read the full-range figure until 2026-09-02, and a tester session
+    // showed what that costs: 1MB largest free below 2GB, four reports running,
+    // while the same second had 1237MB free across all of user address space.
+    // The client allocates from below 2GB, so it was starving; this governor saw
+    // 1237MB, stayed GREEN and shed nothing for the entire session. The two
+    // numbers were printed one under the other in that log and nobody subtracted
+    // them.
+    SIZE_T freeBlock = HeapCompactor_GetCachedLowHalf();
     if (freeBlock == 0) {
-        freeBlock = GetLargestFreeBlock();
+        // The compactor is switched off or has not walked yet. Walking the whole
+        // space here would answer the wrong question, so the local fallback below
+        // measures the low half too.
+        freeBlock = GetLargestFreeBlockLowHalf();
     }
     if (freeBlock == 0) return;                     // monitor not sampled yet
 
@@ -173,9 +192,19 @@ void OnFrame() {
         g_hystCount++;
         if (g_hystCount >= HYST_SAMPLES) {
             g_level.store(target);
-            Log("[PressureGovernor] %s -> %s (LargestFree=%uMB, samples=%d)",
+            // Naming the range on this line, because the number it used to
+            // print was over the whole address space and read as healthy while
+            // the half the client uses had a megabyte left.
+            Log("[PressureGovernor] %s -> %s (largest free block below 2GB = "
+                "%uMB, %d samples)",
                 LevelName(current), LevelName(target),
                 (unsigned)(freeBlock / (1024*1024)), g_hystCount);
+            if (target >= PRESSURE_RED)
+                Log("[PressureGovernor]   RED sheds the caches and runs one "
+                    "mi_collect. Tightening the purge delay returns physical "
+                    "pages, not address space, because purging is by MEM_RESET "
+                    "here - the collect is the part that can hand a segment "
+                    "back and raise the figure above.");
             FireCallbacks(target);
             g_hystCount = 0;
         }

@@ -527,6 +527,24 @@ extern "C" SIZE_T HeapCompactor_GetCachedLargestBlock() {
     return g_lastLargestBlock.load();
 }
 
+// The same reading for the low half, which is the one every consumer of the
+// line above actually wanted.
+//
+// txtsd's 2026-09-02 session: "VA Space (below 2GB): Free=16MB
+// LargestBlock=1MB WARNING: fragmented" four reports running, while this
+// module reported 1237MB free across all of user address space in the same
+// second. The client allocates from below 2GB. Every consumer read the second
+// number, so the pressure governor sat in GREEN and the Lua collector never
+// stepped harder, for a whole session, while the client could not get 2MB.
+// ElvUI.lua was written to disk that session as ")_.lua".
+//
+// Zero means the monitor has not walked yet, which callers must treat as "not
+// measured" rather than "nothing free" - the same contract as above.
+extern "C" SIZE_T HeapCompactor_GetCachedLowHalf() {
+    if (!g_lastWalkTick) return 0;
+    return g_lastWalkLow;
+}
+
 extern "C" void HeapCompactor_GetStats(uint64_t* checks, uint64_t* compactions, 
                                         SIZE_T* lastBlock, SIZE_T* minBlock, SIZE_T* maxBlock) {
     if (checks) *checks = g_checksPerformed.load();
@@ -541,5 +559,6 @@ extern "C" void HeapCompactor_GetStats(uint64_t* checks, uint64_t* compactions,
 // Compactor disabled: report "no data" so VA-pressure consumers stay inert.
 #include <windows.h>
 extern "C" SIZE_T HeapCompactor_GetCachedLargestBlock() { return 0; }
+extern "C" SIZE_T HeapCompactor_GetCachedLowHalf() { return 0; }
 
 #endif // TEST_DISABLE_HEAP_COMPACTOR

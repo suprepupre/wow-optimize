@@ -43,7 +43,7 @@ extern "C" void ReleaseLoadingArena();
 
 extern bool g_isMultiClient;
 extern "C" void Log(const char* fmt, ...);
-extern "C" SIZE_T HeapCompactor_GetCachedLargestBlock();
+extern "C" SIZE_T HeapCompactor_GetCachedLowHalf();
 
 // ================================================================
 // Lua 5.1 types and GC constants.
@@ -808,7 +808,10 @@ static void StepGC(lua_State* L, double frameMs) {
     // beats ERROR #134. Uses the heap compactor's cached sample (0 = not yet
     // measured -> ignored). Bounded to 8MB/frame so it can't itself stall.
     {
-        SIZE_T vaLargest = HeapCompactor_GetCachedLargestBlock();
+        // Below 2GB, not across the whole space. This read the full-range
+        // figure until 2026-09-02, so in a session whose low half was down to a
+        // 1MB largest block it saw 1237MB and never stepped harder once.
+        SIZE_T vaLargest = HeapCompactor_GetCachedLowHalf();
         if (vaLargest != 0 && vaLargest < 48u * 1024 * 1024) {
             stepKB *= 3;
             if (stepKB > 8192) stepKB = 8192;
