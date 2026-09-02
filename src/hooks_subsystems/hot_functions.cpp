@@ -12,6 +12,7 @@
 #include <emmintrin.h>   // SSE2
 #include "MinHook.h"
 #include "hot_functions.h"
+#include "ab_test.h"
 #include "crash_dumper.h"
 #include "sampling_profiler.h"
 
@@ -50,7 +51,13 @@ static memset_t g_orig_memset = nullptr;
 // All store paths are bounded by Size: the 16-byte stores either fit fully
 // (i + 16 <= Size) or are the single trailing block ending exactly at
 // dest+Size, so the function never writes past the caller's buffer.
-void* __cdecl Hooked_memset(void* dest, int Val, size_t Size) {
+// Set at init when the A/B harness names this module. The replacement was called
+// 155,257,774 times in one measured session and has never been compared against
+// the client's own memset on a live client - only in a standalone harness, where
+// the cache state and the size distribution are not the client's.
+static bool g_abSubject = false;
+
+static void* __cdecl Hooked_memsetBody(void* dest, int Val, size_t Size) {
     if (!dest || Size == 0) return dest;
 
     g_memset_calls++;
@@ -102,6 +109,22 @@ void* __cdecl Hooked_memset(void* dest, int Val, size_t Size) {
     return dest;
 }
 
+// The detour proper. Kept apart from the body so the harness can time the call on
+// both sides with one pair of clock reads covering every path out of it.
+//
+// Not `static void* r` - a function-local static is initialised once, and every
+// call after the first would return the first destination pointer. That is the
+// mistake the strncmp wrapper was generated with, on a function called a hundred
+// and fifty million times a session.
+void* __cdecl Hooked_memset(void* dest, int Val, size_t Size) {
+    if (!g_abSubject) return Hooked_memsetBody(dest, Val, Size);
+    unsigned long long abTick = AbTest::TickIn();
+    void* r = AbTest::StandAside() ? g_orig_memset(dest, Val, Size)
+                                   : Hooked_memsetBody(dest, Val, Size);
+    AbTest::TickOut(abTick);
+    return r;
+}
+
 bool InstallHotFunctionOptimizations() {
     void* target = (void*)0x0040BB80;
     
@@ -118,6 +141,13 @@ bool InstallHotFunctionOptimizations() {
     
     g_featureToken = CrashDumper::FeatureTokenForCounting("HotFunctions");
     SamplingProfiler::RegisterSelfSymbol("memset_SSE2", (const void*)&Hooked_memset);
+    g_abSubject = AbTest::IsSubject("FastMemsetOpt");
+    if (g_abSubject) {
+        Log("[FastMemset] under A/B test: it alternates on and off in stints and "
+            "AbTest reports the cost of the call each way. 155 million calls in a "
+            "measured session, and the standalone harness that timed it did not "
+            "have the client's cache state or its size distribution.");
+    }
     Log("[FastMemset] Installed: SSE2 memset replacement (1108 callers, NT >= 2MB)");
     return true;
 }
