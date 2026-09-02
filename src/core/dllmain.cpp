@@ -810,7 +810,9 @@ extern "C" void WowOpt_NoteClientPatchRefused(void) {
 #define CRASH_TEST_DISABLE_GETFILEATTR     0   // GetFileAttributesA cache
 #endif
 #ifndef CRASH_TEST_DISABLE_GLOBALALLOC
-#define CRASH_TEST_DISABLE_GLOBALALLOC     1   // GlobalAlloc->mimalloc (enabled with consistency fixes)
+// DEAD FLAG - no #if anywhere reads it, and its comment contradicts its value.
+// InstallGlobalAllocHooks decides this itself and logs that it is disabled.
+#define CRASH_TEST_DISABLE_GLOBALALLOC     1
 #endif
 #define CRASH_TEST_DISABLE_CS_ENTER        1   // CriticalSection TryEnter spin (causes login freeze)
 #define CRASH_TEST_DISABLE_CS_INIT         1   // InitializeCriticalSection hook (causes login freeze/crash)
@@ -829,13 +831,15 @@ extern "C" void WowOpt_NoteClientPatchRefused(void) {
 #define CRASH_TEST_DISABLE_TICK_COUNT      1   // GetTickCount/timeGetTime redirection to QPC (DISABLED to fix random stutters and CPU overhead)
 #define CRASH_TEST_DISABLE_LUA_INTERNALS   0   // Lua VM internals (concat hook)
 #define CRASH_TEST_DISABLE_THREAD_AFFINITY   0   // Thread core pinning (re-enabled - was disabled preemptively)
-#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1   // WaitSpin (ALREADY DISABLED - tested bad)
+#define CRASH_TEST_DISABLE_SHORT_WAIT_SPIN   1   // WaitSpin - tested bad. DEAD FLAG: no #if reads it.
 #ifndef CRASH_TEST_DISABLE_VA_ARENA
 #define CRASH_TEST_DISABLE_VA_ARENA          0   // VA Arena compiled in; activation is runtime opt-in via Config OptVaArena (default off). Set to 1 to hard-remove.
 #endif
-#define CRASH_TEST_DISABLE_DISPATCH_POOL     1   // DispatchPool (ALREADY DISABLED - tested bad)
-#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1   // bgpreloadsleep cache (ALREADY DISABLED - 0 hits)
-#define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1   // Subtask event pool (ALREADY DISABLED - 0 hits)
+// DEAD FLAGS - no #if anywhere reads these three. The code they name is not in
+// the build; setting them to 0 puts none of it back. Kept for the note.
+#define CRASH_TEST_DISABLE_DISPATCH_POOL     1   // DispatchPool - tested bad
+#define CRASH_TEST_DISABLE_BGPRELOAD_CACHE   1   // bgpreloadsleep cache - 0 hits
+#define CRASH_TEST_DISABLE_SUBTASK_EVENTPOOL 1   // Subtask event pool - 0 hits
 
 // Feature toggles for hooks
 #ifndef CRASH_TEST_DISABLE_GETFILESIZE_CACHE
@@ -9264,10 +9268,9 @@ struct FSizeEntry {
 
 static FSizeEntry g_fsizeCache[FSIZE_CACHE_SIZE] = {};
 
-// GetFileSizeEx cache disabled � disabled in production
-// hang after character select. Windows reuses handle values; caching
-// by handle returns stale sizes for recycled handles.
-#define TEST_DISABLE_GETFILESIZE_CACHE  1
+// The flag that used to sit here read 1 and was referenced by no #if, so it
+// said the cache was compiled out while deciding nothing; the reason it does
+// not exist is on the function below.
 
 
 

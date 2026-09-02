@@ -277,6 +277,8 @@
 // 3. Throttling OnUpdate breaks MoveAnything position tracking and addon timing
 //    contracts (addons expect OnUpdate every frame for smooth animation).
 // Would need complete rewrite with different hook target and proper addon compat.
+// DEAD FLAG - no #if reads it. The feature described above was never written,
+// so this decides nothing and setting it to 0 puts nothing back.
 #define TEST_DISABLE_FRAME_THROTTLE     1
 
 // Tooltip String Caching - cache formatted tooltip strings by item/spell ID
@@ -1067,6 +1069,8 @@ static inline bool WO_LateBatchAllowed() {
 
 #define CRASH_TEST_DISABLE_MODHANDLE_CACHE         0
 
+// DEAD FLAG - no #if reads it, and dllmain.cpp defines the same name again.
+// InstallGlobalAllocHooks decides this itself and says so in the log.
 #define CRASH_TEST_DISABLE_GLOBALALLOC         1
 
 #define CRASH_TEST_DISABLE_VA_ARENA         0   // compiled in; activation is runtime opt-in via Config OptVaArena (default off). This is the authoritative definition (included before dllmain's #ifndef fallback).
