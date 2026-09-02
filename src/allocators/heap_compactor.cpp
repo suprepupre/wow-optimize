@@ -266,32 +266,19 @@ static DWORD WINAPI MonitorThread(LPVOID) {
         while (largestFree > maxVal && 
                !g_maxLargestBlock.compare_exchange_weak(maxVal, largestFree));
         
-        // Check thresholds — only *request* compaction here; the main thread
-        // performs the actual heap mutation (see HeapCompactor_RunPendingWork).
-        if (largestFree < CRITICAL_THRESHOLD) {
-            // Rate-limited: this fires every monitor tick once the process is out
-            // of address space, and a tester log shows it repeating unchanged for
-            // five minutes. One line per 30s is enough to establish the state.
-            static DWORD lastCriticalTick = 0;
-            DWORD nowTick = GetTickCount();
-            if (nowTick - lastCriticalTick > 30000) {
-                Log("[HeapCompactor] CRITICAL: LargestFreeBlock=%uMB (<%dMB) - requesting compaction",
-                    (unsigned)(largestFree / (1024*1024)), (int)(CRITICAL_THRESHOLD / (1024*1024)));
-                lastCriticalTick = nowTick;
-            }
-            g_pendingWork.store(2, std::memory_order_release);
-        } else if (largestFree < WARNING_THRESHOLD) {
-            // Proactively compact before reaching critical threshold
-            static DWORD lastWarningTick = 0;
-            DWORD now = GetTickCount();
-            if (now - lastWarningTick > 30000) { // Max 1 per 30 seconds
-                Log("[HeapCompactor] WARNING: LargestFreeBlock=%uMB (<32MB) - requesting proactive compaction",
-                    (unsigned)(largestFree / (1024*1024)));
-                int expected = 0;
-                g_pendingWork.compare_exchange_strong(expected, 1, std::memory_order_release);
-                lastWarningTick = now;
-            }
-        }
+        // The thresholds that used to be checked here are gone.
+        //
+        // They tested largestFree - the largest run anywhere in user address
+        // space - against 16MB and 32MB, and requested the same compaction the
+        // low-half check above requests. largestLow can never exceed largestFree,
+        // so largestFree < 16MB implies largestLow < 16MB and the block above has
+        // already fired: strictly redundant, and removing them changes nothing
+        // for any input.
+        //
+        // What they were not was harmless. A second threshold on the wrong figure
+        // is what let two other modules sit calm through a session with one
+        // megabyte left below 2GB, and their log lines said "LargestFreeBlock"
+        // with no range on it while the line above named its own.
     }
 
     Log("[HeapCompactor] Monitor thread shutting down");
