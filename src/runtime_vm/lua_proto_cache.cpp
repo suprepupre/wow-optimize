@@ -278,6 +278,28 @@ unsigned long g_verified = 0, g_firstSighting = 0, g_flushes = 0, g_onSight = 0;
 unsigned long g_stale = 0;
 unsigned long long g_bytesSaved = 0, g_bytesTooBig = 0;
 
+// What the cache saves, in time rather than in kilobytes.
+//
+// This module has always reported "N KB of parsing skipped", and kilobytes of
+// source are not a saving - the whole argument for building it was that 88% of
+// compiled chunks were source already compiled, which is equally not a saving.
+// The number that decides whether it is worth its risk is how long the parses it
+// skipped would have taken.
+//
+// No A/B run is needed for it. A miss runs the client's parser and can be timed
+// directly; a hit skips it entirely and costs the lookup. Mean miss time times
+// the hit count is what the session saved, and both halves are measured here
+// rather than assumed.
+//
+// One call in 64 is timed on each side. The parser is not a per-frame hot path -
+// a few thousand calls a session - so the sampling is only there to keep a
+// context switch from dominating a small sample set.
+LARGE_INTEGER g_parseFreq = {};
+unsigned long g_missTimed = 0, g_hitTimed = 0;
+double        g_missMsTotal = 0.0, g_hitMsTotal = 0.0;
+constexpr unsigned kParseSampleMask = 63;
+unsigned long g_parseSeq = 0;
+
 // What luaY_parser handed back on a miss, for the luaL_loadbuffer hook one
 // level out to anchor. Only ever written and read on the owner thread.
 struct Pending {
@@ -486,6 +508,12 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
 void* __cdecl Hooked_luaY_parser(void* L, void* z, void* buff, const char* name) {
     g_pending.want = false;
 
+    // Taken before Classify, so a timed hit covers the lookup as well as the
+    // skipped parse - which is what the client actually pays on a hit.
+    LARGE_INTEGER enter;
+    if (g_parseFreq.QuadPart) QueryPerformanceCounter(&enter);
+    else                      enter.QuadPart = 0;
+
     if (g_dead || !L || !z || !name) return orig_luaY_parser(L, z, buff, name);
 
     // One Lua state, one thread. Anything else compiles normally.
@@ -504,9 +532,37 @@ void* __cdecl Hooked_luaY_parser(void* L, void* z, void* buff, const char* name)
     }
 
     // Either a reuse, or a check that already ran the parser for us.
-    if (decided || checked) return decided;
+    //
+    // `decided` without `checked` is a straight reuse: the parser did not run.
+    // Timed here so the saving can be stated in milliseconds rather than in
+    // kilobytes of source, which is not a saving. A verification pass sets
+    // `checked` and did run the parser, so it is not timed as a hit.
+    if (decided || checked) {
+        if (decided && !checked && g_parseFreq.QuadPart &&
+            (++g_parseSeq & kParseSampleMask) == 0) {
+            LARGE_INTEGER e;
+            QueryPerformanceCounter(&e);
+            double ms = (double)(e.QuadPart - enter.QuadPart) * 1000.0
+                      / (double)g_parseFreq.QuadPart;
+            if (ms >= 0.0 && ms < 100.0) { g_hitMsTotal += ms; ++g_hitTimed; }
+        }
+        return decided;
+    }
 
+    const bool timeThis = g_parseFreq.QuadPart &&
+                          (++g_parseSeq & kParseSampleMask) == 0;
+    LARGE_INTEGER a;
+    if (timeThis) QueryPerformanceCounter(&a);
     void* p = orig_luaY_parser(L, z, buff, name);
+    if (timeThis) {
+        LARGE_INTEGER b2;
+        QueryPerformanceCounter(&b2);
+        double ms = (double)(b2.QuadPart - a.QuadPart) * 1000.0
+                  / (double)g_parseFreq.QuadPart;
+        // A parse that spans a context switch is not a measurement of the parser,
+        // and one of them outweighs a hundred honest samples in a mean.
+        if (ms >= 0.0 && ms < 100.0) { g_missMsTotal += ms; ++g_missTimed; }
+    }
     if (g_pending.want) g_pending.proto = p;
     return p;
 }
@@ -612,6 +668,7 @@ bool Init() {
         return false;
     }
 
+    QueryPerformanceFrequency(&g_parseFreq);
     g_installed = true;
     Log("[ProtoCache] ACTIVE on luaY_parser (0x%08X). A census of tester sessions "
         "found 88%% of compiled chunks were source already compiled that session, "
@@ -630,6 +687,27 @@ void LogStats() {
     if (!Config::g_settings.OptLuaProtoCache) return;
     if (!g_installed) { Log("[ProtoCache] not installed - nothing measured"); return; }
     if (g_seen == 0)  { Log("[ProtoCache] installed but no chunk reached it yet"); return; }
+
+    // The saving in time, which is the figure this module exists to produce and
+    // has never printed. Kilobytes of source skipped is not a saving; the parses
+    // those kilobytes would have cost is.
+    if (g_missTimed && g_hitTimed) {
+        double meanMiss = g_missMsTotal / (double)g_missTimed;
+        double meanHit  = g_hitMsTotal  / (double)g_hitTimed;
+        Log("[ProtoCache] a parse costs %.3f ms on average over %lu timed misses; "
+            "a reuse costs %.3f ms over %lu timed hits. At %lu reuses that is "
+            "about %.0f ms of parsing this session that did not happen.",
+            meanMiss, g_missTimed, meanHit, g_hitTimed, g_hits,
+            (meanMiss - meanHit) * (double)g_hits);
+    } else if (g_missTimed || g_hitTimed) {
+        Log("[ProtoCache] only one of hit and miss was ever timed (%lu misses, "
+            "%lu hits sampled), so there is no saving to state - not a saving of "
+            "zero.", g_missTimed, g_hitTimed);
+    } else {
+        Log("[ProtoCache] no parse was timed, so the saving is not measured rather "
+            "than measured small. One call in %u is sampled.",
+            kParseSampleMask + 1);
+    }
 
     Log("[ProtoCache] %lu chunks offered, %lu reused (%.1f%%), %llu KB of parsing "
         "skipped%s",
