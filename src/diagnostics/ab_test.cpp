@@ -125,7 +125,6 @@ uint64_t g_ticksDiscarded = 0;
 char     g_offered[kMaxOffered][32] = {};
 bool*    g_flag[kMaxOffered] = {};   // the hot-path flag each module handed over
 int      g_offeredCount = 0;
-bool     g_wantList = false;    // AbTest on, no subject named
 
 // Rotation: measure every subject in one session instead of one per session.
 //
@@ -363,7 +362,17 @@ bool Init() {
     }
 
     lstrcpynA(g_subject, Config::g_settings.AbTestSubject, (int)sizeof(g_subject));
-    if (lstrcmpiA(g_subject, "all") == 0 || lstrcmpiA(g_subject, "*") == 0) {
+
+    // An empty subject used to stand the harness down and print the list of
+    // names that would have worked. Everything about that was right except what
+    // it cost: the tickbox is in the launcher, the subject is not, so a tester
+    // who ticks the box and plays for an hour gets a list instead of a
+    // measurement, and the session that answers something is the next one.
+    // Rotation is what they would have picked and needs no ini edit, so it is
+    // what an unnamed subject means now.
+    bool subjectWasBlank = (g_subject[0] == 0);
+    if (subjectWasBlank || lstrcmpiA(g_subject, "all") == 0 ||
+        lstrcmpiA(g_subject, "*") == 0) {
         g_rotate = true;
         g_active = true;
         g_onNow = true;
@@ -380,18 +389,13 @@ bool Init() {
             "session, and the per-subject stint counts are what say whether "
             "the share was enough to read anything into.",
             kStintsPerSubject, g_periodMs / 1000);
+        if (subjectWasBlank)
+            Log("[AbTest]   no AbTestSubject was named, and rotating every "
+                "subject is the useful reading of that. To spend the whole "
+                "session on one feature instead, put its name in wow_opt.ini "
+                "as AbTestSubject=<name>; the names it answers to are listed "
+                "in the periodic report below.");
         return true;
-    }
-    if (!g_subject[0]) {
-        // Not a failure to report and forget. The modules initialise after this
-        // and will offer their names, so the list is printed from LogStats rather
-        // than here, where it would be empty.
-        g_wantList = true;
-        Log("[AbTest] NOT active: AbTest is on but AbTestSubject names no feature, "
-            "so there is nothing to alternate. Set AbTestSubject in wow_opt.ini; "
-            "the names that would have worked are listed in the periodic report "
-            "below.");
-        return false;
     }
 
     g_periodMs = (DWORD)Config::g_settings.AbTestPeriodMs;
@@ -559,8 +563,9 @@ static void ReportSubject(int i, const char* name) {
 void LogStats() {
     if (!Config::g_settings.OptAbTest) return;
     if (!g_active) {
-        if (g_wantList) LogOffered("no subject was named, so nothing was measured");
-        else            Log("[AbTest] not running - nothing measured");
+        // The one way to be switched on and not active is a machine with no
+        // performance counter, and Init said so at the time.
+        Log("[AbTest] switched on but not running - nothing measured");
         return;
     }
 

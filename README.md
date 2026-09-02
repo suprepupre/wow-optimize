@@ -255,23 +255,24 @@ two different evenings, not two settings. One session that alternates a feature
 on and off compares the same zone, the same addons and the same machine against
 itself.
 
-In the launcher, tick **A/B Test a Feature**. Then open `WTF\wow_opt.ini` and add
-one line under `[General]`:
-
-```ini
-AbTestSubject=all
-```
+In the launcher, tick **A/B Test a Feature**. That is the whole setup - it then
+takes every feature that can be tested in turn.
 
 Play for as long as you normally would - an hour is thin, two is better - and
 send the log. Every feature that is switched on will have been measured against
 the client doing the same work, and the report says per feature when there were
 too few turns for the number to mean anything.
 
-To measure one feature properly instead of all of them roughly, put its ini key
-there instead - `AbTestSubject=LayoutRelinkFast` - and make sure that feature is
-switched on too. The switch decides whether it installs; this decides when it
-does its work. If the name is wrong the report lists the ones it would have
-accepted.
+To spend the whole session on one feature instead, open `WTF\wow_opt.ini` and
+put its ini key under `[General]`:
+
+```ini
+AbTestSubject=LayoutRelinkFast
+```
+
+and make sure that feature is switched on too. The switch decides whether it
+installs; this decides when it does its work. If the name is wrong the report
+lists the ones it would have accepted.
 
 One of them is there to check the instrument rather than the feature:
 `MatrixVectorSse2` is already known to be slower than the code it replaces, so
