@@ -148,11 +148,16 @@ static void MarkUILayoutClean(uintptr_t framePtr) {
     g_uiLayoutCache[idx].layoutGen = g_uiGlobalGen;
 }
 
-// Bump global generation when any layout changes.
-// This invalidates all clean cache entries for the next frame.
+// Bump global generation when any layout changes, invalidating every clean
+// cache entry for the next frame.
+//
+// Plain, not interlocked. The only caller is OnFrameLogicHooks, which returns
+// before this on any thread but the main one, so there is exactly one writer -
+// and a lock-prefixed increment on the frame boundary is the pattern that has
+// eaten whole optimizations in this project. The readers are two lookup
+// functions in this file that nothing outside it calls.
 static void InvalidateUILayoutCache() {
-    InterlockedIncrement((LONG*)&g_uiGlobalGen);
-    if (g_uiGlobalGen == 0) g_uiGlobalGen = 1; // avoid zero
+    if (++g_uiGlobalGen == 0) g_uiGlobalGen = 1;   // zero means "never cached"
 }
 
 // ================================================================
@@ -353,10 +358,10 @@ extern "C" void InvalidateUnitApiCacheFor(uint64_t guid) {
     }
 }
 
-// Invalidate all script caches at frame start
+// Invalidate all script caches at frame start. Plain for the same reason as
+// the layout generation above: one writer, on the frame boundary.
 static void InvalidateScriptCache() {
-    InterlockedIncrement((LONG*)&g_uiScriptGen);
-    if (g_uiScriptGen == 0) g_uiScriptGen = 1;
+    if (++g_uiScriptGen == 0) g_uiScriptGen = 1;
 }
 
 // ================================================================
@@ -730,8 +735,9 @@ static int __cdecl Hooked_UnitPowerMax(uintptr_t L) {
 // Public API
 // ================================================================
 
-// Frame counter for periodic operations
-static volatile DWORD g_logicFrameIndex = 0;
+// There was a frame counter here, incremented with a lock prefix once a frame
+// for the life of every session and read by nothing at all. Removed rather than
+// made plain: a counter with no reader is not a cheap counter, it is no counter.
 
 bool InstallLogicHooks(void) {
     QueryPerformanceFrequency(&g_qpcFreqNet);
@@ -807,7 +813,6 @@ void ShutdownLogicHooks(void) {
 void OnFrameLogicHooks(DWORD mainThreadId) {
     if (GetCurrentThreadId() != mainThreadId) return;
 
-    DWORD frameIdx = InterlockedIncrement((LONG*)&g_logicFrameIndex);
 
 
     // Flush any coalesced network packets
