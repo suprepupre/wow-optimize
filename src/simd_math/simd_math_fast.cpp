@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "simd_math_fast.h"
+#include "ab_test.h"
 #include "MinHook.h"
 #include "version.h"
 #include "config.h"
@@ -29,7 +30,20 @@ static int  g_featureToken = -1;
 // A lost increment only delays a sample, and the number is never reported.
 static long g_calls = 0;
 
-static void __cdecl Hooked_MatVec3Mul(float* outVec, const float* inVec, const float* matrix) {
+// The known-negative control for the A/B harness.
+//
+// Everything else the harness measures has an unknown answer. This one does not:
+// the standalone harness above Init timed this replacement at 3.333 ns against
+// 2.497 ns for the code it replaces, with output bit-identical over 4096 random
+// matrices. It is slower, and it is off by default because of that.
+//
+// So it is the one subject whose result is known in advance, which makes it the
+// calibration case. If the harness reports this as faster, the harness is wrong -
+// and a measurement system with no case where the answer is known cannot be
+// checked at all.
+static bool g_abSubject = false;
+
+static void __cdecl Hooked_MatVec3MulBody(float* outVec, const float* inVec, const float* matrix) {
 #if TEST_DISABLE_SIMD_MATH_FAST
     orig_MatVec3Mul(outVec, inVec, matrix);
 #else
@@ -79,12 +93,23 @@ static void __cdecl Hooked_MatVec3Mul(float* outVec, const float* inVec, const f
 #endif
 }
 
+// The detour proper, split so the harness can time the call on both sides.
+// Returns void, so there is no result to hold and no chance of the local-static
+// mistake the strncmp wrapper was generated with.
+static void __cdecl Hooked_MatVec3Mul(float* outVec, const float* inVec, const float* matrix) {
+    if (!g_abSubject) { Hooked_MatVec3MulBody(outVec, inVec, matrix); return; }
+    unsigned long long abTick = AbTest::TickIn();
+    if (AbTest::StandAside()) orig_MatVec3Mul(outVec, inVec, matrix);
+    else                      Hooked_MatVec3MulBody(outVec, inVec, matrix);
+    AbTest::TickOut(abTick);
+}
+
 // 2. Vector3 Normalize Hook Target: 0x004C3420
 // Original signature is __thiscall returning void.
 typedef void (__thiscall *Vec3Normalize_fn)(float* vec);
 static Vec3Normalize_fn orig_Vec3Normalize = nullptr;
 
-static void __fastcall Hooked_Vec3Normalize(float* vec, void* unused) {
+static void __fastcall Hooked_Vec3NormalizeBody(float* vec, void* unused) {
 #if TEST_DISABLE_SIMD_MATH_FAST
     orig_Vec3Normalize(vec);
 #else
@@ -105,6 +130,17 @@ static void __fastcall Hooked_Vec3Normalize(float* vec, void* unused) {
         vec[2] = 0.0f;
     }
 #endif
+}
+
+// The detour proper, split so the harness can time the call on both sides.
+// Returns void, so there is no result to hold and no chance of the local-static
+// mistake the strncmp wrapper was generated with.
+static void __fastcall Hooked_Vec3Normalize(float* vec, void* unused) {
+    if (!g_abSubject) { Hooked_Vec3NormalizeBody(vec, unused); return; }
+    unsigned long long abTick = AbTest::TickIn();
+    if (AbTest::StandAside()) orig_Vec3Normalize(vec);
+    else                      Hooked_Vec3NormalizeBody(vec, unused);
+    AbTest::TickOut(abTick);
 }
 
 bool Init() {
@@ -169,6 +205,15 @@ bool Init() {
     // Installed independently now, and 0x004C3420 is left to the module that owns
     // it rather than fought over.
     bool mulOk = false;
+    g_abSubject = AbTest::IsSubject("MatrixVectorSse2");
+    if (g_abSubject) {
+        Log("[SimdMathFast] under A/B test, and this is the calibration case: "
+            "a standalone harness measured this replacement at 3.333 ns "
+            "against 2.497 ns for the code it replaces, output bit-identical. "
+            "It is SLOWER, and the harness should say so. If it reports this "
+            "one as faster, the harness is what is wrong.");
+    }
+
     if (MH_CreateHook(target_mul, (void*)Hooked_MatVec3Mul, (void**)&orig_MatVec3Mul) == MH_OK) {
         if (MH_EnableHook(target_mul) == MH_OK) {
             mulOk = true;
