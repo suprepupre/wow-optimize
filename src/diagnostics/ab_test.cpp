@@ -134,13 +134,21 @@ int      g_offeredCount = 0;
 // few stints, then hands its flag back and takes the next.
 //
 // Only one subject alternates at a time, so none of them confounds another - the
-// rest run exactly as their own switches say. The cost is samples per subject: a
-// two-hour session gives each of fifteen roughly eight minutes, which is thin,
-// and the stint counts printed per subject are what says so.
+// rest run exactly as their own switches say. The cost is samples per subject,
+// and the stint counts printed per subject are what says whether there were
+// enough of them.
 bool     g_rotate = false;
 int      g_rotIndex = 0;        // which offered subject is currently measured
-int      g_rotStints = 0;       // stints spent on it so far
-constexpr int kStintsPerSubject = 8;   // four ON/OFF pairs before moving on
+int      g_rotPairs = 0;        // completed ON/OFF pairs on the current subject
+
+// Pairs, not stints. The counter behind this only advances on a switch INTO the
+// ON phase, so it counts complete ON/OFF cycles - at 8 with a 20 s period that
+// was 320 s a subject and 80 minutes for a rotation of fifteen, while the
+// constant was named for stints, commented as four pairs and printed in the log
+// as "8 stints of 20 s", which reads as 160 s. Three descriptions of one number,
+// none of them the number. Four pairs is what the comment always intended and
+// what fits a session: 160 s a subject, 40 minutes for fifteen.
+constexpr int kPairsPerSubject = 4;
 
 // Returns the slot this name occupies, or -1 when it could not be recorded.
 //
@@ -328,8 +336,8 @@ void OnFrame() {
         // move happens on an ON boundary so every subject is left switched
         // on when it is not being measured, which is what its own setting
         // asked for.
-        if (g_rotate && g_onNow && ++g_rotStints >= kStintsPerSubject) {
-            g_rotStints = 0;
+        if (g_rotate && g_onNow && ++g_rotPairs >= kPairsPerSubject) {
+            g_rotPairs = 0;
             if (g_flag[g_rotIndex]) *g_flag[g_rotIndex] = false;
             int next = g_rotIndex;
             for (int n = 0; n < g_offeredCount; ++n) {
@@ -381,14 +389,17 @@ bool Init() {
         if (g_periodMs > 120000) g_periodMs = 120000;
         // The opening stint is counted by CountOpeningStint when the first
         // module registers, because only then is the slot known.
+        // The times are computed from the constants rather than written into
+        // the sentence, so this line cannot drift from what the code does.
         Log("[AbTest] ACTIVE, rotating: every feature that registers gets %d "
-            "stints of %u s in turn, so one session measures all of them "
-            "instead of one per session. Only the subject being measured "
-            "alternates; the rest run exactly as their own switches say, so "
-            "none of them confounds another. Each gets a share of the "
-            "session, and the per-subject stint counts are what say whether "
-            "the share was enough to read anything into.",
-            kStintsPerSubject, g_periodMs / 1000);
+            "on/off pairs of %u s each - %u s a subject - in turn, so one "
+            "session measures all of them instead of one per session. Only "
+            "the subject being measured alternates; the rest run exactly as "
+            "their own switches say, so none of them confounds another. Each "
+            "gets a share of the session, and the per-subject stint counts "
+            "are what say whether the share was enough to read anything into.",
+            kPairsPerSubject, g_periodMs / 1000,
+            (unsigned)(2 * kPairsPerSubject * (g_periodMs / 1000)));
         if (subjectWasBlank)
             Log("[AbTest]   no AbTestSubject was named, and rotating every "
                 "subject is the useful reading of that. To spend the whole "
@@ -569,16 +580,26 @@ void LogStats() {
         return;
     }
 
-    Log("[AbTest] '%s' alternating every %u s. %llu frame(s) discarded around "
-        "switches and loading screens.",
-        g_subject, g_periodMs / 1000, (unsigned long long)g_dropped);
+    // A rotating run has no single subject, and g_subject is the empty string
+    // when nobody named one - printing it would read as a feature called "".
+    if (g_rotate)
+        Log("[AbTest] alternating every %u s. %llu frame(s) discarded around "
+            "switches and loading screens.",
+            g_periodMs / 1000, (unsigned long long)g_dropped);
+    else
+        Log("[AbTest] '%s' alternating every %u s. %llu frame(s) discarded "
+            "around switches and loading screens.",
+            g_subject, g_periodMs / 1000, (unsigned long long)g_dropped);
 
     if (g_rotate) {
-        Log("[AbTest] rotating: every registered subject gets %d stints in turn, "
-            "so one session measures all of them instead of one. Only one "
-            "alternates at a time, so none confounds another - but each gets a "
-            "share of the session, and the stint counts below are what say "
-            "whether that share was enough.", kStintsPerSubject);
+        Log("[AbTest] rotating: every registered subject gets %d on/off pairs "
+            "in turn, %u s each, so one pass over %d subject(s) takes %u s. "
+            "Only one alternates at a time, so none confounds another - but "
+            "each gets a share of the session, and the stint counts below "
+            "are what say whether that share was enough.",
+            kPairsPerSubject, g_periodMs / 1000, g_offeredCount,
+            (unsigned)(2 * kPairsPerSubject * (g_periodMs / 1000) *
+                       (g_offeredCount > 0 ? g_offeredCount : 1)));
     }
     // Which name a slot is reported under.
     //
@@ -588,9 +609,34 @@ void LogStats() {
     // Printing "NO MODULE ANSWERED TO 'AnimQuatUnpack'" when the ini said
     // "AnimQatUnpack" would name the wrong thing entirely, so a named run reports
     // under the configured name whatever slot the frames are in.
+    int reported = 0;
     for (int i = 0; i < g_offeredCount; ++i) {
         if (!g_on[i].frames && !g_off[i].frames) continue;
         ReportSubject(i, g_rotate ? g_offered[i] : g_subject);
+        ++reported;
+    }
+
+    // A rotating run that reported nothing is the case the defaults produce.
+    // A module offers itself only after its own install succeeds, so with the
+    // lean default set there is close to nothing to rotate - and the loop above
+    // then prints an encouraging header followed by silence, which reads as a
+    // clean run rather than as an hour that measured nothing.
+    if (g_rotate && reported == 0) {
+        if (g_offeredCount == 0) {
+            Log("[AbTest] NOTHING WAS MEASURED. No feature offered itself, "
+                "because a feature registers only once its own switch has let "
+                "it install - and by default almost none are on. Turn on the "
+                "features you want compared and run this again; the A/B "
+                "tickbox decides when they do their work, never whether they "
+                "installed.");
+            Verdict::Add(Verdict::Warn,
+                "The A/B harness ran for the whole session and measured "
+                "nothing: no feature was switched on for it to alternate.");
+        } else {
+            Log("[AbTest] %d subject(s) registered but none collected a frame "
+                "yet. Each waits its turn, so a short session can end before "
+                "the first handover.", g_offeredCount);
+        }
     }
 
     // A named run whose subject matched nothing has no frames anywhere - the

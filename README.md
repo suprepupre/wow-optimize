@@ -255,13 +255,29 @@ two different evenings, not two settings. One session that alternates a feature
 on and off compares the same zone, the same addons and the same machine against
 itself.
 
-In the launcher, tick **A/B Test a Feature**. That is the whole setup - it then
-takes every feature that can be tested in turn.
+In the launcher, tick **A/B Test a Feature**. It then takes every feature that
+can be tested in turn.
 
-Play for as long as you normally would - an hour is thin, two is better - and
-send the log. Every feature that is switched on will have been measured against
-the client doing the same work, and the report says per feature when there were
-too few turns for the number to mean anything.
+It can only measure features you have switched on - a feature registers with
+the harness at the moment it installs - and on a default install that is two of
+them, so the rest of the report would be empty. Tick the ones you want an
+answer about as well. These are the ones it can measure:
+
+> UI Layout Relink Shortcut, Model Draw Order Key Cache, Lua Pool Shortcuts,
+> Table Lookup Dispatch (SSE2), Bone Rotation Maths (SSE2), Bone Rotation
+> Unpack (SSE2), Bone Movement Track (SSE2), Visibility Box Test (SSE2), Box
+> Overlap Test (SSE2), Line-of-Sight Box Test (SSE2), SSE2 Frustum Cull and
+> Quaternion Normalize, Fast SSE2 Memory Clear, SSE2 String Compare, Lua VM:
+> stop the automatic GC, and Matrix-Vector SSE2.
+
+Each is alternated on its own, so turning several on does not mix them up.
+
+Each subject gets four on/off pairs of twenty seconds, so it spends about two
+minutes and forty seconds on one before moving to the next: all fifteen take
+forty minutes. Play for at least that, longer if you can, and send the log.
+Every feature that was switched on will have been measured against the client
+doing the same work, and the report says per feature when there were too few
+turns for the number to mean anything.
 
 To spend the whole session on one feature instead, open `WTF\wow_opt.ini` and
 put its ini key under `[General]`:
