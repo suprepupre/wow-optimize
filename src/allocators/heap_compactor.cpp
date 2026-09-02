@@ -16,8 +16,11 @@
 // Configuration
 static constexpr DWORD MONITOR_INTERVAL_MS = 10000;     // Check every 10s (was 3 - reduce CPU overhead)
 static constexpr DWORD LOADING_INTERVAL_MS = 3000;      // Faster checks during loading screens
+// The one threshold, and it is read against the largest free run below 2GB.
+// A WARNING_THRESHOLD of 32MB used to sit beside it, checked against the whole
+// address space; it is gone with the branch that read it. An unused constant
+// with that name is an invitation to wire it back to the wrong figure.
 static constexpr SIZE_T CRITICAL_THRESHOLD = 16 * 1024 * 1024;  // 16MB
-static constexpr SIZE_T WARNING_THRESHOLD = 32 * 1024 * 1024;  // 32MB
 
 // Statistics
 static std::atomic<uint64_t> g_checksPerformed{0};
