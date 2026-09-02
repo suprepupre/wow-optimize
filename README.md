@@ -107,6 +107,14 @@ anything.
   for** - thirteen options the DLL reads, every numeric key, and AbTestSubject,
   which the A/B test needs and which its own tooltip tells you to set by hand.
   Keys the launcher does not own are kept now.
+* **Three modules announced features they do not implement.** One is 805 lines
+  with no hook in it, naming four features; one claimed a "backbuffer lock skip"
+  that was never written; one committed half a megabyte at startup for an
+  allocator nothing calls. They no longer claim it, and that half megabyte is
+  no longer taken.
+* **The SSE2 frustum cull and quaternion normalize were switched by the string
+  search option** - which is off by default, so nobody had them. Their own
+  option now, inheriting the old one so nothing changes for you by updating.
 * **Two functions were replaced by whichever module happened to initialise
   first.** The frustum test had two implementations and only one of them checks
   itself against the game; that one wins now regardless of link order.
