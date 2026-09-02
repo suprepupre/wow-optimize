@@ -98,6 +98,13 @@ anything.
 * **The Lock-Free Heap Defragmenter switch also gated the render hooks, the async
   worker pool and thread affinity.** Three separate options now, each inheriting
   the old setting, so nothing changes for you by updating.
+* **Pressing Save in the launcher destroyed every setting it has no tickbox
+  for** - thirteen options the DLL reads, every numeric key, and AbTestSubject,
+  which the A/B test needs and which its own tooltip tells you to set by hand.
+  Keys the launcher does not own are kept now.
+* **Two functions were replaced by whichever module happened to initialise
+  first.** The frustum test had two implementations and only one of them checks
+  itself against the game; that one wins now regardless of link order.
 * **The Lua compile census and Reuse Compiled Scripts were fighting over one
   address**, so with the census on the cache installed nothing - the one
   configuration that could weigh the cache was the one where it could not run.
