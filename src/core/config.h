@@ -191,6 +191,16 @@ namespace Config {
         // two, because neither has run in either version. A tester's log said so
         // plainly and I had not checked.
         bool OptSavedVarsAsync = false;
+        // The key is misnamed and stays misnamed. It gates one thing -
+        // InitDataStoreFastPath, the six CDataStore accessors the client uses to
+        // read fields out of every network packet - and has nothing to do with
+        // SavedVariables or tokenising. The launcher entry says "Network Packet
+        // Reader Fast Paths", which is accurate.
+        //
+        // Renaming the ini key would silently turn the feature off for everyone
+        // who had written the old one, which is the 3.18.1 regression, and it is
+        // not worth that to fix a name only this file sees. It once gated a dozen
+        // unrelated installs; that part is already undone.
         bool OptSavedVarsPretoken = false;
         bool OptUnitAuraFast = false;
         bool OptNetworkGuidSse2 = false;
