@@ -71,8 +71,31 @@ extern "C" void mi_collect(bool force);
 // contradiction rather than as two different questions.
 //
 // `lowHalfOut` receives the figure for the low 2 GB when it is wanted.
+// What this walk costs, because it is the prime suspect for a stall we cause.
+//
+// Tester logs carry "STALL periodic maintenance took 42.6 ms" and "39.5 ms" -
+// forty milliseconds on the main thread, inside a frame, every five minutes,
+// from this project's own reporting. Logging is not the cause: it goes through a
+// lock-free ring to a writer thread. This walk is: VirtualQuery over the whole
+// address space, one call per region, and a fragmented 3 GB VA has tens of
+// thousands of regions. The session where that stall was recorded had 149 MB free
+// below 2 GB with a largest block of 19 MB, which is exactly that shape.
+//
+// Suspecting is not measuring, so it is timed and the region count is reported
+// with it. If it comes back at two milliseconds the suspicion is wrong and the
+// stall is somewhere else in the report.
+static double   g_walkMsWorst = 0.0;
+static double   g_walkMsTotal = 0.0;
+static unsigned g_walkCount   = 0;
+static unsigned g_walkRegionsWorst = 0;
+
 static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
     static const uintptr_t LOW_HALF_END = 0x80000000u;
+    static LARGE_INTEGER freq = {};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER wa;
+    QueryPerformanceCounter(&wa);
+    unsigned regions = 0;
 
     MEMORY_BASIC_INFORMATION mbi;
     SIZE_T largestFree = 0;
@@ -109,12 +132,22 @@ static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
             }
         }
 
+        ++regions;
         addr = base + mbi.RegionSize;
         if (addr < base) break; // Overflow
     }
 
     if (currentFree > largestFree) largestFree = currentFree;
     if (currentLow  > largestLow)  largestLow  = currentLow;
+
+    if (freq.QuadPart) {
+        LARGE_INTEGER wb;
+        QueryPerformanceCounter(&wb);
+        double ms = (double)(wb.QuadPart - wa.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        g_walkMsTotal += ms;
+        ++g_walkCount;
+        if (ms > g_walkMsWorst) { g_walkMsWorst = ms; g_walkRegionsWorst = regions; }
+    }
 
     if (lowHalfOut) *lowHalfOut = largestLow;
     return largestFree;
@@ -359,6 +392,18 @@ void HeapCompactor_Shutdown() {
 extern "C" void HeapCompactor_LogStats() {
     SIZE_T low = 0;
     SIZE_T all = GetLargestFreeBlock(&low);
+
+    // Printed before the numbers it produced, because if this walk is what a
+    // tester is seeing as a forty-millisecond stall then it is the more important
+    // of the two facts. It runs on the main thread, inside a frame.
+    if (g_walkCount) {
+        Log("[HeapCompactor] the address-space walk that produces the figures "
+            "below: %u run(s), %.1f ms in total, worst %.1f ms over %u regions. "
+            "This runs on the main thread and lands inside a frame, and a "
+            "\"periodic maintenance\" stall in this log is worth comparing "
+            "against it.",
+            g_walkCount, g_walkMsTotal, g_walkMsWorst, g_walkRegionsWorst);
+    }
     Log("[HeapCompactor] %uMB largest free below 2GB, %uMB across all address "
         "space; %llu compactions, %lluKB recovered, next attempt no sooner than "
         "%us%s",
