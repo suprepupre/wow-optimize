@@ -29,6 +29,17 @@ extern "C" SIZE_T HeapCompactor_GetLargestFreeLowHalf();
 // VirtualQuery, so it is safe to call from inside a frame. Age 0 with a result
 // of 0 means the monitor has not run yet, not that nothing is free.
 extern "C" SIZE_T HeapCompactor_GetLastLowHalf(unsigned long* ageMsOut);
+
+// The largest free run below 2GB and the sum of all free space there, from the
+// same cached walk. False when the monitor has not run yet, which is not the
+// same as nothing being free.
+extern "C" bool HeapCompactor_GetLowHalfSnapshot(SIZE_T* largestOut,
+                                                 SIZE_T* totalOut,
+                                                 unsigned long* ageMsOut);
+
+// The largest free run over all of user address space, from the same walk.
+extern "C" bool HeapCompactor_GetLastLargestFree(SIZE_T* largestOut,
+                                                 unsigned long* ageMsOut);
 extern "C" void HeapCompactor_GetStats(uint64_t* checks, uint64_t* compactions,
                                         SIZE_T* lastBlock, SIZE_T* minBlock, SIZE_T* maxBlock);
 
@@ -44,5 +55,18 @@ inline bool HeapCompactor_Init() { return true; }
 inline void HeapCompactor_Shutdown() {}
 inline void HeapCompactor_RunPendingWork() {}
 inline void HeapCompactor_LogStats() {}
+// Compiled out, so nothing has walked and there is nothing to hand back. The
+// callers already print "not measured" for a false return, which is the truth
+// here as much as it is before the monitor thread's first pass.
+inline SIZE_T HeapCompactor_GetLastLowHalf(unsigned long* ageMsOut) {
+    if (ageMsOut) *ageMsOut = 0;
+    return 0;
+}
+inline bool HeapCompactor_GetLowHalfSnapshot(SIZE_T*, SIZE_T*, unsigned long*) {
+    return false;
+}
+inline bool HeapCompactor_GetLastLargestFree(SIZE_T*, unsigned long*) {
+    return false;
+}
 
 #endif

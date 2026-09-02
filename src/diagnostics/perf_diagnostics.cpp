@@ -49,6 +49,16 @@ void LogPerformanceSnapshot(double elapsedMs) {
     DWORD now = GetTickCount();
     if (now - g_lastDiagTick < 5000) return; // Rate-limit to once every 5 seconds
     g_lastDiagTick = now;
+
+    // This snapshot is expensive and it runs on the main thread, inside the
+    // frame it is describing - the address-space walk below is VirtualQuery once
+    // per region and costs tens of milliseconds on a fragmented 3GB space. That
+    // is the right trade for a stutter that has already happened, but only if
+    // the log says how much of the reported frame was this. Unsaid, the next
+    // reader subtracts nothing and treats the whole spike as the client's.
+    LARGE_INTEGER snapFreq, snapStart;
+    QueryPerformanceFrequency(&snapFreq);
+    QueryPerformanceCounter(&snapStart);
     
     g_stutterCount.fetch_add(1, std::memory_order_relaxed);
     
@@ -225,6 +235,17 @@ void LogPerformanceSnapshot(double elapsedMs) {
     Log("[PerfDiag]   Last 16 hook calls before stutter:");
     CrashDumper_DumpHookTrace(16);
     
+    if (snapFreq.QuadPart) {
+        LARGE_INTEGER snapEnd;
+        QueryPerformanceCounter(&snapEnd);
+        double snapMs = (double)(snapEnd.QuadPart - snapStart.QuadPart) * 1000.0
+                      / (double)snapFreq.QuadPart;
+        Log("[PerfDiag]   Collecting this snapshot took %.1f ms on the main "
+            "thread. The %.1f ms frame above was measured before it ran, so "
+            "this is not part of that number - but it is part of the next "
+            "frame, and most of it is the address-space walk.",
+            snapMs, elapsedMs);
+    }
     Log("[PerfDiag] ==================================================");
 }
 

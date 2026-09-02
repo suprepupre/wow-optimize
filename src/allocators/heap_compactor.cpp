@@ -91,6 +91,7 @@ extern "C" void mi_collect(bool force);
 // wrong.
 static volatile SIZE_T g_lastWalkFree = 0;
 static volatile SIZE_T g_lastWalkLow  = 0;
+static volatile SIZE_T g_lastWalkLowTotal = 0;
 static volatile DWORD  g_lastWalkTick = 0;
 
 static double   g_walkMsWorst = 0.0;
@@ -98,7 +99,12 @@ static double   g_walkMsTotal = 0.0;
 static unsigned g_walkCount   = 0;
 static unsigned g_walkRegionsWorst = 0;
 
-static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
+// Returns the largest free run over all of user address space. Optionally also
+// the largest free run below 2GB and the sum of every free region there - the
+// two figures the periodic report used to get by walking the address space a
+// second time, on the main thread, inside a frame.
+static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr,
+                                  SIZE_T* lowTotalOut = nullptr) {
     static const uintptr_t LOW_HALF_END = 0x80000000u;
     static LARGE_INTEGER freq = {};
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
@@ -111,6 +117,7 @@ static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
     SIZE_T currentFree = 0;
     SIZE_T largestLow  = 0;
     SIZE_T currentLow  = 0;
+    SIZE_T lowTotal    = 0;
     uintptr_t addr = 0;
 
     while (VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) {
@@ -127,6 +134,7 @@ static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
                                ? (SIZE_T)(LOW_HALF_END - base)
                                : mbi.RegionSize;
                 currentLow += lowPart;
+                lowTotal   += lowPart;
                 if (lowPart != mbi.RegionSize) {
                     if (currentLow > largestLow) largestLow = currentLow;
                     currentLow = 0;
@@ -158,7 +166,8 @@ static SIZE_T GetLargestFreeBlock(SIZE_T* lowHalfOut = nullptr) {
         if (ms > g_walkMsWorst) { g_walkMsWorst = ms; g_walkRegionsWorst = regions; }
     }
 
-    if (lowHalfOut) *lowHalfOut = largestLow;
+    if (lowHalfOut)  *lowHalfOut  = largestLow;
+    if (lowTotalOut) *lowTotalOut = lowTotal;
     return largestFree;
 }
 
@@ -195,8 +204,8 @@ static DWORD WINAPI MonitorThread(LPVOID) {
         DWORD interval = LuaOpt::IsLoadingMode() ? LOADING_INTERVAL_MS : MONITOR_INTERVAL_MS;
         Sleep(interval);
         
-        SIZE_T largestLow = 0;
-        SIZE_T largestFree = GetLargestFreeBlock(&largestLow);
+        SIZE_T largestLow = 0, lowTotal = 0;
+        SIZE_T largestFree = GetLargestFreeBlock(&largestLow, &lowTotal);
         g_checksPerformed++;
 
         // Published for the report, which used to walk the address space again on
@@ -205,6 +214,7 @@ static DWORD WINAPI MonitorThread(LPVOID) {
         // inside a frame.
         g_lastWalkFree = largestFree;
         g_lastWalkLow  = largestLow;
+        g_lastWalkLowTotal = lowTotal;
         g_lastWalkTick = GetTickCount();
 
         // The low half is what actually runs out, and it is what the trigger
@@ -480,6 +490,35 @@ extern "C" SIZE_T HeapCompactor_GetLastLowHalf(unsigned long* ageMsOut) {
     if (!g_lastWalkTick) { if (ageMsOut) *ageMsOut = 0; return 0; }
     if (ageMsOut) *ageMsOut = (unsigned long)(GetTickCount() - g_lastWalkTick);
     return g_lastWalkLow;
+}
+
+
+// Both low-half figures at once, for the periodic report.
+//
+// Returns false when the monitor has not walked yet, so the caller can say "not
+// measured" rather than print two zeros. Kept separate from the accessor above
+// because that one has a caller which wants only the largest block.
+extern "C" bool HeapCompactor_GetLowHalfSnapshot(SIZE_T* largestOut,
+                                                 SIZE_T* totalOut,
+                                                 unsigned long* ageMsOut) {
+    if (!g_lastWalkTick) return false;
+    if (largestOut) *largestOut = g_lastWalkLow;
+    if (totalOut)   *totalOut   = g_lastWalkLowTotal;
+    if (ageMsOut)   *ageMsOut   = (unsigned long)(GetTickCount() - g_lastWalkTick);
+    return true;
+}
+
+
+// The largest free run over all of user address space, from the same cached
+// walk. Two other modules had their own copy of this walk and ran it on the
+// main thread - one of them up to once a second, for a number an addon
+// displays. False when the monitor has not walked yet.
+extern "C" bool HeapCompactor_GetLastLargestFree(SIZE_T* largestOut,
+                                                 unsigned long* ageMsOut) {
+    if (!g_lastWalkTick) return false;
+    if (largestOut) *largestOut = g_lastWalkFree;
+    if (ageMsOut)   *ageMsOut   = (unsigned long)(GetTickCount() - g_lastWalkTick);
+    return true;
 }
 
 // Cheap cached read (no VirtualQuery walk) for per-frame consumers like the GC

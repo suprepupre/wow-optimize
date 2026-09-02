@@ -39,6 +39,7 @@ extern "C" void ReleaseLoadingArena();
 
 #include "version.h"
 #include "version_checker.h"
+#include "heap_compactor.h"
 
 extern bool g_isMultiClient;
 extern "C" void Log(const char* fmt, ...);
@@ -1098,6 +1099,15 @@ static void ReadAddonStateFromLua(lua_State* L) {
     Api.lua_settop(L, topBefore);
 }
 
+// The walk of last resort.
+//
+// VirtualQuery once per region over the whole address space. On a fragmented
+// 3GB space that is tens of thousands of syscalls and tens of milliseconds, and
+// UpdateLuaStats was calling it from a frame up to once a second, all session,
+// for one number an addon displays. The heap compactor's monitor thread already
+// pays for this walk every ten seconds off the main thread, so the only reason
+// left to run it here is that the compactor is switched off - and then once a
+// minute, not once a second.
 static SIZE_T GetLargestFreeBlock() {
     MEMORY_BASIC_INFORMATION mbi;
     SIZE_T largestFree = 0;
@@ -1128,8 +1138,28 @@ static DWORD g_lastMemoryQueryTick = 0;
 static double g_cachedWorkingSetMB = 0.0;
 static double g_cachedCommitMB = 0.0;
 static double g_cachedLargestFreeMB = 0.0;
+// Which way the figure above was obtained, so the periodic report can say. A
+// walk here is main-thread time inside a frame; a hand-over from the monitor
+// thread is three loads.
+static DWORD g_lastOwnWalkTick   = 0;
+static unsigned long g_vaFromMonitor = 0;
+static unsigned long g_vaOwnWalks    = 0;
+static double g_vaOwnWalkMsWorst = 0.0;
 
 extern "C" void FontMetrics_GetStats(long* widthCalls, long* heightCalls);
+
+// Where the fragmentation figure came from, for the periodic report.
+//
+// Three states, not two: handed over by the monitor thread, walked here, or
+// neither because UpdateLuaStats never ran. The caller can tell them apart
+// because the two counts are separate and both can be zero.
+extern "C" void LuaOpt_GetVaSourceStats(unsigned long* fromMonitor,
+                                        unsigned long* ownWalks,
+                                        double* ownWorstMs) {
+    if (fromMonitor) *fromMonitor = g_vaFromMonitor;
+    if (ownWalks)    *ownWalks    = g_vaOwnWalks;
+    if (ownWorstMs)  *ownWorstMs  = g_vaOwnWalkMsWorst;
+}
 
 static void UpdateLuaStats(lua_State* L) {
     if (!Api.lua_pushnumber || !Api.lua_setfield || !Api.lua_gettop || !Api.lua_settop) return;
@@ -1144,7 +1174,30 @@ static void UpdateLuaStats(lua_State* L) {
                 g_cachedWorkingSetMB = (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
                 g_cachedCommitMB = (double)pmc.PagefileUsage / (1024.0 * 1024.0);
             }
-            g_cachedLargestFreeMB = (double)GetLargestFreeBlock() / (1024.0 * 1024.0);
+            // Prefer the monitor thread's result at any age. It walks every ten
+            // seconds, and a ten-second-old fragmentation figure is the same
+            // answer for a number that moves over minutes.
+            SIZE_T largest = 0;
+            unsigned long ageMs = 0;
+            if (HeapCompactor_GetLastLargestFree(&largest, &ageMs)) {
+                g_cachedLargestFreeMB = (double)largest / (1024.0 * 1024.0);
+                ++g_vaFromMonitor;
+            } else if (g_lastOwnWalkTick == 0 ||
+                       now - g_lastOwnWalkTick >= 60000) {
+                LARGE_INTEGER wf, wa, wb;
+                QueryPerformanceFrequency(&wf);
+                QueryPerformanceCounter(&wa);
+                g_cachedLargestFreeMB = (double)GetLargestFreeBlock()
+                                      / (1024.0 * 1024.0);
+                QueryPerformanceCounter(&wb);
+                g_lastOwnWalkTick = now;
+                ++g_vaOwnWalks;
+                if (wf.QuadPart) {
+                    double ms = (double)(wb.QuadPart - wa.QuadPart) * 1000.0
+                              / (double)wf.QuadPart;
+                    if (ms > g_vaOwnWalkMsWorst) g_vaOwnWalkMsWorst = ms;
+                }
+            }
         }
 
         WriteLuaGlobal_Number(L, "LUABOOST_DLL_MEM_KB",      State.luaMemoryKB);

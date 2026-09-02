@@ -692,6 +692,9 @@ static void StopFreezeWatchdog() {
 #include "datastore_fastpath.h"
 #include "string_ops_fast.h"
 #include "heap_compactor.h"
+extern "C" void LuaOpt_GetVaSourceStats(unsigned long* fromMonitor,
+                                        unsigned long* ownWalks,
+                                        double* ownWorstMs);
 #include "version_checker.h"
 #include "lua_tonumber_fast.h"
 #include "lua_pushnumber_fast.h"
@@ -4823,32 +4826,84 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     // log slice self-describing (GPU is static; logged once at startup).
     Log("[Stats] Renderer: %s", DXVKBridge::IsActive() ? "DXVK / Vulkan translation" : "native Direct3D 9");
 
-    // Virtual address space scan (32-bit fragmentation indicator)
+    // Virtual address space fragmentation, below 2GB.
+    //
+    // This used to walk the low 2GB here, with VirtualQuery, once per region,
+    // on the main thread, inside a frame, every five minutes. Tester logs put
+    // "STALL periodic maintenance took 42.6 ms" against a frame median near
+    // ten, and a fragmented low half has tens of thousands of regions at a
+    // syscall each - which is the whole of that number, near enough.
+    //
+    // The heap compactor's monitor thread already walks for exactly these two
+    // figures every ten seconds, off the main thread. Taking its last result
+    // costs three loads. The walk is kept only for the case where that thread
+    // is not running - the compactor switched off, or its first pass not done
+    // - and then it says so, with what it cost, rather than quietly charging
+    // a frame for it.
     {
-        MEMORY_BASIC_INFORMATION mbi;
-        uintptr_t addr = 0x10000;
         SIZE_T largestFree = 0;
-        SIZE_T totalFree = 0;
-        while (addr < 0x7FFF0000) {
-            if (VirtualQuery((void*)addr, &mbi, sizeof(mbi))) {
-                if (mbi.State == MEM_FREE) {
-                    if (mbi.RegionSize > largestFree) largestFree = mbi.RegionSize;
-                    totalFree += mbi.RegionSize;
+        SIZE_T totalFree   = 0;
+        unsigned long vaAgeMs = 0;
+        bool  cached = HeapCompactor_GetLowHalfSnapshot(&largestFree, &totalFree,
+                                                        &vaAgeMs);
+        double walkMs = 0.0;
+        if (!cached) {
+            LARGE_INTEGER wf, wa, wb;
+            QueryPerformanceFrequency(&wf);
+            QueryPerformanceCounter(&wa);
+            MEMORY_BASIC_INFORMATION mbi;
+            uintptr_t addr = 0x10000;
+            while (addr < 0x7FFF0000) {
+                if (VirtualQuery((void*)addr, &mbi, sizeof(mbi))) {
+                    if (mbi.State == MEM_FREE) {
+                        if (mbi.RegionSize > largestFree) largestFree = mbi.RegionSize;
+                        totalFree += mbi.RegionSize;
+                    }
+                    addr += mbi.RegionSize;
+                    if (mbi.RegionSize == 0) addr += 0x10000;
+                } else {
+                    addr += 0x10000;
                 }
-                addr += mbi.RegionSize;
-                if (mbi.RegionSize == 0) addr += 0x10000;
-            } else {
-                addr += 0x10000;
             }
+            QueryPerformanceCounter(&wb);
+            if (wf.QuadPart)
+                walkMs = (double)(wb.QuadPart - wa.QuadPart) * 1000.0
+                       / (double)wf.QuadPart;
         }
-        // Naming the range matters: this walk stops at 2GB, while the heap
-        // compactor measures all of user address space and reports gigabytes on
-        // the same client in the same second. Without the range on each line the
-        // two read as a contradiction.
-        Log("[Stats] VA Space (below 2GB): Free=%.0fMB LargestBlock=%.0fMB%s",
+        // Naming the range matters: these figures stop at 2GB, while the heap
+        // compactor reports all of user address space and shows gigabytes on the
+        // same client in the same second. Without the range on each line the two
+        // read as a contradiction.
+        //
+        // Saying where the numbers came from matters for the same reason. A
+        // reading up to ten seconds old is not the same claim as one taken now,
+        // and a line that does not say which invites the reader to assume.
+        char vaHow[96];
+        if (cached)
+            _snprintf(vaHow, sizeof(vaHow) - 1,
+                      " (from the heap monitor's walk %lu ms ago)", vaAgeMs);
+        else
+            _snprintf(vaHow, sizeof(vaHow) - 1,
+                      " (walked here, on this thread, in %.1f ms - the heap "
+                      "monitor has not published one)", walkMs);
+        vaHow[sizeof(vaHow) - 1] = 0;
+        Log("[Stats] VA Space (below 2GB): Free=%.0fMB LargestBlock=%.0fMB%s%s",
             totalFree / (1024.0 * 1024.0),
             largestFree / (1024.0 * 1024.0),
-           (largestFree < 64 * 1024 * 1024) ? " WARNING: fragmented" : "");
+           (largestFree < 64 * 1024 * 1024) ? " WARNING: fragmented" : "",
+            vaHow);
+        // The same walk used to live in three places. Two of them are gone; this
+        // says whether the third is still paying for it, and what it cost.
+        {
+            unsigned long fromMon = 0, ownWalks = 0;
+            double ownWorst = 0.0;
+            LuaOpt_GetVaSourceStats(&fromMon, &ownWalks, &ownWorst);
+            if (fromMon || ownWalks)
+                Log("[Stats]   the addon's copy of that figure was taken from the "
+                    "heap monitor %lu time(s) and walked on this thread %lu "
+                    "time(s), worst %.1f ms. It used to walk every time, up to "
+                    "once a second.", fromMon, ownWalks, ownWorst);
+        }
         // The client allocates from below 2GB. A tester whose garbled addon names
         // appeared while the largest block there was 11 MB had this line in his
         // log nine times and nobody read it against the complaint.
