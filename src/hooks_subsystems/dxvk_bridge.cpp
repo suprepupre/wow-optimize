@@ -44,19 +44,45 @@ static const char* CheckLoadedModules() {
     return nullptr;
 }
 
+// Why this check said no.
+//
+// It has five ways to return nullptr and they mean different things. Four are
+// "I could not look" and one is "I looked and it is not DXVK". The renderer line
+// in the periodic report printed "native Direct3D 9" for all five, which is a
+// claim about the machine rather than about what we could see; it now prints
+// this string instead. One of the four is our own doing: these three calls
+// resolve through the version.dll shipped beside the client, which is this
+// project's proxy, and if its forward to the system copy failed they return
+// zero forever.
+static const char* g_metaWhyNot = "not attempted";
+
 static const char* CheckD3D9Metadata() {
     HMODULE h = GetModuleHandleA("d3d9.dll");
-    if (!h) return nullptr;
+    if (!h) { g_metaWhyNot = "d3d9.dll is not loaded yet"; return nullptr; }
 
     char path[MAX_PATH];
-    if (!GetModuleFileNameA(h, path, sizeof(path))) return nullptr;
+    if (!GetModuleFileNameA(h, path, sizeof(path))) {
+        g_metaWhyNot = "d3d9.dll is loaded but its path could not be read";
+        return nullptr;
+    }
 
     DWORD dummy = 0;
     DWORD size = GetFileVersionInfoSizeA(path, &dummy);
-    if (size == 0 || size > 65536) return nullptr;
+    if (size == 0) {
+        g_metaWhyNot = "d3d9.dll carries no version resource, or the version.dll "
+                       "beside the client did not forward to the system one";
+        return nullptr;
+    }
+    if (size > 65536) {
+        g_metaWhyNot = "d3d9.dll version resource is implausibly large";
+        return nullptr;
+    }
 
     void* buf = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!buf) return nullptr;
+    if (!buf) {
+        g_metaWhyNot = "could not allocate for the version resource";
+        return nullptr;
+    }
 
     const char* result = nullptr;
     if (GetFileVersionInfoA(path, 0, size, buf)) {
@@ -85,6 +111,8 @@ static const char* CheckD3D9Metadata() {
     }
 
     VirtualFree(buf, 0, MEM_RELEASE);
+    if (!result)
+        g_metaWhyNot = "read d3d9.dll's version resource; it does not name DXVK";
     return result;
 }
 
@@ -121,6 +149,9 @@ bool Init() {
     DetectOnce();
     if (!g_active) {
         Log("[DXVKBridge] no Vulkan translation layer detected yet (vulkan-1.dll loads lazily on device creation; will keep checking via IsActive())");
+        Log("[DXVKBridge]   the file-metadata check: %s. Which of the five ways "
+            "this can end matters: four of them are \"could not look\" and only "
+            "one is \"looked, and it is not DXVK\".", g_metaWhyNot);
     }
     return true;
 }
@@ -151,7 +182,9 @@ bool IsActive() {
 void GetStats(Stats* out) {
     if (!out) return;
     out->active            = g_active != 0;
-    out->detectionReason   = g_reason;
+    // When nothing was detected, the interesting string is not "not detected"
+    // but what the one check that could have answered actually saw.
+    out->detectionReason   = g_active ? g_reason : g_metaWhyNot;
 }
 
 } // namespace DXVKBridge

@@ -4828,7 +4828,20 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     // Renderer line here too: DXVK's d3d9.dll can load after the startup probe,
     // so re-report it once detection has reliably latched. Makes any mid-session
     // log slice self-describing (GPU is static; logged once at startup).
-    Log("[Stats] Renderer: %s", DXVKBridge::IsActive() ? "DXVK / Vulkan translation" : "native Direct3D 9");
+    // Three states. "native Direct3D 9" used to cover both "we looked and it is",
+    // and every way the look itself could fail - d3d9.dll not loaded yet, no
+    // version resource, our own version.dll proxy not forwarding. A tester on
+    // DXVK reading "native Direct3D 9" sends the wrong log to the wrong place.
+    {
+        DXVKBridge::Stats dx = {};
+        DXVKBridge::GetStats(&dx);
+        if (dx.active)
+            Log("[Stats] Renderer: DXVK / Vulkan translation (%s)",
+                dx.detectionReason ? dx.detectionReason : "reason not recorded");
+        else
+            Log("[Stats] Renderer: no translation layer seen - %s",
+                dx.detectionReason ? dx.detectionReason : "reason not recorded");
+    }
 
     // Virtual address space fragmentation, below 2GB.
     //
