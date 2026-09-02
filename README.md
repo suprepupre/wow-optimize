@@ -57,7 +57,10 @@ anything.
   show up in frame time at all.
 * **Flight Recorder** keeps the last 512 frames and writes 240 of them to the log
   when you press Scroll Lock. Press it the moment you see something wrong and the
-  log carries that second frame by frame instead of a ten-second average.
+  log carries that second frame by frame instead of a ten-second average. **On by
+  default**, and it writes nothing until something marks it - because it also
+  marks itself for a disconnect, a freeze and a bad SavedVariables filename,
+  which are the three things you cannot press a key for.
 * Every log now opens its periodic report with **what went wrong this session** -
   freezes and where the thread was stuck, long loads, disconnects, address space
   running out, a SavedVariables file written under a name matching no addon, an
