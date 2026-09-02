@@ -132,6 +132,11 @@ namespace Config {
         // have nothing to do with defragmenting a heap. Each inherits DefragLf
         // when its own key is absent, so nobody loses a feature they were
         // already running by updating.
+        // Frustum culling and quaternion normalise, in SSE2. These used to hang
+        // off OptStrStrSse2 - a switch named after a string search - so anyone who
+        // left "SSE2 Boyer-Moore strstr" off, which is its default, silently lost
+        // both. Inherits that switch when its own key is absent.
+        bool OptSimdGeometry = false;
         bool OptRenderHooks = false;
         bool OptAsyncWorkerPool = false;
         bool OptThreadAffinity = false;

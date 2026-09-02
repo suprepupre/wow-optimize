@@ -420,6 +420,7 @@ namespace WowOptimizeLauncher {
 
                 // Graphics & Sound
                 { "SSE2 Boyer-Moore strstr", new SettingItem("Graphics_Sound", "StrStrSse2", false, null, "Optimizes string sub-searches (such as font names, textures) using vectorized SIMD algorithms.") },
+                { "SSE2 Frustum Cull and Quaternion Normalize", new SettingItem("Graphics_Sound", "SimdGeometry", false, null, "Replaces the frustum culling and quaternion normalize routines with SSE2 versions. These used to be switched on and off by the SSE2 string search option, which is named after something else entirely, so anyone who left that off - it is off by default - lost these too without being told. If you have never set this key it follows whatever the string search option is set to, so nothing changes for you by updating.") },
                 { "Vectorized String Concatenation", new SettingItem("Graphics_Sound", "StrCatFast", false, null, "Speeds up string appending (such as chat text building) using SSE2 assembly wrappers.") },
                 { "FMOD Sound Mixer Optimization", new SettingItem("Graphics_Sound", "SoundMixerOpt", false, null, "Adjusts audio thread schedules and buffer allocations to prevent sound stutters in raids.") },
                 { "Parallel Sound Wave Decoding", new SettingItem("Graphics_Sound", "AudioDecodeMt", false, null, "Decodes sound assets in background threads to eliminate latency when playing fresh audio clips.") },
@@ -1244,6 +1245,7 @@ namespace WowOptimizeLauncher {
             InheritIfAbsent(present, "RenderHooks", "DefragLf");
             InheritIfAbsent(present, "AsyncWorkerPool", "DefragLf");
             InheritIfAbsent(present, "ThreadAffinity", "DefragLf");
+            InheritIfAbsent(present, "SimdGeometry", "StrStrSse2");
             InheritIfAbsent(present, "LuaAddonProfile", "SamplingProfiler");
             InheritIfAbsent(present, "UiScriptHandlerCache", "UIFrameBatch");
             InheritIfAbsent(present, "UnitApiFastPath", "UIFrameBatch");

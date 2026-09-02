@@ -66,6 +66,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "FlightRecorder", &Settings::OptFlightRecorder },
     { "General", "AbTest", &Settings::OptAbTest },
     { "General", "RenderHooks", &Settings::OptRenderHooks },
+    { "Graphics_Sound", "SimdGeometry", &Settings::OptSimdGeometry },
     { "General", "AsyncWorkerPool", &Settings::OptAsyncWorkerPool },
     { "General", "ThreadAffinity", &Settings::OptThreadAffinity },
     { "UI_Lua", "UIFrameBatch", &Settings::OptUIFrameBatch },
@@ -580,6 +581,12 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptFastStrnicmpOpt     = GetPrivateProfileIntA("UI_Lua", "FastStrnicmpOpt", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaSNewLstrFast     = GetPrivateProfileIntA("UI_Lua", "LuaSNewLstrFast", 0, iniPath.c_str()) != 0;
         g_settings.OptStrStrSse2          = GetPrivateProfileIntA("Graphics_Sound", "StrStrSse2", 0, iniPath.c_str()) != 0;
+        // Inherits StrStrSse2 when absent, and must be read AFTER it - placed
+        // earlier in this function it would have inherited the struct
+        // initialiser rather than the value in the file, which is the same
+        // defect this key exists to fix.
+        g_settings.OptSimdGeometry        = GetPrivateProfileIntA("Graphics_Sound", "SimdGeometry",
+                                                g_settings.OptStrStrSse2 ? 1 : 0, iniPath.c_str()) != 0;
         g_settings.OptStrCatFast          = GetPrivateProfileIntA("Graphics_Sound", "StrCatFast", 0, iniPath.c_str()) != 0;
         g_settings.OptSoundMixerOpt       = GetPrivateProfileIntA("Graphics_Sound", "SoundMixerOpt", 0, iniPath.c_str()) != 0;
         g_settings.OptAudioDecodeMt       = GetPrivateProfileIntA("Graphics_Sound", "AudioDecodeMt", 0, iniPath.c_str()) != 0;

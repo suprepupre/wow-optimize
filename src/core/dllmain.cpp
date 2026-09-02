@@ -8594,7 +8594,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("");
     Log("--- SIMD Hooks (SSE2 matrix, frustum, color) ---");
-    bool simdHooksOk = Config::g_settings.OptStrStrSse2 && InstallSimdHooks(); // BISECT
+    bool simdHooksOk = Config::g_settings.OptSimdGeometry && InstallSimdHooks(); // BISECT
 
     Log("");
     Log("--- Logic Hooks (combat text, UI cache, heartbeat) ---");
