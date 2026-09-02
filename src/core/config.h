@@ -131,28 +131,23 @@ namespace Config {
         // clock read a frame.
         bool OptFlightRecorder = true;
         int  FlightRecorderKey = 0x91;   // VK_SCROLL
-        // Alternates one feature on and off inside a session, so its frame
-        // times can be compared against a control that saw the same zone, the
-        // same addons and the same play. Between two sessions nothing is held
-        // still, which is why no optimization here has a measured gain.
-        // Three things the Lock-Free Heap Defragmenter switch used to gate that
-        // have nothing to do with defragmenting a heap. Each inherits DefragLf
-        // when its own key is absent, so nobody loses a feature they were
-        // already running by updating.
         // Frustum culling and quaternion normalise, in SSE2. These used to hang
         // off OptStrStrSse2 - a switch named after a string search - so anyone who
         // left "SSE2 Boyer-Moore strstr" off, which is its default, silently lost
         // both. Inherits that switch when its own key is absent.
         bool OptSimdGeometry = false;
-        // Kept as an ini key with no tickbox: it gates InstallRenderHooks, which
-        // installs nothing. The one real thing that module does - clearing the
-        // render-state dedup cache once a frame - runs from the frame pump and is
-        // not gated at all. A tickbox for it was added and then removed the same
-        // day, because a switch that changes only whether a log line appears is
-        // worse than no switch.
-        bool OptRenderHooks = false;
+        // Two things the Lock-Free Heap Defragmenter switch used to gate that have
+        // nothing to do with defragmenting a heap. Each inherits DefragLf when its
+        // own key is absent, so nobody loses a feature they were already running by
+        // updating. A third, RenderHooks, was split out with them and then removed:
+        // the function it gated installs nothing, so the key decided only whether a
+        // log line appeared.
         bool OptAsyncWorkerPool = false;
         bool OptThreadAffinity = false;
+        // Alternates one feature on and off inside a session, so its frame times can
+        // be compared against a control that saw the same zone, the same addons and
+        // the same play. Between two sessions nothing is held still, which is why no
+        // optimization here has a measured gain.
         bool OptAbTest = false;
         int  AbTestPeriodMs = 20000;
         char AbTestSubject[32] = {};

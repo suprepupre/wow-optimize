@@ -634,6 +634,12 @@
 // inline-batch-dangerous groups (confirmed at luaD_precall 0x5565E9).
 #define TEST_DISABLE_LUA_SAFE_G1         0  
 #define TEST_DISABLE_LUA_SAFE_G2         0  // enabled: Safe Group 2 hooks
+// G2A groups the three debug/execution-control hooks below it. dllmain.cpp
+// nests them inside "#if !TEST_DISABLE_LUA_SAFE_G2A", but the macro was never
+// declared here, where every other rung of this ladder lives - so a bisection
+// reading this file could not see the group level existed. The behaviour is
+// unchanged: an undeclared macro reads as 0 in #if, which is what it now says.
+#define TEST_DISABLE_LUA_SAFE_G2A 0
 #define TEST_DISABLE_LUA_SAFE_G2AL 0
 #define TEST_DISABLE_LUA_SAFE_G2AI 0
 #define TEST_DISABLE_LUA_SAFE_G2B 0

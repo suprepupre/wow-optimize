@@ -8632,8 +8632,12 @@ static DWORD WINAPI MainThread(LPVOID param) {
     bool d3d9StateOk = Config::g_settings.OptD3d9StateManager && InstallD3D9StateManager();
 
     Log("");
+    // No switch. It gated an ini key with no tickbox that decided only whether
+    // the two lines below appeared, because this function installs nothing - the
+    // module's one piece of real work runs from the frame pump either way. A
+    // reader is better served by the lines always being there and saying so.
     Log("--- Render Hooks (backbuffer) ---");
-    bool renderHooksOk = Config::g_settings.OptRenderHooks && InstallRenderHooks(); // BISECT
+    bool renderHooksOk = InstallRenderHooks();
 
     Log("");
     Log("--- SIMD Hooks (SSE2 matrix, frustum, color) ---");

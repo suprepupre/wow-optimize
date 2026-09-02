@@ -65,7 +65,6 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "NoClientPatches", &Settings::OptNoClientPatches },
     { "General", "FlightRecorder", &Settings::OptFlightRecorder },
     { "General", "AbTest", &Settings::OptAbTest },
-    { "General", "RenderHooks", &Settings::OptRenderHooks },
     { "Graphics_Sound", "SimdGeometry", &Settings::OptSimdGeometry },
     { "General", "AsyncWorkerPool", &Settings::OptAsyncWorkerPool },
     { "General", "ThreadAffinity", &Settings::OptThreadAffinity },
@@ -518,7 +517,6 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         // which is exactly the 3.18.1 regression.
         {
             const int inherit = g_settings.OptDefragLf ? 1 : 0;
-            g_settings.OptRenderHooks     = GetPrivateProfileIntA("General", "RenderHooks", inherit, iniPath.c_str()) != 0;
             g_settings.OptAsyncWorkerPool = GetPrivateProfileIntA("General", "AsyncWorkerPool", inherit, iniPath.c_str()) != 0;
             g_settings.OptThreadAffinity  = GetPrivateProfileIntA("General", "ThreadAffinity", inherit, iniPath.c_str()) != 0;
         }
