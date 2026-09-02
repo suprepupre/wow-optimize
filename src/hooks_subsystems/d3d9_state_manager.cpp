@@ -146,6 +146,26 @@ static unsigned long g_totalFrames = 0;
 // session, so they are lower bounds and the report says so.
 static void*         g_shadowTex[8]   = {};
 static bool          g_shadowTexValid[8] = {};
+// Which render states the shadow comparison watches, as a table rather than a
+// chain of eight compares.
+//
+// A tester session put 39,267,692 calls through Hooked_SetRenderState, and each
+// one evaluated eight equality tests to answer a question a single byte load
+// answers. The states are D3DRS_* constants below 256; a state at or above 256
+// reads as not critical, which is what the eight compares did for it too, so
+// both branches below behave exactly as before for every input.
+//
+// Filled in InstallD3D9StateManager, before any hook it installs can fire, so
+// there is no static initialisation order to reason about.
+static unsigned char g_isCriticalRs[256] = {};
+// The eight are 7, 14, 15, 19, 20, 24, 25 and 27 in the SDK this builds
+// against. Asserted rather than trusted, because the table indexes by them.
+static_assert(D3DRS_ALPHABLENDENABLE < 256 && D3DRS_SRCBLEND < 256 &&
+              D3DRS_DESTBLEND        < 256 && D3DRS_ALPHATESTENABLE < 256 &&
+              D3DRS_ALPHAREF         < 256 && D3DRS_ALPHAFUNC       < 256 &&
+              D3DRS_ZWRITEENABLE     < 256 && D3DRS_ZENABLE         < 256,
+              "a watched render state fell outside the 256-entry table");
+
 static unsigned long g_texWouldSkip   = 0;
 static unsigned long g_texCompared    = 0;
 static DWORD         g_shadowRs[256]  = {};
@@ -300,10 +320,7 @@ static HRESULT __stdcall Hooked_SetRenderState(void* dev, DWORD state, DWORD val
     CheckDeviceChange(dev);
     ++g_statCalls[0];
     
-    bool isCriticalState = (state == D3DRS_ALPHABLENDENABLE || state == D3DRS_SRCBLEND || 
-                           state == D3DRS_DESTBLEND || state == D3DRS_ALPHATESTENABLE || 
-                           state == D3DRS_ALPHAREF || state == D3DRS_ALPHAFUNC ||
-                           state == D3DRS_ZWRITEENABLE || state == D3DRS_ZENABLE);
+    const bool isCriticalState = (state < 256) && (g_isCriticalRs[state] != 0);
 
     // Measurement only, on the states the dedup is not allowed to touch.
     if (state < 256 && isCriticalState) {
@@ -877,6 +894,15 @@ static bool TryFindAndPatchDevice() {
 bool IsD3D9DeviceHooked(void) { return g_deviceHooked; }
 
 bool InstallD3D9StateManager(void) {
+    memset(g_isCriticalRs, 0, sizeof(g_isCriticalRs));
+    g_isCriticalRs[D3DRS_ALPHABLENDENABLE] = 1;
+    g_isCriticalRs[D3DRS_SRCBLEND]         = 1;
+    g_isCriticalRs[D3DRS_DESTBLEND]        = 1;
+    g_isCriticalRs[D3DRS_ALPHATESTENABLE]  = 1;
+    g_isCriticalRs[D3DRS_ALPHAREF]         = 1;
+    g_isCriticalRs[D3DRS_ALPHAFUNC]        = 1;
+    g_isCriticalRs[D3DRS_ZWRITEENABLE]     = 1;
+    g_isCriticalRs[D3DRS_ZENABLE]          = 1;
     memset(g_rsCache, 0, sizeof(g_rsCache));
     memset(g_rsValid, 0, sizeof(g_rsValid));
     memset(g_tssCache, 0, sizeof(g_tssCache));
