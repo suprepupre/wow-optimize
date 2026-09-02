@@ -222,7 +222,10 @@ static void BuildKnownFuncTable() {
         // each triangle by ANDing its three. Called once per line-of-sight or
         // pick ray from sub_7C9A00. The six bounds live on the x87 stack for
         // the whole loop, which is why 158 of its 418 instructions are x87.
-        { 0x008203B0,   872, "Hot_8203B0" },
+        // Named from a profile before anyone had read it. It contains the same
+        // bone matrix transpose as sub_829BA0, in a second draw path, and
+        // BoneMatrixUpload patches both.
+        { 0x008203B0,   872, "M2_BoneMatrixUploadB" },
         { 0x00857CA0,  5151, "luaV_execute" },
         // The Lua bytecode dispatch loop, and the client has two of them.
         // luaD_call at 0x00856760 picks by the byte at G(L)+20 - the script
