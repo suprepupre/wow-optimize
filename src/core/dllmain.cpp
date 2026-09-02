@@ -1803,6 +1803,20 @@ static void RunPeriodicMaintenanceOnMainThread() {
     if (g_nextStatsDumpTick == 0) {
         g_nextStatsDumpTick = nowTick + 30000;
     } else if ((LONG)(nowTick - g_nextStatsDumpTick) >= 0) {
+        // Its own probe, inside the maintenance one.
+        //
+        // Tester logs carry "periodic maintenance took 42.6 ms" - forty
+        // milliseconds on the main thread, inside a frame, against a frame median
+        // near ten, and caused entirely by this DLL's own reporting. The outer
+        // probe cannot say whether that is the report or the rest of maintenance,
+        // and the report is fifty-eight LogStats calls deep, so guessing which
+        // one would be guessing.
+        //
+        // This narrows it to the report or not-the-report in one number. The
+        // address-space walk inside HeapCompactor_LogStats now times itself as
+        // well, so between the two the next log says whether that walk is the
+        // whole of it.
+        StallProbe statsProbe("periodic stats dump", 4.0);
         DumpPeriodicStats();
         g_nextStatsDumpTick = nowTick + 300000;
     }
