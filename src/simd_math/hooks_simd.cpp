@@ -1363,7 +1363,27 @@ bool InstallSimdHooks(void) {
         Log("[SimdHooks] Quaternion normalize: fill ADDR_WOW_QUAT_NORMALIZE");
     }
 
-    if (ADDR_WOW_FRUSTUM_CULL) {
+    // Two modules replace this one function, and only one of them can have it.
+    //
+    // frustum_aabb_sse2.cpp hooks 0x009839E0 as well. It is the later of the two
+    // and the better behaved: it runs its own answer against the client's for the
+    // first calls and periodically after that, and retires itself on the first
+    // disagreement. This one does neither. Whichever initialised first used to win
+    // and the other logged a duplicate, so which implementation a player got
+    // depended on link order.
+    //
+    // The verified one wins by name now. The type-2 and point variants below are
+    // not duplicated and are unaffected.
+    //
+    // Worth saying while here: this whole module is gated on OptStrStrSse2, a
+    // switch named after a string search, and it is what decides whether frustum
+    // culling and quaternion maths get replaced. That is the same defect as the
+    // heap defragmenter gating the render hooks, and it is not fixed here.
+    if (ADDR_WOW_FRUSTUM_CULL && Config::g_settings.OptFrustumAabb) {
+        Log("[SimdHooks] Frustum cull: leaving 0x%08X to the verified replacement "
+            "in frustum_aabb_sse2, which checks itself against the client and "
+            "stands down on a disagreement", ADDR_WOW_FRUSTUM_CULL);
+    } else if (ADDR_WOW_FRUSTUM_CULL) {
         Log("[SimdHooks] Frustum cull hook target: 0x%08X", ADDR_WOW_FRUSTUM_CULL);
 #if !TEST_DISABLE_FRUSTUM_CULL
         if (WineSafe_CreateHook((void*)ADDR_WOW_FRUSTUM_CULL, (void*)Hooked_IsAABBVisible, (void**)&orig_IsAABBVisible) == MH_OK) {
