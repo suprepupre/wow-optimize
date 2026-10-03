@@ -1076,11 +1076,10 @@ namespace WowOptimizeLauncher {
             btnMaxPerf.Location = new Point(15, y);
             btnMaxPerf.Click += delegate { SetUpMaxPerformance(); };
             toolTip.SetToolTip(btnMaxPerf,
-                "Every switch that can make the game faster, on, including the "
-                + "replacements nobody has proven in a game yet and the ones under "
-                + "investigation for a crash or an addon error. Each replacement "
-                + "checks its answers against the game's and switches itself off at "
-                + "the first disagreement.\r\n\r\n"
+                "Every proven switch that can make the game faster, on. The "
+                + "replacements nobody has proven in a game yet stay at their own "
+                + "default; TRY THE UNPROVEN ONES is the button that turns them "
+                + "on.\r\n\r\n"
                 + "Off: everything that only measures the game, the ones that buy "
                 + "frames by changing how it looks or sounds, the ones measured "
                 + "and beaten by the client and the ones that do nothing in this build, "
@@ -1952,6 +1951,18 @@ namespace WowOptimizeLauncher {
         // leaves a dozen boxes unticked for reasons only the tooltips know is
         // what made this preset unreadable. The reasons still are in the
         // tooltips, and the message below names them.
+        // MAX PERFORMANCE. A switch nobody has proven in a game stays at its own
+        // default: a button called performance must not be what turns on a render
+        // thread, or a replacement under investigation for a crash. In 3.21.0 this
+        // button shared WantedForSpeed with the proving run and turned all of them
+        // on; two testers on it crashed, and a third lost glyphs from text.
+        private static bool WantedByMaxPerformance(SettingItem item) {
+            if (item.Key == "FrameLimiter") return false;
+            if (!Kinds.HelpsSpeed(item.Key)) return false;
+            if (item.Experimental) return item.DefaultVal;
+            return true;
+        }
+
         private static bool WantedForSpeed(SettingItem item) {
             // A limiter never buys frames. It changes when a frame is handed
             // over, and a session that waits measures nothing.
@@ -1962,32 +1973,23 @@ namespace WowOptimizeLauncher {
         }
 
         private void SetUpMaxPerformance() {
-            int on = 0, off = 0, unproven = 0, investigated = 0;
+            int on = 0, off = 0, left = 0;
             foreach (SettingItem item in settingsMap.Values) {
                 if (item.Ctrl == null) continue;
-                bool want = WantedForSpeed(item);
+                bool want = WantedByMaxPerformance(item);
                 item.Ctrl.Checked = want;
-                if (want) {
-                    on++;
-                    if (item.Experimental) unproven++;
-                    if (SkippedByEnableAll(item)) investigated++;
-                } else {
-                    off++;
-                }
+                if (item.Experimental && Kinds.HelpsSpeed(item.Key)) left++;
+                if (want) on++; else off++;
             }
             UpdateActiveModulesCount();
             SaveSettings();
             MessageBox.Show(
                 on.ToString() + " features on, " + off.ToString() + " off.\r\n\r\n"
-                + "On: every switch that can make the game faster, "
-                + unproven.ToString() + " of them still unproven. Each unproven "
-                + "replacement checks its answers against the game's before it "
-                + "answers anything and switches itself off at the first "
-                + "disagreement.\r\n\r\n"
-                + investigated.ToString() + " of the ones now on carry a warning "
-                + "in their own description (a crash report, an addon error or "
-                + "corrupted names under investigation). If the game misbehaves, "
-                + "press EVERYTHING OFF first, then DEFAULT, and send the log.\r\n\r\n"
+                + "On: every proven switch that can make the game faster.\r\n\r\n"
+                + left.ToString() + " switches nobody has proven in a game yet "
+                + "were left at their own default. TRY THE UNPROVEN ONES turns "
+                + "them on for a test session. If the game misbehaves, press "
+                + "EVERYTHING OFF first, then DEFAULT, and send the log.\r\n\r\n"
                 + "Off: everything that only measures the game; the ones that buy "
                 + "frames by changing how it looks or sounds; the ones measured "
                 + "against the client and beaten; the frame limiter override; "
@@ -2014,7 +2016,8 @@ namespace WowOptimizeLauncher {
                    item.Tooltip.IndexOf("skipped by Enable All", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        // The one button a tester presses. Exactly MAX PERFORMANCE, plus the A/B
+        // The one button a tester presses. Every unproven replacement and the rest of
+        // what speeds the game up, plus the A/B
         // test (every replacement switched off and on together in 20 second
         // stints, frame times of the two halves compared) plus everything
         // LOGGING: FULL turns on, so a single session returns the verification of
