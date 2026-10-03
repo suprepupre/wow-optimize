@@ -204,11 +204,13 @@ void* __fastcall Hook_FrameStrataManager_OnUpdate(void* this_ptr, void* /*edx*/,
         const uintptr_t stratum = strataArray[s];
         if (!stratum) continue;
 
-        const uint32_t levelCount = *(const uint32_t*)(stratum + 8);
-        const uintptr_t* levelArray = *(const uintptr_t**)(stratum + 0x14);
-        if (!levelArray || !levelCount) continue;
-
-        for (uint32_t i = 0; i < levelCount; ++i) {
+        // The client reads the count and the array pointer again on every pass:
+        // a level's OnUpdate runs addon scripts, a script can create a frame at a
+        // level the stratum does not have yet, and the array is reallocated. A
+        // count and pointer read once before the loop walked freed memory.
+        for (uint32_t i = 0; i < *(const uint32_t*)(stratum + 8); ++i) {
+            const uintptr_t* const levelArray = *(const uintptr_t**)(stratum + 0x14);
+            if (!levelArray) break;
             const uintptr_t level = levelArray[i];
             if (!level) continue;
             ++g_levelsEvaluated;
