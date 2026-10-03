@@ -34,7 +34,8 @@
 //
 // This walks the live list and hoists that. Nothing else changes: the same
 // nodes in the same order, the same callback with the same three arguments, the
-// same two exits.
+// same two exits, and the next pointer read after the callback, as the client
+// reads it.
 // ---------------------------------------------------------------------------
 // Why not a flat array, which is the obvious idea
 //
@@ -203,7 +204,6 @@ int __cdecl HoistedEnum(EnumCb_t cb, int ctx) {
         if (!Readable(node)) { g_dead = true; break; }
 
         uint32_t lo, hi;
-        uintptr_t next;
         bool linkStillMatches = true;
         __try {
             lo = *(const uint32_t*)(node + 0x30);
@@ -217,7 +217,6 @@ int __cdecl HoistedEnum(EnumCb_t cb, int ctx) {
                 if (again != linkOffset) linkStillMatches = false;
                 ++g_checked;
             }
-            next = *(const uintptr_t*)(node + linkOffset + 4);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_dead = true;
             break;
@@ -233,6 +232,18 @@ int __cdecl HoistedEnum(EnumCb_t cb, int ctx) {
 
         ++visited;
         if (!cb(lo, hi, ctx)) { result = 0; ++g_stopped; break; }
+
+        // The next pointer is read after the callback, as the client reads it: the
+        // callback is game code that can remove this object or add one after it,
+        // and a pointer fetched before the call would then name a node that is no
+        // longer the next one, or one that has been freed.
+        uintptr_t next;
+        __try {
+            next = *(const uintptr_t*)(node + linkOffset + 4);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_dead = true;
+            break;
+        }
         node = next;
     }
 
