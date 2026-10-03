@@ -741,7 +741,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptObjMgrFindFast      = GetPrivateProfileIntA("General", "ObjMgrFindFast", 1, iniPath.c_str()) != 0;
         g_settings.OptQuatLerpSse2        = GetPrivateProfileIntA("Graphics_Sound", "QuatLerpSse2", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaProtoCache       = GetPrivateProfileIntA("UI_Lua", "LuaProtoCache", 1, iniPath.c_str()) != 0;
-        g_settings.OptLuaVmFast           = GetPrivateProfileIntA("UI_Lua", "LuaVmFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptLuaVmFast           = GetPrivateProfileIntA("UI_Lua", "LuaVmFast", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaBytecodeStore    = GetPrivateProfileIntA("UI_Lua", "LuaBytecodeStore", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaThisFast         = GetPrivateProfileIntA("UI_Lua", "LuaThisFast", 1, iniPath.c_str()) != 0;
         g_settings.OptAnimLod             = GetPrivateProfileIntA("Graphics_Sound", "AnimLod", 0, iniPath.c_str()) != 0;

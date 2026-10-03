@@ -364,7 +364,7 @@ namespace Config {
         bool OptLuaProtoCache = true;
         // The client's Lua interpreter, transcribed, with the string-key table
         // lookup inlined. Off: it is the function every line of Lua runs through.
-        bool OptLuaVmFast = true;
+        bool OptLuaVmFast = false;
         // The other 1868 ms of that same loading screen: source the session had
         // never seen, which no cache inside the process can help with. This one
         // keeps the compiled form on disk between sessions. Off by default -
