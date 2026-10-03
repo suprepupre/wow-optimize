@@ -2,7 +2,7 @@
 
 #define WOW_OPTIMIZE_VERSION_MAJOR  3
 #define WOW_OPTIMIZE_VERSION_MINOR  21
-#define WOW_OPTIMIZE_VERSION_PATCH  0
+#define WOW_OPTIMIZE_VERSION_PATCH  1
 #define WOW_OPTIMIZE_VERSION_BUILD  0
 
 // Built from the numbers above rather than written out again. They had drifted:

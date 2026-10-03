@@ -24,6 +24,7 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
+* [What's New in v3.21.1](#whats-new-in-v3211)
 * [What's New in v3.21.0](#whats-new-in-v3210)
 * [Send me your log](#send-me-your-log)
   * [Measuring rather than reporting](#if-you-want-to-measure-something-rather-than-report-a-bug)
@@ -36,6 +37,30 @@ The current public build is focused on real frametime stability, long-session sm
 * [Building](#building)
 * [Core Architecture](#core-architecture)
 * [Troubleshooting & Diagnostics](#troubleshooting)
+
+---
+
+## What's New in v3.21.1
+
+### Fixed
+
+* **Skada, DBM and WeakAuras in fights.** Lookups of units and name-cache
+  entries now always return what the game's own lookup returns. That fixes
+  fights Skada did not record, DBM timers without their sound alerts, WeakAuras
+  triggers that stopped firing, and a crash in `UnitName`. Reported by prince
+  and a tester on EZ WoW.
+* **MAX PERFORMANCE** turns on the proven speed-ups. Replacements not yet proven
+  in a game keep their defaults, and TRY THE UNPROVEN ONES turns them on for a
+  test session.
+* **UI frame update.** The frame-level replacement (off by default) reads its
+  list of levels on every pass, as the game does.
+* **Lua Interpreter (experimental)** is off by default and sits on the NOT
+  PROVEN tab.
+
+### After updating
+
+Press DEFAULT in the launcher once. A profile saved on 3.21.0 keeps the values
+it was saved with. Press MAX PERFORMANCE after that if you use it.
 
 ---
 
