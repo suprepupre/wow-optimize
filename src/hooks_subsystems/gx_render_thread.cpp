@@ -38,6 +38,7 @@
 #include <d3d9.h>
 #include <stdint.h>
 #include <string.h>
+#include <intrin.h>
 
 #include "gx_render_thread.h"
 #include "gx_internal.h"
@@ -78,7 +79,7 @@ namespace {
 
 // ---- slots ------------------------------------------------------------------
 enum Slot {
-    S_Release = 2, S_Reset = 16, S_Present = 17, S_CreateVB = 26, S_CreateIB = 27,
+    S_Release = 2, S_Reset = 16, S_Present = 17, S_CreateTexture = 23, S_CreateVB = 26, S_CreateIB = 27,
     S_SetRT = 37, S_SetDS = 39, S_BeginScene = 41, S_EndScene = 42, S_Clear = 43,
     S_SetTransform = 44, S_SetViewport = 47, S_SetMaterial = 49, S_SetLight = 51,
     S_LightEnable = 53, S_SetClipPlane = 55, S_SetRS = 57, S_SetTexture = 65,
@@ -133,7 +134,7 @@ bool IsDirectSlot(int s) {
     switch (s) {
     case 0: case 1: case 3: case 4: case 6: case 7: case 8: case 9:
     case 10: case 11: case 12: case 13: case 14: case 15: case 19:
-    case 21: case 22: case 23: case 24: case 25: case 28: case 29: case 36:
+    case 21: case 22: case 24: case 25: case 28: case 29: case 36:
     case 86: case 91: case 106: case 118:
         return true;
     default:
@@ -579,6 +580,76 @@ void __cdecl SyncEnter(int slot) {
     if (slot == S_Reset) g_lastPresentHr = D3D_OK;
 }
 
+// ---- textures: a CPU write must not overtake draws still in the ring --------------------
+// A texture is locked and written from the main thread while draws that sample it
+// may still be queued for the render thread. On a managed texture the draw then
+// sees newer contents than the frame it was recorded in, which is harmless. On a
+// dynamic texture locked with DISCARD the real lock renames the backing store, and
+// a draw queued before it executes afterwards against a store nothing has been
+// written into: the glyph atlas is that texture, and the symptom is letters missing
+// from text that stay missing until the page is rebuilt. So a lock that writes
+// waits for the ring to empty, the way every other call that is not queued does.
+// A read-only lock does not: no draw writes a texture the client can lock.
+typedef HRESULT (__stdcall *F_CreateTexture)(IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT,
+                                             D3DPOOL, IDirect3DTexture9**, HANDLE*);
+typedef HRESULT (__stdcall *F_TexLockRect)(void*, UINT, D3DLOCKED_RECT*, const RECT*, DWORD);
+constexpr int kTexSlotLockRect = 19;      // IDirect3DTexture9: 3 IUnknown, 8 resource, 6 base texture, 2 level methods
+struct TexVt { uintptr_t* vt; F_TexLockRect lock; };
+constexpr int kMaxTexVt = 8;
+TexVt         g_texVt[kMaxTexVt];
+volatile LONG g_texVtCount = 0;
+volatile LONG g_texPatchLock = 0;
+unsigned long g_texLocks = 0, g_texLockDrains = 0, g_texLockOffMain = 0;
+
+HRESULT __stdcall T_TexLockRect(void* self, UINT level, D3DLOCKED_RECT* lr, const RECT* rc, DWORD flags) {
+    uintptr_t* vt = *(uintptr_t**)self;
+    F_TexLockRect orig = nullptr;
+    const LONG n = g_texVtCount;
+    for (LONG i = 0; i < n; ++i) if (g_texVt[i].vt == vt) { orig = g_texVt[i].lock; break; }
+    if (!orig) return D3DERR_INVALIDCALL;
+    if (g_active) {
+        if (!OnMain()) {
+            ++g_texLockOffMain;     // the async loader's own lock: nothing queued can be reading it yet
+        } else {
+            ++g_texLocks;
+            if (!(flags & D3DLOCK_READONLY) &&
+                !InsideD3d9Runtime((uintptr_t)_ReturnAddress())) {
+                ++g_texLockDrains;
+                Drain();
+            }
+        }
+    }
+    return orig(self, level, lr, rc, flags);
+}
+
+void PatchTextureVtable(IDirect3DTexture9* tex) {
+    uintptr_t* vt = *(uintptr_t**)tex;
+    if (!vt) return;
+    while (InterlockedCompareExchange(&g_texPatchLock, 1, 0) != 0) YieldProcessor();
+    bool known = false;
+    const LONG n = g_texVtCount;
+    for (LONG i = 0; i < n; ++i) if (g_texVt[i].vt == vt) { known = true; break; }
+    if (!known && n < kMaxTexVt) {
+        DWORD old = 0;
+        if (VirtualProtect(&vt[kTexSlotLockRect], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+            g_texVt[n].vt = vt;
+            g_texVt[n].lock = (F_TexLockRect)vt[kTexSlotLockRect];
+            MemoryBarrier();
+            g_texVtCount = n + 1;            // registered before the slot points at the thunk
+            vt[kTexSlotLockRect] = (uintptr_t)&T_TexLockRect;
+            VirtualProtect(&vt[kTexSlotLockRect], sizeof(void*), old, &old);
+        }
+    }
+    g_texPatchLock = 0;
+}
+
+HRESULT __stdcall T_CreateTexture(IDirect3DDevice9* d, UINT w, UINT h, UINT levels, DWORD usage,
+                                  D3DFORMAT fmt, D3DPOOL pool, IDirect3DTexture9** pp, HANDLE* shared) {
+    const HRESULT hr = O<F_CreateTexture>(S_CreateTexture)(d, w, h, levels, usage, fmt, pool, pp, shared);
+    if (SUCCEEDED(hr) && pp && *pp) PatchTextureVtable(*pp);
+    return hr;
+}
+
 void BuildStubs() {
     if (g_stubs) return;
     g_stubs = (uint8_t*)VirtualAlloc(nullptr, kSlots * 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -596,6 +667,7 @@ void BuildStubs() {
 void* QueuedThunk(int slot) {
     switch (slot) {
     case S_Present:       return (void*)&T_Present;
+    case S_CreateTexture: return (void*)&T_CreateTexture;
     case S_CreateVB:      return (void*)&T_CreateVertexBuffer;
     case S_CreateIB:      return (void*)&T_CreateIndexBuffer;
     case S_SetRT:         return (void*)&T_SetRenderTarget;
@@ -972,6 +1044,9 @@ void LogStats() {
         for (int k = 0; k < n && k < 12; ++k)
             Log("[GxRT]     %-28s %lu", kSlotName[order[k]], g_syncCalls[order[k]]);
     }
+    Log("[GxRT]   texture LockRect: %lu on the main thread, %lu of them waited for the ring to drain "
+        "first (a write; a read-only lock does not), %lu from other threads and not waited on. "
+        "Plain counters, lower bounds.", g_texLocks, g_texLockDrains, g_texLockOffMain);
     BuffersLogStats();
 }
 
