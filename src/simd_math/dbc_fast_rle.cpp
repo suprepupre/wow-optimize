@@ -38,8 +38,15 @@ static uint32_t g_verified = 0;
 static uint32_t g_mismatches = 0;
 static uint64_t g_controlCalls = 0;
 
-static uint8_t g_verifyClientBuf[2048];
-static uint8_t g_verifyFastBuf[2048];
+// The client's run loop does not stop at the end of the destination: a run byte of
+// 255 near the end writes up to 255 bytes past dst_len. The scratch buffers carry
+// that much room beyond the largest length they are used for, so the client's
+// overrun in verification lands in them and not in the next static.
+constexpr size_t kVerifyMax = 2048;
+constexpr size_t kOverrunRoom = 512;
+static uint8_t g_verifyClientBuf[kVerifyMax + kOverrunRoom];
+static uint8_t g_verifyFastBuf[kVerifyMax + kOverrunRoom];
+static uint64_t g_clientEdge = 0;   // calls handed to the client for the two cases below
 
 static void Retire(const char* reason) {
     g_dead = true;
@@ -47,8 +54,13 @@ static void Retire(const char* reason) {
     Log("[DbcFastRle] RETIRED: %s. All subsequent calls delegate to client.", reason);
 }
 
+// Returns null for the two inputs where the client does something this does not
+// copy: a zero length (the client still stores the first byte and returns dst+1)
+// and a run that is longer than what is left (the client keeps writing past the
+// end). Both go to the client's own routine, so the answer and the bytes written
+// are the client's.
 static inline uint8_t* DecompressFast(const uint8_t* src, size_t dst_len, uint8_t* dst) {
-    if (!src || dst_len == 0) return dst;
+    if (!src || dst_len == 0) return nullptr;
     uint8_t* result = dst;
     const uint8_t* const end = dst + dst_len;
 
@@ -63,7 +75,7 @@ static inline uint8_t* DecompressFast(const uint8_t* src, size_t dst_len, uint8_
             uint32_t run = i[1];
             if (run != 0) {
                 const size_t remaining = (size_t)(end - result);
-                if (run > remaining) run = (uint32_t)remaining;
+                if (run > remaining) return nullptr;
 
                 if (run >= 16) {
                     const __m128i v = _mm_set1_epi8((char)b);
@@ -97,9 +109,12 @@ static inline uint8_t* DecompressFast(const uint8_t* src, size_t dst_len, uint8_
 }
 
 static __declspec(noinline) uint8_t* VerifyWithClient(const uint8_t* src, size_t dst_len, uint8_t* dst) {
-    if (dst_len > sizeof(g_verifyClientBuf)) {
-        // Exceeds static buffer, execute fast path directly
-        return DecompressFast(src, dst_len, dst);
+    if (dst_len > kVerifyMax) {
+        // Too long for the scratch buffers: no comparison, same shortcut as the
+        // unverified path.
+        uint8_t* const r = DecompressFast(src, dst_len, dst);
+        if (!r) { ++g_clientEdge; return g_orig(src, dst_len, dst); }
+        return r;
     }
 
     const uint64_t t0 = SelfBench::Now();
@@ -109,6 +124,15 @@ static __declspec(noinline) uint8_t* VerifyWithClient(const uint8_t* src, size_t
     const uint64_t t1 = SelfBench::Now();
     uint8_t* const fastRet = DecompressFast(src, dst_len, g_verifyFastBuf);
     const uint64_t fastCycles = SelfBench::Now() - t1;
+
+    if (!fastRet) {
+        // One of the inputs the client treats differently. Nothing to compare:
+        // the client's output is the answer, and it is what was just produced.
+        ++g_clientEdge;
+        const size_t written = (size_t)(clientRet - g_verifyClientBuf);
+        std::memcpy(dst, g_verifyClientBuf, written);
+        return dst + written;
+    }
 
     const size_t clientWritten = (size_t)(clientRet - g_verifyClientBuf);
     const size_t fastWritten = (size_t)(fastRet - g_verifyFastBuf);
@@ -149,6 +173,10 @@ static uint8_t* __cdecl Hook_DbcRle(const uint8_t* src, size_t dst_len, uint8_t*
     }
 
     uint8_t* const ret = DecompressFast(src, dst_len, dst);
+    if (!ret) {
+        ++g_clientEdge;
+        return g_orig(src, dst_len, dst);
+    }
     ++g_fastDecomp;
     g_totalBytesOut += dst_len;
     return ret;
@@ -202,6 +230,9 @@ void LogStats() {
     if (!Config::g_settings.OptDbcFastRle) return;
     Log("[DbcFastRle] calls=%llu fast=%llu out_bytes=%llu verified=%u mismatches=%u ctrl=%llu dead=%d",
         g_calls, g_fastDecomp, g_totalBytesOut, g_verified, g_mismatches, g_controlCalls, g_dead ? 1 : 0);
+    Log("[DbcFastRle]   %llu call(s) went to the client's routine because the length was zero or a run "
+        "reached past the end of the destination, which the client writes through. Plain counter, lower bound.",
+        g_clientEdge);
 }
 
 } // namespace DbcFastRle
