@@ -52,13 +52,17 @@ static double GetMs() {
     return (double)l.QuadPart / g_freq;
 }
 
+// Walks the client's list, which the retention patch keeps at the 1024 this stops
+// at for the whole of a fight. It used to ask VirtualQuery about every node, a
+// system call per node and a thousand of them every 100 ms on the main thread in
+// combat; the walk is already under an exception handler, so a node that is not
+// readable ends it the same way.
 static int CountPending() {
     __try {
         if (!IsReadable(Addr::PendingListHead)) return -1;
         int c = 0;
         uintptr_t cur = *(uintptr_t*)Addr::PendingListHead;
         while (cur && !(cur & 1) && c < MAX_PENDING * 2) {
-            if (!IsReadable(cur)) break;
             c++;
             cur = *(uintptr_t*)(cur + 4);
         }
@@ -98,8 +102,17 @@ void OnFrame(DWORD tid) {
     // use-after-free corruption. The game already processes entries each frame.
     // Our role is monitoring only — alerting when the buffer is overwhelmed.
     if (p >= MAX_PENDING) {
-        Log("[CombatLogBuffer] WARNING: %d pending (high combat log volume)", p);
         InterlockedIncrement64(&g_flushes);
+        // Once, and then once a minute. In a fight the list sits at its ceiling
+        // and this line was written ten times a second: 9295 of them in one
+        // 64 minute session, in a log the testers are asked to send.
+        static double s_lastWarnMs = -1e9;
+        if (now - s_lastWarnMs >= 60000.0) {
+            s_lastWarnMs = now;
+            Log("[CombatLogBuffer] WARNING: %d pending (high combat log volume); "
+                "%lld reading(s) at or above %d so far, this line is written once a minute",
+                p, (long long)g_flushes, MAX_PENDING);
+        }
     }
 }
 
