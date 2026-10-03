@@ -54,6 +54,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 #include "freeze_catcher.h"
 #include "config.h"
@@ -86,7 +87,13 @@ volatile LONG g_frameStartMs = 0;
 LARGE_INTEGER g_freq = {};
 LARGE_INTEGER g_base = {};
 
+// Where the call came from, taken in the same suspension as the address: the
+// word on top of the stack and the return addresses up the frame-pointer chain.
+// An address inside ntdll says the main thread was waiting; only the callers say
+// what it was waiting for.
+constexpr int kChain = 4;
 uintptr_t g_eip[kRing];
+uintptr_t g_chain[kRing][kChain];
 long      g_atMs[kRing];
 volatile LONG g_count = 0;       // samples in the current armed window
 
@@ -103,6 +110,88 @@ long NowMs() {
     QueryPerformanceCounter(&n);
     if (!g_freq.QuadPart) return 0;
     return (long)(((n.QuadPart - g_base.QuadPart) * 1000) / g_freq.QuadPart);
+}
+
+// A readable dword, or false. The main thread is suspended while this runs, so
+// its stack cannot change under the read, but a frame pointer is not always a
+// frame pointer.
+bool ReadWord(uintptr_t a, uintptr_t* out) {
+    if (a < 0x10000u || (a & 3u)) return false;
+    __try {
+        *out = *(const volatile uintptr_t*)a;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void CaptureChain(const CONTEXT& ctx, uintptr_t* out) {
+    for (int k = 0; k < kChain; ++k) out[k] = 0;
+    uintptr_t top = 0;
+    ReadWord((uintptr_t)ctx.Esp, &top);
+    out[0] = top;
+    uintptr_t ebp = (uintptr_t)ctx.Ebp;
+    const uintptr_t esp = (uintptr_t)ctx.Esp;
+    for (int k = 1; k < kChain; ++k) {
+        // The stack grows down, so a caller's frame is above this one, and a
+        // frame pointer that is not is a register in use for something else.
+        if (ebp < esp || ebp - esp > 0x100000u) break;
+        uintptr_t ret = 0, next = 0;
+        if (!ReadWord(ebp + 4, &ret) || !ReadWord(ebp, &next)) break;
+        out[k] = ret;
+        if (next <= ebp) break;
+        ebp = next;
+    }
+}
+
+// The exported name at or just before an address inside a module, for the
+// system DLLs whose code the main thread waits in. Walks the export table of a
+// module that is already mapped; reads only.
+const char* NearestExport(HMODULE m, uintptr_t addr, unsigned* delta) {
+    __try {
+        const uint8_t* base = (const uint8_t*)m;
+        const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+        const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+        const IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (!dir.VirtualAddress) return nullptr;
+        const IMAGE_EXPORT_DIRECTORY* exp = (const IMAGE_EXPORT_DIRECTORY*)(base + dir.VirtualAddress);
+        const DWORD* funcs = (const DWORD*)(base + exp->AddressOfFunctions);
+        const DWORD* names = (const DWORD*)(base + exp->AddressOfNames);
+        const WORD*  ords  = (const WORD*)(base + exp->AddressOfNameOrdinals);
+        const uintptr_t rva = addr - (uintptr_t)base;
+        DWORD best = 0;
+        const char* bestName = nullptr;
+        for (DWORD i = 0; i < exp->NumberOfNames; ++i) {
+            const DWORD f = funcs[ords[i]];
+            // A forwarder's "address" is the string that names its target.
+            if (f >= dir.VirtualAddress && f < dir.VirtualAddress + dir.Size) continue;
+            if (f <= rva && f > best) { best = f; bestName = (const char*)(base + names[i]); }
+        }
+        if (bestName && rva - best < 0x4000u) { *delta = (unsigned)(rva - best); return bestName; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+// "wow!0x...", or the module and the export the address is in. Anything that
+// is not the client or this DLL is named, because a bare address in ntdll is
+// not something anyone can look up.
+void Describe(uintptr_t a, char* out, size_t cap) {
+    if (!a) { snprintf(out, cap, "0"); return; }
+    if (a >= 0x00400000u && a <= 0x00BFFFFFu) { snprintf(out, cap, "wow!0x%08X", (unsigned)a); return; }
+    HMODULE m = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && m) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(m, path, MAX_PATH);
+        const char* base = strrchr(path, 92);
+        base = base ? base + 1 : path;
+        unsigned delta = 0;
+        const char* ex = NearestExport(m, a, &delta);
+        if (ex) snprintf(out, cap, "%s!%s+0x%X (0x%08X)", base, ex, delta, (unsigned)a);
+        else    snprintf(out, cap, "%s+0x%X (0x%08X)", base, (unsigned)(a - (uintptr_t)m), (unsigned)a);
+        return;
+    }
+    snprintf(out, cap, "other!0x%08X", (unsigned)a);
 }
 
 const char* Where(uintptr_t a) {
@@ -138,6 +227,35 @@ void PrintSamples(const char* what, long len, int take) {
         Log("[FreezeCatcher]   %s!0x%08X  %d sample(s), first at %ld ms in",
             Where(g_eip[best]), (unsigned)g_eip[best], bestCount,
             g_atMs[best]);
+
+        // Name it, and say who called it. The chain printed is the one most of
+        // this address's samples agree on (top of stack and first return
+        // address), so one odd sample does not decide what a stall was waiting
+        // for. The client's own addresses are already what this project reads in
+        // IDA and are named only when the address is not in the client.
+        int rep = best, repCount = 0;
+        for (int i = 0; i < take; ++i) {
+            if (g_eip[i] != g_eip[best]) continue;
+            int c = 0;
+            for (int j = 0; j < take; ++j)
+                if (g_eip[j] == g_eip[best] && g_chain[j][0] == g_chain[i][0] &&
+                    g_chain[j][1] == g_chain[i][1]) ++c;
+            if (c > repCount) { repCount = c; rep = i; }
+        }
+        char d[160];
+        if (Where(g_eip[best])[0] == 'o') {
+            Describe(g_eip[best], d, sizeof(d));
+            Log("[FreezeCatcher]     in %s", d);
+        }
+        char line[640];
+        int len = snprintf(line, sizeof(line), "[FreezeCatcher]     stack:");
+        for (int k = 0; k < kChain && len > 0 && len < (int)sizeof(line) - 170; ++k) {
+            if (!g_chain[rep][k]) continue;
+            Describe(g_chain[rep][k], d, sizeof(d));
+            len += snprintf(line + len, sizeof(line) - len, "%s %s", k ? "  <-" : "", d);
+        }
+        Log("%s", line);
+
         for (int j = 0; j < take; ++j)
             if (g_eip[j] == g_eip[best]) done[j] = true;
     }
@@ -190,11 +308,16 @@ DWORD WINAPI WatchdogProc(LPVOID) {
             ctx.ContextFlags = CONTEXT_CONTROL;
             if (SuspendThread(g_main) != (DWORD)-1) {
                 uintptr_t eip = 0;
-                if (GetThreadContext(g_main, &ctx)) eip = (uintptr_t)ctx.Eip;
+                uintptr_t chain[kChain] = {};
+                if (GetThreadContext(g_main, &ctx)) {
+                    eip = (uintptr_t)ctx.Eip;
+                    CaptureChain(ctx, chain);
+                }
                 ResumeThread(g_main);
                 const LONG i = InterlockedIncrement(&g_count) - 1;
                 if (i < kRing && eip) {
                     g_eip[i] = eip;
+                    for (int k = 0; k < kChain; ++k) g_chain[i][k] = chain[k];
                     g_atMs[i] = at;
                 } else if (i >= kRing) {
                     // Re-check the frame before compacting. OnFrame stamps the
@@ -205,6 +328,7 @@ DWORD WINAPI WatchdogProc(LPVOID) {
                     if (g_frameStartMs != start) break;
                     for (int k = 0; k * 2 < kRing; ++k) {
                         g_eip[k]  = g_eip[k * 2];
+                        for (int c = 0; c < kChain; ++c) g_chain[k][c] = g_chain[k * 2][c];
                         g_atMs[k] = g_atMs[k * 2];
                     }
                     InterlockedExchange(&g_count, kRing / 2);
