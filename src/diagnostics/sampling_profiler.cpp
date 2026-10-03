@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include "sampling_profiler.h"
+#include "freeze_catcher.h"
 #include "session_verdict.h"
 #include "lua_addon_sampler.h"
 #include "frame_bench.h"
@@ -849,11 +850,20 @@ void RegisterSelfSymbol(const char* name, const void* addr) {
 // hence the fixed pool rather than a local buffer.
 extern "C" void WowOpt_NoteDetour(uintptr_t target, const void* detour) {
     if (!detour) return;
-    static char  s_names[MAX_SELF_SYMBOLS][16];
+    static char  s_names[MAX_SELF_SYMBOLS][48];
     static int   s_used = 0;
     if (s_used >= MAX_SELF_SYMBOLS) return;
     char* n = s_names[s_used];
-    wsprintfA(n, "hook@%08X", (unsigned)target);
+    // A detour on a system function says which one: "hook@kernel32!Sleep" says
+    // what the time is spent in, where "hook@771AE5B0" was an address that is
+    // different on every Windows build and meant nothing in a tester's log. The
+    // client's own addresses stay as they were, since those are what this
+    // project reads in IDA.
+    char ex[40];
+    if ((target < 0x00400000u || target > 0x00BFFFFFu) && FreezeCatcher::NameExport(target, ex, sizeof(ex)))
+        wsprintfA(n, "hook@%s", ex);
+    else
+        wsprintfA(n, "hook@%08X", (unsigned)target);
     s_used++;
     RegisterSelfSymbol(n, detour);
 }

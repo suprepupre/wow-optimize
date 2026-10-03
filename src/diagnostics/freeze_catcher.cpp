@@ -58,6 +58,8 @@
 
 #include "freeze_catcher.h"
 #include "config.h"
+#include "loading_state.h"
+#include "lua_optimize.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -92,6 +94,14 @@ LARGE_INTEGER g_base = {};
 // An address inside ntdll says the main thread was waiting; only the callers say
 // what it was waiting for.
 constexpr int kChain = 4;
+// What the client was doing while a frame ran long, so a log can be sorted without
+// a script that guesses from the lines around it: a loading screen and a Lua
+// state being set up or replaced are expected to be long, and everything else is
+// not. Set from the watchdog while it samples and at the frame boundary, read and
+// cleared when the frame is reported. Plain bits in a 32-bit word.
+enum : LONG { kFlagLoading = 1, kFlagLuaSwap = 2, kFlagLuaLoadMode = 4 };
+volatile LONG g_flags = 0;
+
 uintptr_t g_eip[kRing];
 uintptr_t g_chain[kRing][kChain];
 long      g_atMs[kRing];
@@ -200,15 +210,34 @@ const char* Where(uintptr_t a) {
     return "other";
 }
 
+void NoteState() {
+    LONG f = 0;
+    if (LoadingState::IsLoading()) f |= kFlagLoading;
+    if (LuaOpt::IsReloading() || LuaOpt::IsSwapping()) f |= kFlagLuaSwap;
+    if (LuaOpt::IsLoadingMode()) f |= kFlagLuaLoadMode;
+    if (f) InterlockedOr(&g_flags, f);
+}
+
+const char* StateText(LONG f, char* out, size_t cap) {
+    out[0] = 0;
+    if (f & kFlagLoading)     snprintf(out + strlen(out), cap - strlen(out), "%sloading screen", out[0] ? ", " : "");
+    if (f & kFlagLuaSwap)     snprintf(out + strlen(out), cap - strlen(out), "%sLua state reload or swap", out[0] ? ", " : "");
+    if (f & kFlagLuaLoadMode) snprintf(out + strlen(out), cap - strlen(out), "%sLua loading mode", out[0] ? ", " : "");
+    if (!out[0]) snprintf(out, cap, "none of those");
+    return out;
+}
+
 void PrintSamples(const char* what, long len, int take) {
     // How much of the frame these samples actually cover. Printed because
     // the ring thins rather than stopping, so the density is not uniform and
     // the reader should not assume one sample per millisecond.
     long spanTo = 0;
     for (int i = 0; i < take; ++i) if (g_atMs[i] > spanTo) spanTo = g_atMs[i];
+    char st[96];
     Log("[FreezeCatcher] %s %ld ms, %d sample(s) of where the main "
-        "thread was while it ran, reaching %ld ms into it (%.0f%%):",
-        what, len, take, spanTo, len > 0 ? 100.0 * (double)spanTo / (double)len : 0.0);
+        "thread was while it ran, reaching %ld ms into it (%.0f%%); during it: %s:",
+        what, len, take, spanTo, len > 0 ? 100.0 * (double)spanTo / (double)len : 0.0,
+        StateText(g_flags, st, sizeof(st)));
 
     // Group by address without sorting in place - the ring is small and this
     // runs once per caught frame, not per sample.
@@ -304,6 +333,7 @@ DWORD WINAPI WatchdogProc(LPVOID) {
                                  (int)(have < kRing ? have : kRing));
                 nextInterimMs *= 4;
             }
+            NoteState();
             CONTEXT ctx;
             ctx.ContextFlags = CONTEXT_CONTROL;
             if (SuspendThread(g_main) != (DWORD)-1) {
@@ -344,6 +374,27 @@ DWORD WINAPI WatchdogProc(LPVOID) {
 
 }  // namespace
 
+bool NameExport(uintptr_t addr, char* out, size_t cap) {
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)addr, &m) || !m)
+        return false;
+    unsigned delta = 0;
+    const char* ex = NearestExport(m, addr, &delta);
+    if (!ex) return false;
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(m, path, MAX_PATH);
+    const char* base = strrchr(path, 92);
+    base = base ? base + 1 : path;
+    char mod[32];
+    snprintf(mod, sizeof(mod), "%s", base);
+    char* dot = strrchr(mod, '.');
+    if (dot) *dot = 0;
+    snprintf(out, cap, "%s!%s%s", mod, ex, delta ? "+" : "");
+    if (delta) snprintf(out + strlen(out), cap - strlen(out), "0x%X", delta);
+    return true;
+}
+
 void OnFrame() {
     ++g_frames;
 
@@ -365,8 +416,10 @@ void OnFrame() {
         g_samples += (unsigned long)(n < kRing ? n : kRing);
         if ((unsigned long)len > g_worstMs) g_worstMs = (unsigned long)len;
 
+        NoteState();
         PrintSamples("a frame of", len, (int)(n < kRing ? n : kRing));
     }
+    InterlockedExchange(&g_flags, 0);
 }
 
 bool Init(HANDLE mainThread) {
