@@ -9,6 +9,20 @@
 // instruction in this file. The change is algorithmic - an early exit when
 // every strata level is already occupied, and a single-pass remap table in
 // place of the client's nested rescans - and it needs no vector width.
+//
+// What checks it. Not the in-game verification: that runs the client's own
+// routine for the first calls and only asks that the level count did not grow, so
+// the single-pass remap below has never been compared with the client's answer
+// while the game runs. It was compared offline instead, against a transcription of
+// sub_495060's nested loops over 200000 random layouts (0 to 24 levels, 0 to 40
+// frames, dense and with long runs of empty levels), with SetFrameLevel modelled
+// as unlink from the old level's list and append to the new one. Final level
+// count, each frame's level and the order of the frames inside every level were
+// identical in all of them. That covers the algorithm; it does not cover what
+// SetFrameLevel does beyond moving the frame (it is called the same number of
+// times with the same arguments, in a different order across levels).
+// In a 64 minute session the client's version was caught six times as the top
+// sampled address of a frame of 100 to 250 ms (0x0049516E, inside its rescan).
 // ============================================================================
 
 #include "ui_strata_compact_sse2.h"
