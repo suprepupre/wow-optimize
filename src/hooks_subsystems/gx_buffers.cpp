@@ -174,6 +174,11 @@ void Track(void* obj, UINT size, DWORD usage, D3DPOOL pool) {
 
 // Hand a finished range to the render thread.
 inline void Post(VtInfo* vi, void* self, const uint8_t* data, uint32_t off, uint32_t size, DWORD flags) {
+    // The upload runs up to a few frames after the client's Unlock. Without a
+    // reference of its own, a buffer the client releases in between is destroyed
+    // before the render thread locks it, as the draws that name a buffer already
+    // avoid by taking one. The render thread drops it after the upload.
+    ((IUnknown*)self)->AddRef();
     CmdUpload* c = Emit<CmdUpload>(OP_BUFFER_UPLOAD);
     c->buf = self; c->lockFn = (void*)vi->lock; c->unlockFn = (void*)vi->unlock;
     c->data = data; c->offset = off; c->size = size; c->lockFlags = flags;

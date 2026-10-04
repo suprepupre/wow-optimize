@@ -254,6 +254,9 @@ void Execute(CmdHdr* h) {
             memcpy(p, c->data, c->size);
             ((UnlockFn)c->unlockFn)(c->buf);
         }
+        // The reference Post took. The client may have dropped its own since the
+        // Unlock; this one keeps the buffer alive until the upload has run.
+        RelObj((IUnknown*)c->buf);
         break; }
     case OP_PRESENT: {
         CmdPresent* c = (CmdPresent*)h;
