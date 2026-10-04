@@ -2013,7 +2013,11 @@ static int __cdecl Hooked_RawGet_Global(lua_State* L) {
         resultSlot = (RawTValue*)luaH_get_(tablePtr, keySlot);
     }
 
-    if (!resultSlot || !IsReadableMemory((uintptr_t)resultSlot) || !IsReadableMemory((uintptr_t)resultSlot + sizeof(RawTValue))) {
+    // No VirtualQuery here. The slot is what luaH_getstr, luaH_getnum or luaH_get
+    // returned: inside the table's own arrays, or the shared nil object in the client's
+    // image. Two address-space queries per call, on the second most called of these
+    // functions, bought nothing the client's lookup had not already guaranteed.
+    if (!resultSlot) {
         NoteRawGetFallback();
         return orig_luaB_rawget(L);
     }
@@ -2076,11 +2080,8 @@ static int __cdecl Hooked_RawSet_Global(lua_State* L) {
     tableSlot = base;
     valueSlot = base + 2;
 
-    // SAFETY: validate destination pointer before write
-    if (!IsReadableMemory((uintptr_t)dst) || !IsReadableMemory((uintptr_t)dst + sizeof(RawTValue))) {
-        NoteRawSetFallback();
-        return orig_luaB_rawset(L);
-    }
+    // dst is what luaH_set returned, a slot in the table; not queried with
+    // VirtualQuery, which cost two kernel calls per rawset for no information.
 
     *dst = *valueSlot;
 
@@ -2214,11 +2215,8 @@ static int __cdecl Hooked_TableInsert(lua_State* L) {
         return orig_tbl_insert(L);
     }
 
-    // SAFETY: validate destination pointer before write
-    if (!IsReadableMemory((uintptr_t)dst) || !IsReadableMemory((uintptr_t)dst + sizeof(RawTValue))) {
-        NoteTableInsertFallback();
-        return orig_tbl_insert(L);
-    }
+    // dst is what luaH_setnum returned, a slot in the table; not queried with
+    // VirtualQuery, which cost two kernel calls per table.insert for no information.
 
     // RE-FETCH stack pointers in case luaH_setnum_ triggered GC and relocated the stack
     base = GetStackBaseFast(L);
