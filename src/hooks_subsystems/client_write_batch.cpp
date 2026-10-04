@@ -175,9 +175,8 @@ bool Init(WriteFn writer, bool closeHookInstalled) {
         // The one flush that cannot be missed. Without it a buffered file would
         // be closed with its tail still in memory, which is the exact failure
         // this module must not cause.
-        Log("[WriteBatch] NOT active: the CloseHandle hook is not installed, and "
-            "that is where a buffered file gets flushed. Turn on File I/O Hooks "
-            "and this can run.");
+        Log("[WriteBatch] NOT active: the CloseHandle hook did not install, and "
+            "that is where a buffered file gets flushed.");
         return false;
     }
     g_write = writer;

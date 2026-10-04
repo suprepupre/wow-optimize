@@ -3270,6 +3270,10 @@ static BOOL WINAPI hooked_ReadFile_Inner(HANDLE hFile, LPVOID lpBuffer,
 static BOOL WINAPI hooked_ReadFile_TimingOnly(HANDLE hFile, LPVOID lpBuffer,
     DWORD nBytesToRead, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped)
 {
+    // A read on the handle the write batcher is holding must see its bytes. One call and
+    // one test of a length when nothing is buffered, which is almost always.
+    ClientWriteBatch::FlushHandle(hFile, true);
+
     if (!LoadingState::IsLoading())
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
@@ -8263,12 +8267,19 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // The load report counts time spent in the ReadFile hook. If that hook is not
     // in, the report must say so rather than print a confident zero.
     LoadingState::SetReadHookInstalled(readOk);
-    bool closeOk = Config::g_settings.OptFileIoHooks && InstallCloseHandleHook();
+    // The write batcher flushes a file from three of these hooks - CloseHandle, which it
+    // cannot run without, FlushFileBuffers and SetFilePointer - so it asks for them
+    // itself. They used to be installed only under File I/O Hooks, which the launcher
+    // leaves off, and the batcher logged "NOT active" in every default session while a
+    // loading screen's 593557 nine-byte writes went to the kernel one at a time.
+    const bool fileFlushHooks = Config::g_settings.OptFileIoHooks ||
+                                Config::g_settings.OptClientWriteBatch;
+    bool closeOk = fileFlushHooks && InstallCloseHandleHook();
 
     // After the close hook, because that is the flush the batcher cannot do
     // without, and it is told rather than left to guess.
     ClientWriteBatch::Init(LoadingState::GetClientWriter(), closeOk);
-    bool flushOk = Config::g_settings.OptFileIoHooks && InstallFlushFileBuffersHook();
+    bool flushOk = fileFlushHooks && InstallFlushFileBuffersHook();
     Log("--- Async MPQ I/O ---");
     // Worker started after init completes to avoid race with hook setup
     bool asyncIoOk = true;
@@ -8277,7 +8288,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("--- File Attributes ---");
     bool faOk = Config::g_settings.OptFileIoHooks && InstallGetFileAttributesHook();
     Log("--- File Pointer ---");
-    bool sfpOk = Config::g_settings.OptFileIoHooks && InstallSetFilePointerHook();
+    bool sfpOk = fileFlushHooks && InstallSetFilePointerHook();
 
     Log("--- Global Alloc ---");
     bool gaOk  = InstallGlobalAllocHooks();    
