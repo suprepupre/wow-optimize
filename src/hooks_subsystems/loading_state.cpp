@@ -462,10 +462,23 @@ void ReportLoadTimes() {
 
 bool Init() {
     unsigned char* p = (unsigned char*)ADDR_FrameScript_SignalEvent;
-    if (p[0] != 0x55 || p[1] != 0x8B) {
-        Log("[LoadingState] BAD PROLOGUE at 0x%08X (expected 55 8B, got %02X %02X) - skipping",
+    // A client with a server extension may already have a jump at the entry. This
+    // detour only watches the event name and calls the original, so it can sit in
+    // front of that jump: MinHook carries the jump into the trampoline and the
+    // other patch still runs, after this one. Refusing it left loading detection
+    // and the write timer off on those clients, and ClientWriteBatch, which needs
+    // the timer's hook, with nothing to batch.
+    const bool stock  = (p[0] == 0x55 && p[1] == 0x8B);
+    const bool jumped = (p[0] == 0xE9);
+    if (!stock && !jumped) {
+        Log("[LoadingState] BAD PROLOGUE at 0x%08X (expected 55 8B or a jump, got %02X %02X) - skipping",
             ADDR_FrameScript_SignalEvent, p[0], p[1]);
         return false;
+    }
+    if (jumped) {
+        const uintptr_t target = (uintptr_t)p + 5 + *(const int32_t*)(p + 1);
+        Log("[LoadingState] 0x%08X already starts with a jump to 0x%08X (another patch on this client); "
+            "hooking in front of it.", ADDR_FrameScript_SignalEvent, (unsigned)target);
     }
 
     if (WineSafe_CreateHook((void*)ADDR_FrameScript_SignalEvent,
