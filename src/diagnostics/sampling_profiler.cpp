@@ -1426,7 +1426,10 @@ static int g_selfAnchor = 0;
 
 static void BuildModuleTable() {
     g_modCount = 0;
-    g_selfBase = g_selfEnd = 0;
+    // Found into locals and published at the end: the sampler thread reads these two
+    // while a report rebuilds the table, and a zero between the reset and the find made
+    // it count our own samples as foreign.
+    uintptr_t selfBase = 0, selfEnd = 0;
     HMODULE mods[256];
     DWORD needed = 0;
     HANDLE proc = GetCurrentProcess();
@@ -1444,8 +1447,8 @@ static void BuildModuleTable() {
         // Identify our own DLL by the anchor address; it gets a per-page
         // breakdown instead of a single module bucket.
         if ((uintptr_t)&g_selfAnchor >= base && (uintptr_t)&g_selfAnchor < end) {
-            g_selfBase = base;
-            g_selfEnd  = end;
+            selfBase = base;
+            selfEnd  = end;
             continue;
         }
         char nm[MAX_PATH];
@@ -1458,6 +1461,7 @@ static void BuildModuleTable() {
         m.count = 0;
         g_modCount++;
     }
+    if (selfBase) { g_selfBase = selfBase; g_selfEnd = selfEnd; }
 }
 
 // The largest single entry in a corrected profile is a module we did not write.
@@ -2161,6 +2165,12 @@ bool Init(HANDLE mainThread) {
     memset(g_pageCounts, 0, sizeof(g_pageCounts));
 
     BuildKnownFuncTable();
+
+    // Our own module's range, before the first sample. It was found only when a report
+    // ran, so everything sampled in the first five minutes was filed as outside this
+    // DLL, and the "who called the code outside wow.exe and this DLL" table printed our
+    // own replacements as 35.5% of the samples in a 37 minute session.
+    BuildModuleTable();
 
     g_running = true;
     g_samplerThread = CreateThread(
