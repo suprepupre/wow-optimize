@@ -139,6 +139,16 @@ struct LiveEntry { ULONG sizeKB; USHORT slot; USHORT reserved; };
 const ULONG kLiveEntries = 65536;
 LiveEntry* g_live = nullptr;
 
+// Where this DLL's own reservations below 2GB were asked for. The census says
+// how much a module holds in the half the client allocates from, and for this
+// DLL that was 144 MB in 31 reservations with nothing to say what they were.
+// Entries are kept as they are made and checked against the live table when
+// reported, so one that has been freed since is not listed.
+struct OursEntry { uintptr_t base; ULONG sizeKB; uintptr_t ret; };
+const LONG kOursMax = 256;
+OursEntry     g_ours[kOursMax];
+volatile LONG g_oursCount = 0;
+
 HMODULE g_self = nullptr;
 HMODULE g_client = nullptr;
 bool    g_installed = false;
@@ -254,6 +264,7 @@ bool IsOwnReserve(HANDLE process, PVOID* baseAddress, PSIZE_T regionSize,
 struct Decision {
     LONG slot;
     bool addTopDown;
+    uintptr_t ret;      // who asked, as the address the call returns to
 };
 
 #pragma optimize("y", off)
@@ -263,9 +274,9 @@ struct Decision {
 // are considered only from there outward, so this module's own frames are never
 // mistaken for the caller.
 __declspec(noinline)
-LONG AttributeCaller(const ModuleTable* t, uintptr_t retAddr, uintptr_t retSlot) {
+LONG AttributeCaller(const ModuleTable* t, uintptr_t retAddr, uintptr_t retSlot, uintptr_t* where) {
     LONG s = SlotForAddress(t, retAddr);
-    if (Attributable(s)) { ++g_attribWalk; return s; }
+    if (Attributable(s)) { ++g_attribWalk; *where = retAddr; return s; }
 
     PVOID frames[24];
     const USHORT n = RtlCaptureStackBackTrace(0, 24, frames, NULL);
@@ -277,7 +288,7 @@ LONG AttributeCaller(const ModuleTable* t, uintptr_t retAddr, uintptr_t retSlot)
             continue;
         }
         s = SlotForAddress(t, a);
-        if (Attributable(s)) { ++g_attribWalk; return s; }
+        if (Attributable(s)) { ++g_attribWalk; *where = a; return s; }
     }
 
     __try {
@@ -288,7 +299,7 @@ LONG AttributeCaller(const ModuleTable* t, uintptr_t retAddr, uintptr_t retSlot)
         for (; sp + sizeof(uintptr_t) <= stop; sp += sizeof(uintptr_t)) {
             const uintptr_t v = *(uintptr_t*)sp;
             s = SlotForAddress(t, v);
-            if (Attributable(s) && CallEndsAt(v)) { ++g_attribScan; return s; }
+            if (Attributable(s) && CallEndsAt(v)) { ++g_attribScan; *where = v; return s; }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -303,7 +314,7 @@ LONG AttributeCaller(const ModuleTable* t, uintptr_t retAddr, uintptr_t retSlot)
 __declspec(noinline)
 Decision Decide(PVOID* baseAddress, SIZE_T asked, ULONG allocationType, bool mayPlace,
                 uintptr_t retAddr, uintptr_t retSlot) {
-    Decision d = { kSlotUnresolved, false };
+    Decision d = { kSlotUnresolved, false, retAddr };
     const bool placeClient  = Config::g_settings.OptHighPlacementClient;
     const bool placeModules = Config::g_settings.OptHighPlacementModules;
     const SIZE_T minBytes   = (SIZE_T)Config::g_settings.HighPlacementMinKB * 1024;
@@ -315,7 +326,9 @@ Decision Decide(PVOID* baseAddress, SIZE_T asked, ULONG allocationType, bool may
 
     const ModuleTable* table = g_currentTable;
     if (table && (g_live != nullptr || candidate)) {
-        d.slot = AttributeCaller(table, retAddr, retSlot);
+        uintptr_t where = retAddr;
+        d.slot = AttributeCaller(table, retAddr, retSlot, &where);
+        d.ret = where;
     }
     if (candidate) {
         const unsigned char cls = g_slots[d.slot].cls;
@@ -337,6 +350,14 @@ void Record(const Decision& d, LONG status, bool retried, PVOID base, SIZE_T siz
     }
     if (status < 0) return;
     ++g_slotReserves[d.slot];
+    if (g_slots[d.slot].cls == kClassOurs && (uintptr_t)base < kLowHalfEnd) {
+        const LONG at = InterlockedIncrement(&g_oursCount) - 1;
+        if (at < kOursMax) {
+            g_ours[at].base   = (uintptr_t)base;
+            g_ours[at].sizeKB = (ULONG)((size + 1023) / 1024);
+            g_ours[at].ret    = d.ret;
+        }
+    }
     if (g_live) {
         const ULONG index = (ULONG)((uintptr_t)base >> 16);
         if (g_live[index].sizeKB != 0) ++g_liveOverwrites;
@@ -664,6 +685,39 @@ void LogLiveByCaller(bool lowHalfOnly, const char* compareWith) {
             "%7.1f MB above",
             g_slots[best].name, ClassName(g_slots[best].cls),
             lowKB[best] / 1024.0, lowCount[best], highKB[best] / 1024.0);
+    }
+
+    // This DLL's own largest reservations in the low half that are still live,
+    // with the offset in this DLL of the call that asked for each: map it with
+    // the .map beside the build named at the top of the log.
+    {
+        LONG n = g_oursCount;
+        if (n > kOursMax) n = kOursMax;
+        bool used[kOursMax] = {};
+        int listed = 0;
+        for (int row = 0; row < 8; row++) {
+            LONG best = -1;
+            for (LONG i = 0; i < n; i++) {
+                if (used[i]) continue;
+                const ULONG idx = (ULONG)(g_ours[i].base >> 16);
+                if (idx >= kLiveEntries || g_live[idx].sizeKB != g_ours[i].sizeKB) continue;   // gone since
+                if (best < 0 || g_ours[i].sizeKB > g_ours[best].sizeKB) best = i;
+            }
+            if (best < 0) break;
+            used[best] = true;
+            const uintptr_t selfBase = (uintptr_t)g_self;
+            const uintptr_t r = g_ours[best].ret;
+            if (!listed++) Log("[HighPlacement]   this tool's largest live reservations below 2GB, by size:");
+            Log("[HighPlacement]     %7.1f MB at 0x%08X, asked by wow_optimize.dll+0x%X%s",
+                g_ours[best].sizeKB / 1024.0, (unsigned)g_ours[best].base,
+                (unsigned)(r - selfBase),
+                (r >= selfBase && r - selfBase < 0x400000) ? "" : " (outside this DLL: a system call made on its behalf)");
+        }
+        if (!listed && n > 0)
+            Log("[HighPlacement]   this tool's below-2GB reservations are all freed again.");
+        if (g_oursCount > kOursMax)
+            Log("[HighPlacement]   %ld such reservations were made; only the first %ld are remembered.",
+                (long)g_oursCount, (long)kOursMax);
     }
 }
 
