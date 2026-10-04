@@ -135,6 +135,7 @@ constexpr unsigned kCI_savedpc   = 0x0C;
 constexpr unsigned kCI_tailcalls = 0x14;
 constexpr unsigned kCI_size      = 24;
 
+constexpr unsigned kCl_isC    = 0x0A;   // the byte luaD_precall tests, 0x00856380
 constexpr unsigned kCl_taint  = 0x04;
 constexpr unsigned kCl_env    = 0x10;
 constexpr unsigned kCl_p      = 0x18;
@@ -516,6 +517,25 @@ __forceinline bool IsFalse(const TV* v) {
     return v->tt == 0 || (v->tt == 1 && v->lo == 0);
 }
 
+// A call frame whose closure is a C closure or has no Proto reached the interpreter's
+// prologue. Written for the first occurrence only, because the next thing that
+// happens is the fault.
+__declspec(noinline) void NoteBadFrame(void* L, void* ci, void* cl, int nexeccalls, unsigned how) {
+    static bool said = false;
+    if (said) return;
+    said = true;
+    static const char* const kHow[] = { "a fresh entry", "after OP_CALL", "after OP_TAILCALL", "after OP_RETURN" };
+    const uint8_t* base_ci = Fc<const uint8_t*>(L, 0x2C);
+    const unsigned slot = base_ci ? (unsigned)(((const uint8_t*)ci - base_ci) / kCI_size) : 0u;
+    const uint32_t* w = (const uint32_t*)cl;
+    Log("[LuaVmFast] a call frame the interpreter cannot run: reached %s, nexeccalls %d, frame %u of the "
+        "state's CallInfo array, status %u, closure %p isC %u p %p. First words of the closure: "
+        "%08X %08X %08X %08X %08X %08X %08X %08X. The client's interpreter is handed the frame next.",
+        kHow[how & 3], nexeccalls, slot, (unsigned)Fc<uint8_t>(L, kL_status), cl,
+        (unsigned)Fc<uint8_t>(cl, kCl_isC), Fc<void*>(cl, kCl_p),
+        w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+}
+
 }  // namespace
 
 // The interpreter. Every case names the address in sub_857CA0 it was read from.
@@ -530,6 +550,7 @@ int __cdecl Hooked_Execute(void* L, int nexeccalls) {
     const TV* k;
     TV* base;
     Instruction* pc;
+    unsigned how = 0;   // what led to this pass through 'reentry': 0 entry, 1 CALL, 2 TAILCALL, 3 RETURN
 
 reentry:   // 0x00857CB0
     ci = F<void*>(L, kL_ci);
@@ -544,6 +565,14 @@ reentry:   // 0x00857CB0
             SetFrozen(1);
         }
         void* p = Fc<void*>(cl, kCl_p);
+        if (!p || Fc<uint8_t>(cl, kCl_isC)) {
+            // The client's own prologue reads cl->p->k here too, so handing the
+            // frame back faults the same way. The point is to say what the frame
+            // was before it does: one tester's crash was this load with p == NULL,
+            // and the log held nothing about how the interpreter got there.
+            NoteBadFrame(L, ci, cl, nexeccalls, how);
+            return g_orig(L, nexeccalls);
+        }
         k = Fc<const TV*>(p, kP_k);
         base = F<TV*>(L, kL_base);
     }
@@ -821,6 +850,7 @@ reentry:   // 0x00857CB0
             const int r = g_precall(L, ra, (int)c - 1);
             if (r == 0) {
                 ++nexeccalls;
+                how = 1;
                 goto reentry;
             }
             if (r == 1) {
@@ -867,6 +897,7 @@ reentry:   // 0x00857CB0
                 F<Instruction*>(prev, kCI_savedpc) = F<Instruction*>(L, kL_savedpc);
                 F<uint32_t>(prev, kCI_tailcalls) += 1;
                 F<uint8_t*>(L, kL_ci) = (uint8_t*)ciNow - kCI_size;
+                how = 2;
                 goto reentry;
             }
             if (r == 1) {
@@ -889,6 +920,7 @@ reentry:   // 0x00857CB0
             const int r = g_poscall(L, ra);
             if (--nexeccalls == 0) return r;
             if (r) F<TV*>(L, kL_top) = Fc<TV*>(F<void*>(L, kL_ci), kCI_top);
+            how = 3;
             goto reentry;
         }
         case 31: {  // FORLOOP, 0x00858A61
