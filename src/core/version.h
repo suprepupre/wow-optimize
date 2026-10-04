@@ -333,7 +333,6 @@
 #define TEST_DISABLE_NETWORK_GUID_SSE2         0
 
 // StreamBuffer read/write fast-path (sub_47B3C0/sub_47B0A0)
-#define TEST_DISABLE_STREAM_FASTPATH         0
 // shipped MatVec3Mul). Pointer-validated + SEH-guarded with fallback. Completes
 // SSE2 coverage of the transform library. Set to 1 to revert to FPU scalar.
 #define TEST_DISABLE_MATRIX_EXT_SSE2         0

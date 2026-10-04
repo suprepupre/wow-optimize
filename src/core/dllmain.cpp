@@ -992,7 +992,6 @@ extern "C" void WowOpt_NoteClientPatchRefused(void) {
 // (TEST_ENABLE_WS_AGGRESSIVE_PIN lives in wow_memory_opt.cpp, where the working set is set.)
 #define TEST_ENABLE_LARGE_PAGES         0   // mimalloc 2MB large OS pages (TLB win on the VA-tight heap). Requires the Windows account to hold 'Lock pages in memory' (secpol.msc -> Local Policies -> User Rights Assignment) — the DLL can only ENABLE a privilege the account already holds, not grant it. Harmless no-op without the grant. 32-bit caveat: large pages reserve in 2MB units; on a VA-tight client this can fragment the 2-3GB user VA, so keep /3GB on and watch LargestFreeBlock.
 #define CRASH_TEST_DISABLE_WOW_STRLEN           0   // sub_76EE30 WoW-internal strlen - ENABLED (SSE2 replacement protected with SEH backstop)
-#define CRASH_TEST_DISABLE_STREAM_FASTPATH      TEST_DISABLE_STREAM_FASTPATH   // sub_47B3C0/sub_47B0A0 - controlled by version.h
 
 // Definition for the WO_EnableHook batching wrapper declared in version.h.
 // While this is 1 (set across MainThread's install sequence), module enables
@@ -1383,7 +1382,6 @@ static void ClearLuaHGetStrCache();
 static bool InstallLuaPushStringCache();
 static void ClearLuaPushStringCache();
 static bool InstallLuaRawGetICache();
-static bool InstallStreamBufferFastPath();
 
 // Exposed for lua_optimize.cpp (UI reload cache clearing)
 void ClearAssetPathCache();
@@ -5371,10 +5369,6 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     extern long g_sysInfoHits;
     extern long g_regCacheHits;
     extern long g_regCacheMisses;
-    extern long g_streamReadHits;
-    extern long g_streamReadFallbacks;
-    extern long g_streamWriteHits;
-    extern long g_streamWriteFallbacks;
     // Process memory diagnostics (helps diagnose HD/custom client OOM)
     PROCESS_MEMORY_COUNTERS pmc = {};
     pmc.cb = sizeof(pmc);
@@ -5686,14 +5680,6 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
             g_vaArenaFull,
             g_vaArenaFull > 0 ? "  <-- consider a larger arena" : "");
     }
-    if (g_streamReadHits + g_streamReadFallbacks > 0)
-        Log("[Stats] Stream read: %ld fast, %ld fallback (%.1f%%)",
-            g_streamReadHits, g_streamReadFallbacks,
-           (double)g_streamReadHits / (g_streamReadHits + g_streamReadFallbacks) * 100.0);
-    if (g_streamWriteHits + g_streamWriteFallbacks > 0)
-        Log("[Stats] Stream write: %ld fast, %ld fallback (%.1f%%)",
-            g_streamWriteHits, g_streamWriteFallbacks,
-           (double)g_streamWriteHits / (g_streamWriteHits + g_streamWriteFallbacks) * 100.0);
     if (g_debugStringSkipped > 0)
         Log("[Stats] OutputDebugString: %ld skipped", g_debugStringSkipped);
 
@@ -9128,8 +9114,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // the one recorded.
     bool rttiCacheOk = false;
 
-    Log("--- Stream Buffer Fast Path ---");
-
     bool luaOk = false;
     Log("");
     Log("--- Lua VM Optimizer ---");
@@ -9964,121 +9948,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
 // which installed no hooks at all.
 
 // ================================================================
-// 16b. sub_47B3C0 / sub_47B0A0 - Stream Buffer Read/Write Fast Path
-//
-// Called 2662 times across the binary.  sub_47B3C0 reads 4 bytes from
-// a stream buffer (used in Lua bytecode fetch, script execution, network
-// packet parsing).  sub_47B0A0 writes 4 bytes (script stack push, packet
-// assembly).  Both call sub_47B290 for bounds checking which may invoke
-// a virtual realloc through (*this+8).
-//
-// Fast path: inline the common case where cursor + 4 still fits within
-// the buffer's committed region.  Bypasses the vtable call on 99%+ of
-// invocations.  Falls back to original on the first call after a realloc
-// (when the virtual function would have grown the buffer).
+// 16b. sub_47B3C0 / sub_47B0A0 (CDataStore 4-byte read and write) - REMOVED
+// A replacement that inlined the bounds check was written and its install function
+// was never called, so it never ran; the log carried a section header for it and no
+// line saying it was active. Its logic matches the client's (checked against both
+// routines and the bounds helper sub_47B290), so a future one starts from that, with
+// no exception frame and no interlocked counters on a routine this small.
 // ================================================================
-
-// sub_47B3C0: _DWORD* __thiscall StreamRead(_DWORD* this, _DWORD* out)
-//   *(this+4) = cursor, *(this+1)=base, *(this+2)=delta, *(this+3)=size
-//   if (bounds_ok) { *out = *(base - delta + cursor); cursor += 4; }
-typedef void* (__thiscall* StreamRead_fn)(void*, void*);
-static StreamRead_fn orig_StreamRead = nullptr;
-long g_streamReadHits = 0, g_streamReadFallbacks = 0;
-
-static void* __fastcall hooked_StreamRead(void* This, void* edx, void* out) {
-#if CRASH_TEST_DISABLE_STREAM_FASTPATH
-    return orig_StreamRead(This, out);
-#else
-    __try {
-        uintptr_t t = (uintptr_t)This;
-        uint32_t cursor = *(uint32_t*)(t + 0x14);   // this+5 (m_readCursor)
-        uint32_t writeCursor = *(uint32_t*)(t + 0x10); // this+4 (m_writeCursor)
-        uint32_t base   = *(uint32_t*)(t + 0x04);   // this+1
-        uint32_t delta  = *(uint32_t*)(t + 0x08);   // this+2
-        uint32_t size   = *(uint32_t*)(t + 0x0C);   // this+3
-
-        // Correct fast bounds: cursor within writeCursor and allocated region
-        if (cursor + 4 <= writeCursor && cursor >= delta && cursor + 4 <= delta + size) {
-            uintptr_t addr = cursor - delta + base;
-            if (addr > 0x10000 && addr < 0xFFE00000) {
-                *(uint32_t*)out = *(uint32_t*)addr;
-                *(uint32_t*)(t + 0x14) = cursor + 4;
-                InterlockedIncrement(&g_streamReadHits);
-                return This;
-            }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-    InterlockedIncrement(&g_streamReadFallbacks);
-    return orig_StreamRead(This, out);
-#endif
-}
-
-// sub_47B0A0: unsigned int* __thiscall StreamWrite(unsigned int* this, int val)
-//   Same buffer layout as StreamRead.  Writes val at cursor, advances.
-typedef void* (__thiscall* StreamWrite_fn)(void*, int);
-static StreamWrite_fn orig_StreamWrite = nullptr;
-long g_streamWriteHits = 0, g_streamWriteFallbacks = 0;
-
-static void* __fastcall hooked_StreamWrite(void* This, void* edx, int val) {
-#if CRASH_TEST_DISABLE_STREAM_FASTPATH
-    return orig_StreamWrite(This, val);
-#else
-    __try {
-        uintptr_t t = (uintptr_t)This;
-        uint32_t cursor = *(uint32_t*)(t + 0x10);   // this+4
-        uint32_t base   = *(uint32_t*)(t + 0x04);   // this+1
-        uint32_t delta  = *(uint32_t*)(t + 0x08);   // this+2
-        uint32_t size   = *(uint32_t*)(t + 0x0C);   // this+3
-
-        // Fast bounds: cursor within [delta, delta+size) - same as sub_47B0A0
-        if (cursor + 4 <= delta + size && cursor >= delta) {
-            uintptr_t addr = cursor - delta + base;
-            if (addr > 0x10000 && addr < 0xFFE00000) {
-                *(uint32_t*)addr = val;
-                *(uint32_t*)(t + 0x10) = cursor + 4;
-                InterlockedIncrement(&g_streamWriteHits);
-                return This;
-            }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-    InterlockedIncrement(&g_streamWriteFallbacks);
-    return orig_StreamWrite(This, val);
-#endif
-}
-
-static bool InstallStreamBufferFastPath() {
-#if CRASH_TEST_DISABLE_STREAM_FASTPATH
-    Log("Stream buffer fast path: DISABLED (crash isolation)");
-    return false;
-#else
-    int ok = 0;
-
-    // sub_47B3C0 - StreamRead (1477 callers)
-    void* pRead = (void*)0x0047B3C0;
-    unsigned char* pr = (unsigned char*)pRead;
-    if (pr[0] == 0x55 && pr[1] == 0x8B) {
-        if (WineSafe_CreateHook(pRead, (void*)hooked_StreamRead, (void**)&orig_StreamRead) == MH_OK
-            && WO_EnableHook(pRead) == MH_OK) ok++;
-    }
-
-    // sub_47B0A0 - StreamWrite (1185 callers)
-    void* pWrite = (void*)0x0047B0A0;
-    unsigned char* pw = (unsigned char*)pWrite;
-    if (pw[0] == 0x55 && pw[1] == 0x8B) {
-        if (WineSafe_CreateHook(pWrite, (void*)hooked_StreamWrite, (void**)&orig_StreamWrite) == MH_OK
-            && WO_EnableHook(pWrite) == MH_OK) ok++;
-    }
-
-    if (ok > 0) {
-        Log("Stream buffer fast path: ACTIVE (%d/2 hooked, sub_47B3C0+sub_47B0A0 - inline bounds check, 2662 callers)", ok);
-        return true;
-    }
-    Log("Stream buffer fast path: FAILED (no hooks installed)");
-    return false;
-#endif
-}
 
 // ================================================================
 // 17. GetFileSize / GetFileSizeEx - Cache
