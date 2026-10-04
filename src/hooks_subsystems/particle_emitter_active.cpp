@@ -61,6 +61,7 @@ static uint64_t g_calls = 0;
 static uint64_t g_armedCalls = 0;
 static uint64_t g_verifiedCalls = 0;
 static uint64_t g_controlCalls = 0;
+static uint64_t g_overflowCalls = 0;   // left to the client: deeper than the stack here
 static uint32_t g_mismatches = 0;
 
 static const uintptr_t kTarget = 0x0097B9E0;
@@ -68,6 +69,9 @@ static const uint8_t kPrologue[8] = {
     0x83, 0x79, 0x50, 0x00, 0x74, 0x06, 0xB8, 0x01
 };
 
+// -1 when the hierarchy has more pending branches than the 32-entry stack holds. A
+// branch left unvisited could be the active one, so the caller hands such a call to
+// the client's recursive routine instead of answering "inactive".
 __declspec(safebuffers) static inline int Fast_HasActiveParticles(const void* root) {
     if (!root) return 0;
     const char* p = (const char*)root;
@@ -84,7 +88,8 @@ __declspec(safebuffers) static inline int Fast_HasActiveParticles(const void* ro
         const char* child = (const char*)children[i];
         if (child) {
             if (*(const uint32_t*)(child + 0x50) != 0) return 1;
-            if (*(const uint32_t*)(child + 0x6C) != 0 && top < 32) {
+            if (*(const uint32_t*)(child + 0x6C) != 0) {
+                if (top >= 32) return -1;
                 stack[top++] = child;
             }
         }
@@ -98,7 +103,8 @@ __declspec(safebuffers) static inline int Fast_HasActiveParticles(const void* ro
             const char* child = (const char*)children[i];
             if (child) {
                 if (*(const uint32_t*)(child + 0x50) != 0) return 1;
-                if (*(const uint32_t*)(child + 0x6C) != 0 && top < 32) {
+                if (*(const uint32_t*)(child + 0x6C) != 0) {
+                    if (top >= 32) return -1;
                     stack[top++] = child;
                 }
             }
@@ -124,14 +130,23 @@ __declspec(safebuffers) static int __fastcall Hook_sub_97B9E0(const void* thisPt
     // Verify first 10,000 calls, then sample 1 in 128
     const bool verifyThisCall = (g_verifiedCalls < 10000) || ((g_calls & 0x7F) == 0);
     if (!verifyThisCall) {
+        const int armed = Fast_HasActiveParticles(thisPtr);
+        if (armed < 0) {
+            g_overflowCalls++;
+            return g_orig(thisPtr);
+        }
         g_armedCalls++;
-        return Fast_HasActiveParticles(thisPtr);
+        return armed;
     }
 
     g_verifiedCalls++;
     const int clientRes = g_orig(thisPtr);
     const int fastRes = Fast_HasActiveParticles(thisPtr);
 
+    if (fastRes < 0) {
+        g_overflowCalls++;
+        return clientRes;
+    }
     if (clientRes != fastRes) {
         g_mismatches++;
         g_dead = true;
@@ -192,11 +207,13 @@ void LogStats() {
         return;
     }
 
-    Log("[ParticleEmitterActive] calls=%llu (armed=%llu, verified=%llu, control=%llu) mismatches=%u%s",
+    Log("[ParticleEmitterActive] calls=%llu (armed=%llu, verified=%llu, control=%llu, "
+        "left to the client as deeper than the stack here=%llu) mismatches=%u%s",
         (unsigned long long)g_calls,
         (unsigned long long)g_armedCalls,
         (unsigned long long)g_verifiedCalls,
         (unsigned long long)g_controlCalls,
+        (unsigned long long)g_overflowCalls,
         g_mismatches,
         g_dead ? " [RETIRED]" : "");
 }
