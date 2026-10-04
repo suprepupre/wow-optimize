@@ -136,11 +136,23 @@ void LogStats() {
             s.name, ours, theirs, theirs / ours,
             (unsigned long long)s.pairs,
             s.discarded ? " (some pairs dropped as outliers)" : "");
-        if (theirs < ours)
-            Log("[Wrong] [SelfBench]   %s is SLOWER than the code it replaces, "
-                "by %.2fx on the same input. That is the whole reason to "
-                "replace it, so this one needs looking at.",
-                s.name, ours / theirs);
+        // The first pairs of a session are the first calls into code that is not in
+        // the cache yet, and read as slower than the client for that reason: the
+        // same four modules were flagged in every log on disk at a few hundred pairs
+        // and came out two to four times faster by the end. A verdict needs enough
+        // pairs for the cold ones not to decide it.
+        constexpr unsigned long long kMinPairsToJudge = 1000;
+        if (theirs < ours) {
+            if (s.pairs < kMinPairsToJudge)
+                Log("[SelfBench]   %s reads slower than the code it replaces after only "
+                    "%llu pairs, too few to say: the first calls run cold.",
+                    s.name, (unsigned long long)s.pairs);
+            else
+                Log("[Wrong] [SelfBench]   %s is SLOWER than the code it replaces, "
+                    "by %.2fx on the same input over %llu pairs. That is the whole "
+                    "reason to replace it, so this one needs looking at.",
+                    s.name, ours / theirs, (unsigned long long)s.pairs);
+        }
     }
 }
 
