@@ -418,8 +418,6 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/wow_perf_hooks.h
     src/hooks_subsystems/wow_extended_hooks.cpp
     src/hooks_subsystems/wow_extended_hooks.h
-    src/hooks_subsystems/wow_subsystem_hooks.cpp
-    src/hooks_subsystems/wow_subsystem_hooks.h
     src/hooks_subsystems/wow_memory_opt.cpp
     src/hooks_subsystems/wow_memory_opt.h
     src/hooks_subsystems/hooks_render.cpp

@@ -875,7 +875,6 @@ void ClearCombatLogCache();
 #include "lua_prepbuffer_fast.h"
 #include "lua_pushresult_fast.h"
 #include "lua_addlstring_fast.h"
-#include "wow_subsystem_hooks.h"
 #include "wow_memory_opt.h"
 #include "sound_mixer_opt.h"
 #include "lua_gc_governor.h"
@@ -9462,9 +9461,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
     Log("--- WoW.exe Extended Hooks (40 features) ---");
     bool wowExtendedOk = Config::g_settings.OptWowExtendedHooks && WowExtendedHooks::InstallAll();
-
-    Log("--- WoW.exe Subsystem Hooks (100 features) ---");
-    bool wowSubsystemOk = Config::g_settings.OptWowSubsystemHooks && WowSubsystemHooks::InstallAll();
 
     Log("--- Memory Optimizations: LAA + Async + MemOpt ---");
     bool memoryOptLAA = WowMemoryOpt::EnableLargeAddressAware();

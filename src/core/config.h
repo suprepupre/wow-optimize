@@ -70,7 +70,6 @@ namespace Config {
         // is now what makes the vanilla button honest.
         bool OptWowPerfHooks      = true;   // 20 hooks
         bool OptWowExtendedHooks  = true;   // 40 features
-        bool OptWowSubsystemHooks = true;   // 100 features
 
         // Four more that took no setting at all. Same rule: they have always
         // run, so they default on, and turning them off is what the vanilla
