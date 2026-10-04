@@ -353,6 +353,11 @@ static void UpdateMainThreadActivity() {
 // the difference between a diagnostic that steers the work and one that misleads
 // it.
 static bool FreezeCallPrecedes(uintptr_t addr) {
+    // The first bytes of a module have nothing before them in the same allocation: a
+    // stack word equal to an image base (0x00400000 is one) made the reads below fault
+    // at 0x003FFFFB, were caught, and showed up as a first-chance access violation in
+    // two logs. No call instruction can precede the first byte of an image.
+    if ((addr & 0xFFFF) < 8) return false;
     __try {
         const unsigned char* p = (const unsigned char*)addr;
         if (p[-5] == 0xE8) return true;               // call rel32

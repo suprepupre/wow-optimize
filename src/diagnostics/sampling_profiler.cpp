@@ -649,6 +649,7 @@ static bool LooksLikeReturn(uintptr_t v) {
     const bool inWow  = v >= WOW_BASE && v <= WOW_END;
     const bool inSelf = g_selfBase && v >= g_selfBase && v < g_selfEnd;
     if (!inWow && !inSelf) return false;
+    if ((v & 0xFFFF) < 8) return false;     // an image base on the stack, not a return address
     __try {
         const uint8_t* p = (const uint8_t*)v;
         return p[-5] == 0xE8 || p[-2] == 0xFF || p[-3] == 0xFF || p[-6] == 0xFF || p[-7] == 0xFF;
