@@ -144,6 +144,20 @@ static constexpr size_t RING_BYTES = (size_t)RING_SIZE * sizeof(uintptr_t);
 static volatile uint64_t  g_writeIdx = 0;
 static volatile uint64_t  g_totalSamples = 0;
 
+// Who called the code a sample landed in, for samples outside the client and this
+// DLL: a wait in ntdll, Direct3D in the translation layer, the driver. The ranking
+// above says the main thread was in d3d9.dll 8% of the time, or blocked in a wait
+// for IO completion 3% of it, and not which client function asked. Kept for the
+// whole session in a small table, keyed by the address and the nearest return
+// address into wow.exe or this DLL found on the stack, counted only for samples
+// that are in neither of them.
+struct CallerRow { uintptr_t eip; uintptr_t caller; uint32_t n; };
+static constexpr int CALLER_SLOTS = 4096;
+static CallerRow g_callerRows[CALLER_SLOTS];
+static uint32_t  g_callerLost = 0;          // rows that did not fit
+static uint64_t  g_callerSamples = 0;       // samples counted into the table
+static uint64_t  g_callerNoCaller = 0;      // of those, ones with no return address found
+
 // Per-4KB-page sample counts for WoW-image samples that don't match a named
 // function. Turns the opaque "unknown_wow" blob into a per-region hot-map so
 // unlisted hot code is still pinpointed by address (label "wow_region_0x...").
@@ -621,6 +635,47 @@ static void NoteWorkerSample(uintptr_t eip) {
     }
 }
 
+static bool ReadWordSafe(uintptr_t a, uintptr_t* out) {
+    if (a < 0x10000u || (a & 3u)) return false;
+    __try { *out = *(const volatile uintptr_t*)a; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// A word on the stack that is a return address: a code address in the client or
+// this DLL whose preceding bytes are a call (E8 rel32, FF /2 with a register or
+// a displacement). Not exact; the first match nearest the stack pointer is the
+// nearest caller, which is what is wanted.
+static bool LooksLikeReturn(uintptr_t v) {
+    const bool inWow  = v >= WOW_BASE && v <= WOW_END;
+    const bool inSelf = g_selfBase && v >= g_selfBase && v < g_selfEnd;
+    if (!inWow && !inSelf) return false;
+    __try {
+        const uint8_t* p = (const uint8_t*)v;
+        return p[-5] == 0xE8 || p[-2] == 0xFF || p[-3] == 0xFF || p[-6] == 0xFF || p[-7] == 0xFF;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Called while the main thread is suspended, so its stack cannot change.
+static void NoteForeignCaller(const CONTEXT& ctx, uintptr_t eip) {
+    if (eip >= WOW_BASE && eip <= WOW_END) return;
+    if (g_selfBase && eip >= g_selfBase && eip < g_selfEnd) return;
+    uintptr_t caller = 0;
+    uintptr_t sp = (uintptr_t)ctx.Esp, w = 0;
+    for (int i = 0; i < 256; ++i, sp += sizeof(uintptr_t)) {
+        if (!ReadWordSafe(sp, &w)) break;
+        if (LooksLikeReturn(w)) { caller = w; break; }
+    }
+    ++g_callerSamples;
+    if (!caller) ++g_callerNoCaller;
+    uint32_t h = (uint32_t)((eip * 2654435761u) ^ (caller * 40503u)) & (CALLER_SLOTS - 1);
+    for (int step = 0; step < CALLER_SLOTS; ++step, h = (h + 1) & (CALLER_SLOTS - 1)) {
+        CallerRow& r = g_callerRows[h];
+        if (r.n == 0) { r.eip = eip; r.caller = caller; r.n = 1; return; }
+        if (r.eip == eip && r.caller == caller) { ++r.n; return; }
+    }
+    ++g_callerLost;
+}
+
 static void SampleOneWorker() {
     if (g_workerCount == 0) return;
 
@@ -709,7 +764,10 @@ static DWORD WINAPI SamplerThreadProc(LPVOID) {
         // WoW won't notice. Same technique crash dumpers use.
         if (SuspendThread(g_mainThread) != (DWORD)-1) {
             uintptr_t eip = 0;
-            if (GetThreadContext(g_mainThread, &ctx)) eip = (uintptr_t)ctx.Eip;
+            if (GetThreadContext(g_mainThread, &ctx)) {
+                eip = (uintptr_t)ctx.Eip;
+                NoteForeignCaller(ctx, eip);
+            }
 
             // Which addon's Lua is on the stack, read while the thread is still
             // stopped. The suspend is already paid for; this is a few loads on
@@ -1418,6 +1476,81 @@ static constexpr int MOD_FINE_SLOTS = 8192;
 static constexpr int MOD_FINE_TOP   = 12;
 static uint32_t g_modFineCounts[MOD_FINE_SLOTS];
 
+static void DescribeForeign(uintptr_t a, char* out, size_t cap) {
+    if (FreezeCatcher::NameExport(a, out, cap)) return;
+    HMODULE m = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && m) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(m, path, MAX_PATH);
+        const char* base = strrchr(path, 92);
+        wsprintfA(out, "%s+0x%X", base ? base + 1 : path, (unsigned)(a - (uintptr_t)m));
+        return;
+    }
+    wsprintfA(out, "0x%08X", (unsigned)a);
+}
+
+// What the main thread was running in, outside the client and this DLL, and which
+// of the client's functions called it. Cumulative over the session, so shares are
+// of every sample taken since the start and not of the ring window the rest of the
+// report is read from.
+static void DumpForeignCallers() {
+    if (g_callerSamples == 0) {
+        Log("[SamplingProfiler] === WHO CALLED THE CODE OUTSIDE wow.exe AND THIS DLL === not measured: "
+            "no sample landed outside them.");
+        return;
+    }
+    const uint64_t all = g_totalSamples ? g_totalSamples : 1;
+    Log("[SamplingProfiler] === WHO CALLED THE CODE OUTSIDE wow.exe AND THIS DLL === %llu sample(s) "
+        "(%.1f%% of all %llu taken since the start), %llu of them with no caller found on the "
+        "stack, %lu row(s) that did not fit ===",
+        (unsigned long long)g_callerSamples, 100.0 * (double)g_callerSamples / (double)all,
+        (unsigned long long)all, (unsigned long long)g_callerNoCaller, (unsigned long)g_callerLost);
+
+    bool used[CALLER_SLOTS] = {};
+    for (int row = 0; row < 14; ++row) {
+        int best = -1;
+        for (int i = 0; i < CALLER_SLOTS; ++i)
+            if (!used[i] && g_callerRows[i].n && (best < 0 || g_callerRows[i].n > g_callerRows[best].n)) best = i;
+        if (best < 0) break;
+        used[best] = true;
+        const CallerRow& r = g_callerRows[best];
+        char where[128], who[64];
+        DescribeForeign(r.eip, where, sizeof(where));
+        if (r.caller >= WOW_BASE && r.caller <= WOW_END) wsprintfA(who, "wow!0x%08X", (unsigned)r.caller);
+        else if (r.caller) wsprintfA(who, "wowopt+0x%X", (unsigned)(r.caller - g_selfBase));
+        else lstrcpyA(who, "(not found)");
+        Log("[SamplingProfiler]   %6u  %5.2f%%  %s  <-  %s", (unsigned)r.n,
+            100.0 * (double)r.n / (double)all, where, who);
+    }
+
+    // The same rows summed by the calling function's 256-byte region, which is
+    // the question for Direct3D: which part of the client makes the calls.
+    struct Sum { uintptr_t region; uint64_t n; };
+    static Sum sums[1024];
+    int ns = 0;
+    for (int i = 0; i < CALLER_SLOTS; ++i) {
+        if (!g_callerRows[i].n || !g_callerRows[i].caller) continue;
+        const uintptr_t reg = g_callerRows[i].caller & ~(uintptr_t)0xFF;
+        int k = 0;
+        for (; k < ns; ++k) if (sums[k].region == reg) break;
+        if (k == ns) { if (ns >= 1024) continue; sums[ns].region = reg; sums[ns].n = 0; ++ns; }
+        sums[k].n += g_callerRows[i].n;
+    }
+    Log("[SamplingProfiler]   by the calling code's 256-byte region:");
+    bool usedS[1024] = {};
+    for (int row = 0; row < 10; ++row) {
+        int best = -1;
+        for (int i = 0; i < ns; ++i) if (!usedS[i] && (best < 0 || sums[i].n > sums[best].n)) best = i;
+        if (best < 0) break;
+        usedS[best] = true;
+        const bool inWow = sums[best].region >= WOW_BASE && sums[best].region <= WOW_END;
+        Log("[SamplingProfiler]   %6llu  %5.2f%%  %s0x%08X", (unsigned long long)sums[best].n,
+            100.0 * (double)sums[best].n / (double)all, inWow ? "wow!" : "wowopt+",
+            (unsigned)(inWow ? sums[best].region : sums[best].region - g_selfBase));
+    }
+}
+
 static void DumpHottestForeignModule(const volatile uintptr_t* ring,
                                      uint64_t startIdx, uint64_t n, uint64_t total) {
     if (g_modCount <= 0 || n == 0) return;
@@ -1973,6 +2106,8 @@ static void DumpResults() {
                       "wow.exe HOT SPOTS (512-byte resolution)", "0x%08X", WOW_BASE);
 
     DumpHottestForeignModule(g_ring, startIdx, n, total);
+
+    DumpForeignCallers();
 
     DumpWorkerThreads(total);
 
