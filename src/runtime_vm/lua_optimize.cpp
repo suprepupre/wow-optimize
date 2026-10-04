@@ -2264,6 +2264,27 @@ void LogStats() {
         return;
     }
     const double mb = State.luaMemoryKB / 1024.0;
+
+    // A figure larger than everything the process holds is not a measurement. One
+    // session printed 0.0 MB and then 2925.7 MB, both "read by this report", while
+    // the process held about 1.7 GB in all and the figure before them was 198 MB, and
+    // the second of them raised a "past 300 MB, precedes an out-of-memory exit"
+    // verdict. The collection counter beside them had not moved for the whole stretch.
+    // Whatever lua_gc was reading there was not a live state's count, so the figure
+    // is reported as not trusted and the verdict is not raised on it.
+    PROCESS_MEMORY_COUNTERS_EX pmcx = {};
+    pmcx.cb = sizeof(pmcx);
+    const bool haveProc = GetProcessMemoryInfo(GetCurrentProcess(),
+                              (PROCESS_MEMORY_COUNTERS*)&pmcx, sizeof(pmcx)) != 0;
+    const double procMb = haveProc ? (double)pmcx.PrivateUsage / (1024.0 * 1024.0) : 0.0;
+    if (haveProc && mb > procMb) {
+        Log("[LuaOpt] Lua memory read as %.1f MB, more than the %.1f MB the whole process "
+            "holds, so the figure is not trusted and not reported as a measurement. The "
+            "lua_State at %p is not one lua_gc can count (%s); collection counter %d.",
+            mb, procMb, (void*)Api.L,
+            fresh ? "read by this report" : "last sample", State.fullCollects);
+        return;
+    }
     Log("[LuaOpt] Lua memory %.1f MB (%s). Manual GC stepping is %s. Collection "
         "counter %d (completed incremental cycles plus emergency and "
         "loading-screen steps); the emergency collector starts at 300 MB and "
