@@ -2280,9 +2280,11 @@ void LogStats() {
     if (haveProc && mb > procMb) {
         Log("[LuaOpt] Lua memory read as %.1f MB, more than the %.1f MB the whole process "
             "holds, so the figure is not trusted and not reported as a measurement. The "
-            "lua_State at %p is not one lua_gc can count (%s); collection counter %d.",
+            "lua_State at %p is not one lua_gc can count (%s); the client's current state is %p; "
+            "collection counter %d.",
             mb, procMb, (void*)Api.L,
-            fresh ? "read by this report" : "last sample", State.fullCollects);
+            fresh ? "read by this report" : "last sample", (void*)ReadLuaState(),
+            State.fullCollects);
         return;
     }
     Log("[LuaOpt] Lua memory %.1f MB (%s). Manual GC stepping is %s. Collection "
