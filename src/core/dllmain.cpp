@@ -2966,6 +2966,17 @@ static void ShutdownAsyncIoWorker() {
 }
 
 static bool InstallAsyncIoWorker() {
+#if CRASH_TEST_DISABLE_READFILE
+    // The only callers of QueueAsyncRead and CheckAsyncCompletion are in the ReadFile
+    // cache, which this build leaves out (the linker map has neither function). The
+    // worker waits for a queue entry by calling SwitchToThread in a loop, and with
+    // nothing to run that returns at once: measured at 3.5 s of CPU in 3.5 s of wall
+    // time, one core held for the whole session by a thread that could never be given
+    // work. Not started, and the log says why.
+    Log("Async MPQ I/O: not started. Its only producer is the ReadFile cache, which is "
+        "compiled out in this build, so the worker would have nothing to read.");
+    return false;
+#else
     g_asyncIoShutdown = false;
     g_asyncIoWorker = CreateThread(NULL, 0, AsyncIoWorkerProc, NULL, 0, NULL);
     if (g_asyncIoWorker) {
@@ -2974,6 +2985,7 @@ static bool InstallAsyncIoWorker() {
     }
     Log("Async MPQ I/O: FAILED to create worker thread");
     return false;
+#endif
 }
 
 #else
