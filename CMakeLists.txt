@@ -414,8 +414,6 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_gettable_cache.h
     src/hooks_subsystems/saved_vars_async.cpp
     src/hooks_subsystems/saved_vars_async.h
-    src/hooks_subsystems/wow_opt_hooks.cpp
-    src/hooks_subsystems/wow_opt_hooks.h
     src/hooks_subsystems/wow_perf_hooks.cpp
     src/hooks_subsystems/wow_perf_hooks.h
     src/hooks_subsystems/wow_extended_hooks.cpp

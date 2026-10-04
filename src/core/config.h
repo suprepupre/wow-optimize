@@ -68,7 +68,6 @@ namespace Config {
         // All (vanilla)" left about 150 detours in the client. They default ON
         // because they have always been running for everyone; turning them off
         // is now what makes the vanilla button honest.
-        bool OptWowOptHooks       = true;   // 20 hooks
         bool OptWowPerfHooks      = true;   // 20 hooks
         bool OptWowExtendedHooks  = true;   // 40 features
         bool OptWowSubsystemHooks = true;   // 100 features

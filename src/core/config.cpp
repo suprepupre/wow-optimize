@@ -42,7 +42,6 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "TimingFix", &Settings::OptTimingFix },
     { "General", "CvarNullGuard", &Settings::OptCvarNullGuard },
     { "General", "DeviceCbGuard", &Settings::OptDeviceCbGuard },
-    { "General", "WowOptHooks", &Settings::OptWowOptHooks },
     { "General", "WowPerfHooks", &Settings::OptWowPerfHooks },
     { "General", "WowExtendedHooks", &Settings::OptWowExtendedHooks },
     { "General", "WowSubsystemHooks", &Settings::OptWowSubsystemHooks },
@@ -504,7 +503,6 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("General", "TimingFix", "0", iniPath.c_str());
             WritePrivateProfileStringA("General", "CvarNullGuard", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "DeviceCbGuard", "1", iniPath.c_str());
-            WritePrivateProfileStringA("General", "WowOptHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowPerfHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowExtendedHooks", "1", iniPath.c_str());
             WritePrivateProfileStringA("General", "WowSubsystemHooks", "1", iniPath.c_str());
@@ -600,7 +598,6 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptTimingFix           = GetPrivateProfileIntA("General", "TimingFix", 0, iniPath.c_str()) != 0;
         g_settings.OptCvarNullGuard       = GetPrivateProfileIntA("General", "CvarNullGuard", 1, iniPath.c_str()) != 0;
         g_settings.OptDeviceCbGuard       = GetPrivateProfileIntA("General", "DeviceCbGuard", 1, iniPath.c_str()) != 0;
-        g_settings.OptWowOptHooks        = GetPrivateProfileIntA("General", "WowOptHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowPerfHooks       = GetPrivateProfileIntA("General", "WowPerfHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowExtendedHooks   = GetPrivateProfileIntA("General", "WowExtendedHooks", 1, iniPath.c_str()) != 0;
         g_settings.OptWowSubsystemHooks  = GetPrivateProfileIntA("General", "WowSubsystemHooks", 1, iniPath.c_str()) != 0;

@@ -850,7 +850,6 @@ extern "C" void LuaOpt_GetVaSourceStats(unsigned long* fromMonitor,
 #include "diagnostics/frame_bench.h"
 #include "diagnostics/thread_cpu.h"
 #include "luaS_newlstr_sse2.h"
-#include "wow_opt_hooks.h"
 #include "wow_perf_hooks.h"
 #include "wow_extended_hooks.h"
 #include "unitaura_fastpath.h"
@@ -5901,7 +5900,6 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     // that have never shown a single number in a field log. Some of those
     // hooks do work and some are passthroughs that only count, and without
     // these lines there is no way to tell which is which.
-    STAT_TIME("WowOptHooks::DumpStats", WowOptHooks::DumpStats());
     STAT_TIME("WowExtendedHooks::DumpStats", WowExtendedHooks::DumpStats());
     STAT_TIME("LuaThisCache_LogStats", LuaThisCache_LogStats());
     STAT_TIME("LuaAllocCensus::LogStats", LuaAllocCensus::LogStats());
@@ -9458,9 +9456,6 @@ static DWORD WINAPI MainThread(LPVOID param) {
     // wow_perf_hooks P5 already owns, so it lost the race every session and
     // logged MH_CreateHook FAILED while the feature ran anyway under another
     // switch. OptLuaTypeFast now gates P5 itself, where the work is.
-
-    Log("--- WoW.exe Optimization Hooks (20 hooks) ---");
-    bool wowOptOk = Config::g_settings.OptWowOptHooks && WowOptHooks::InstallAll();
 
     Log("--- WoW.exe Performance Hooks (20 hooks) ---");
     bool wowPerfOk = Config::g_settings.OptWowPerfHooks && WowPerfHooks::InstallAll();
