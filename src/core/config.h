@@ -174,7 +174,7 @@ namespace Config {
         bool OptAsyncTexLoader = false;
         bool OptRcuObjMgr = false;
         bool OptObjMgrEnumFast = true;
-        bool OptFreezeCatcher = false;
+        bool OptFreezeCatcher = true;
         bool OptMpqOpenCensus = false;
         bool OptMpqNegativeCache = false;
         bool OptMipBiasGovernor = false;
