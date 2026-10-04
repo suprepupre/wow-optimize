@@ -128,6 +128,8 @@ add_library(wow_optimize SHARED
     src/runtime_vm/lua_internals.h
     src/diagnostics/net_diag.cpp
     src/diagnostics/net_diag.h
+    src/diagnostics/thread_cpu.cpp
+    src/diagnostics/thread_cpu.h
     src/diagnostics/addon_profiler.cpp
     src/diagnostics/addon_profiler.h
     src/diagnostics/lua_compile_census.cpp

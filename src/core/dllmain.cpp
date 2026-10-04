@@ -848,6 +848,7 @@ extern "C" void LuaOpt_GetVaSourceStats(unsigned long* fromMonitor,
 #include "event_coalescer.h"
 #include "loading_state.h"
 #include "diagnostics/frame_bench.h"
+#include "diagnostics/thread_cpu.h"
 #include "luaS_newlstr_sse2.h"
 #include "wow_opt_hooks.h"
 #include "wow_perf_hooks.h"
@@ -5966,6 +5967,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("LuaTableCensus::LogStats", LuaTableCensus::LogStats());
     STAT_TIME("D3D9StateManager_LogStats", D3D9StateManager_LogStats());
     STAT_TIME("GxRT::LogStats", GxRT::LogStats());
+    STAT_TIME("ThreadCpu::Report", ThreadCpu::Report());
     STAT_TIME("SimdHooks_LogStats", SimdHooks_LogStats());
     STAT_TIME("DeviceCallbackGuard::LogStats", DeviceCallbackGuard::LogStats());
     STAT_TIME("LayoutRelinkFast::LogStats", LayoutRelinkFast::LogStats());
