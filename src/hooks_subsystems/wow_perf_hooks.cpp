@@ -22,71 +22,19 @@ extern "C" void Log(const char* fmt, ...);
 // one thread; a lost increment costs one count, and the report says the numbers
 // are lower bounds. None of them is read for control flow, which was checked
 // before changing them.
-static long g_p1Hits = 0, g_p1Calls = 0;
 static long g_p2Hits = 0, g_p2Calls = 0;
 static long g_p3Fast = 0, g_p3Calls = 0;
 static long g_p4Cached = 0, g_p4Calls = 0;
 static long g_p5Fast = 0, g_p5Calls = 0;
+static bool g_luaTypeInstalled = false;
 static long g_p6Prefetched = 0, g_p6Calls = 0;
 static long g_p7Skipped = 0, g_p7Calls = 0;
-static long g_p8Batched = 0, g_p8Calls = 0;
-static long g_p9Inline = 0, g_p9Calls = 0;
-static long g_p10Cached = 0, g_p10Calls = 0;
-static long g_p11Fast = 0, g_p11Calls = 0;
 static long g_p12Coalesced = 0, g_p12Calls = 0;
-static long g_p14Cached = 0, g_p14Calls = 0;
 static long g_p15Fast = 0, g_p15Calls = 0;
 static long g_p16Deduped = 0, g_p16Calls = 0;
 static long g_p17Prefetched = 0, g_p17Calls = 0;
 static long g_p18Inline = 0, g_p18Calls = 0;
 static long g_p19Cached = 0, g_p19Calls = 0;
-
-// ================================================================
-// P1: sub_84E350 - lua_pushstring (1008 xrefs!)
-// THE most called Lua C function. Original calls strlen + sub_84E300.
-// We cache short strings (<32 chars) to avoid repeated strlen+intern.
-// ================================================================
-typedef int (__cdecl *LuaPushString_fn)(int L, const char* s);
-static LuaPushString_fn orig_LuaPushString = nullptr;
-
-#define PUSHSTR_SHORT_CACHE 256
-struct ShortStrEntry { uint32_t hash; const char* ptr; int result; };
-static ShortStrEntry g_shortStrCache[PUSHSTR_SHORT_CACHE] = {};
-
-static int __cdecl Hooked_LuaPushString(int L, const char* s) {
-    ++g_p1Calls;
-    if (s && L) {
-        // Fast path: check first char for common nil/empty cases
-        if (s[0] == '\0') {
-            ++g_p1Hits;
-            // Push empty string directly - avoid strlen call
-            return orig_LuaPushString(L, s);
-        }
-        // Length-classify the string by walking it up to 32 bytes. This must
-        // STOP at the null terminator — the previous code read s[31] blindly to
-        // test "is it < 32 chars", which for a short string sitting within 31
-        // bytes of a page boundary read into an unmapped page and hard-crashed
-        // (0xC0000005 while serializing combat-log unit/spell names — random
-        // crashes on the first raid pull). Walking to the terminator only ever
-        // touches bytes inside the string's own allocation, so it's page-safe.
-        uint32_t h = 0x811C9DC5;
-        int n = 0;
-        for (; n < 32; n++) {
-            char c = s[n];
-            if (!c) break;           // reached terminator — within the string
-            h ^= (uint8_t)c;
-            h *= 0x01000193;
-        }
-        // Only short (2..31 char, null within 32) strings use the cache.
-        if (n >= 2 && n < 32) {
-            uint32_t idx = h & (PUSHSTR_SHORT_CACHE - 1);
-            if (g_shortStrCache[idx].hash == h && g_shortStrCache[idx].ptr == s) {
-                ++g_p1Hits;
-            }
-        }
-    }
-    return orig_LuaPushString(L, s);
-}
 
 // ================================================================
 // P2: sub_76E5A0 - free wrapper (2901 xrefs!)
@@ -247,80 +195,6 @@ static int __cdecl Hooked_SoundPlayDispatch(int a1, int a2, int a3, void* a4, in
 }
 
 // ================================================================
-// P8: sub_47CC90 - MemoryStorm delete (called by sub_422910)
-// Batch multiple deletes together to reduce per-delete overhead.
-// ================================================================
-typedef void (__cdecl *MemStormDelete_fn)(void*);
-static MemStormDelete_fn orig_MemStormDelete = nullptr;
-
-static void __cdecl Hooked_MemStormDelete(void* block) {
-    ++g_p8Calls;
-    if (block) {
-        // Prefetch next cache line before freeing
-        _mm_prefetch((char*)block + 64, _MM_HINT_NTA);
-        ++g_p8Batched;
-    }
-    orig_MemStormDelete(block);
-}
-
-// ================================================================
-// P9: sub_42E3B0 - MemoryStorm block free (called 3x by sub_422910)
-// Inline null check + prefetch before actual free.
-// ================================================================
-typedef int (__cdecl *MemStormBlockFree_fn)(void*);
-static MemStormBlockFree_fn orig_MemStormBlockFree = nullptr;
-
-static int __cdecl Hooked_MemStormBlockFree(void* block) {
-    ++g_p9Calls;
-    if (!block) {
-        ++g_p9Inline;
-        return 0; // Skip entirely for null
-    }
-    // Prefetch block header before free
-    _mm_prefetch((char*)block, _MM_HINT_T0);
-    return orig_MemStormBlockFree(block);
-}
-
-// ================================================================
-// P10: sub_4270F0 - Virtual dispatch (called by sub_422910)
-// Cache vtable pointer to avoid repeated global read.
-// ================================================================
-typedef char (__cdecl *VirtualDispatch_fn)(int);
-static VirtualDispatch_fn orig_VirtualDispatch = nullptr;
-static volatile void* g_p10CachedVtable = nullptr;
-
-static char __cdecl Hooked_VirtualDispatch(int a1) {
-    ++g_p10Calls;
-    // Cache the global vtable base pointer
-    __try {
-        void** basePtr = *(void***)0x00AB90AC;
-        if (basePtr && basePtr == (void*)g_p10CachedVtable) {
-            ++g_p10Cached;
-        } else if (basePtr) {
-            g_p10CachedVtable = basePtr;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    return orig_VirtualDispatch(a1);
-}
-
-// ================================================================
-// P11: sub_4283D0 - DeleteCriticalSection wrapper (6 xrefs but critical)
-// Skip redundant DebugInfo=nullptr write after DeleteCS.
-// ================================================================
-typedef void (__cdecl *DelCSWrapper_fn)(LPCRITICAL_SECTION);
-static DelCSWrapper_fn orig_DelCSWrapper = nullptr;
-
-static void __cdecl Hooked_DelCSWrapper(LPCRITICAL_SECTION cs) {
-    ++g_p11Calls;
-    if (cs) {
-        DeleteCriticalSection(cs);
-        ++g_p11Fast;
-        return; // Skip the DebugInfo=nullptr write
-    }
-    orig_DelCSWrapper(cs);
-}
-
-// ================================================================
 // P12: sub_878760 - Sound volume lookup (called by sub_4C6A40)
 // Cache volume values per channel to avoid repeated CVAR reads.
 // ================================================================
@@ -356,26 +230,6 @@ static float __cdecl Hooked_SoundVolumeLookup(int channel) {
 typedef void (__cdecl *SoundMixUpdate_fn)(int);
 static SoundMixUpdate_fn orig_SoundMixUpdate = nullptr;
 
-
-// ================================================================
-// P14: sub_8799E0 - Sound channel allocator
-// Cache last allocated channel for sequential allocation patterns.
-// ================================================================
-typedef int (__cdecl *SoundChannelAlloc_fn)(int);
-static SoundChannelAlloc_fn orig_SoundChannelAlloc = nullptr;
-static volatile int g_p14LastPriority = -1;
-static volatile int g_p14LastChannel = -1;
-
-static int __cdecl Hooked_SoundChannelAlloc(int priority) {
-    ++g_p14Calls;
-    int result = orig_SoundChannelAlloc(priority);
-    if (result >= 0) {
-        g_p14LastPriority = priority;
-        g_p14LastChannel = result;
-        ++g_p14Cached;
-    }
-    return result;
-}
 
 // ================================================================
 // P15: sub_879390 - Sound stop/fadeout
@@ -487,7 +341,15 @@ namespace WowPerfHooks {
         };
 
         HookDef hooks[] = {
-            {(void*)0x0084E350, (void*)Hooked_LuaPushString,     (void**)&orig_LuaPushString,     "P1 lua_pushstring (1008 xrefs)"},
+            // P1, P8, P9, P10, P11 and P14 are not installed. Each was a wrapper that
+            // counted its calls and then ran the original: P1 hashed up to 32 bytes
+            // of every string pushed to Lua to bump a "hit" counter, on the most
+            // called Lua function in the client; P8 and P9 prefetched before a free;
+            // P10 read a global to compare it with its own copy; P14 stored the
+            // result of an allocator it had not changed. P9 and P11 also answered
+            // differently from the client (P9 returned without calling it for a null
+            // block, P11 left out the DebugInfo store that sub_4283D0 makes after
+            // DeleteCriticalSection), for no gain. Nothing here measured a benefit.
             // P2 and P3 memory allocator hooks disabled to prevent custom WoW allocator metadata corruption/conflicts
             // {(void*)0x0076E5A0, (void*)Hooked_FreeWrapper,       (void**)&orig_FreeWrapper,       "P2 free wrapper (2901 xrefs)"},
             // {(void*)0x0076E540, (void*)Hooked_MallocWrapper,     (void**)&orig_MallocWrapper,     "P3 malloc wrapper (1764 xrefs)"},
@@ -509,17 +371,12 @@ namespace WowPerfHooks {
             // {(void*)0x00422910, (void*)Hooked_ObjDestroyChain,   (void**)&orig_ObjDestroyChain,   "P6 obj destroy chain (513 xrefs)"},
             // P7 REMOVED: 0x4C6A40 already hooked by W7 (wow_opt_hooks). Calling convention mismatch would corrupt stack.
             // {(void*)0x004C6A40, (void*)Hooked_SoundPlayDispatch, (void**)&orig_SoundPlayDispatch, "P7 sound play dispatch (98 xrefs)"},
-            {(void*)0x0047CC90, (void*)Hooked_MemStormDelete,    (void**)&orig_MemStormDelete,    "P8 memorystorm delete"},
-            {(void*)0x0042E3B0, (void*)Hooked_MemStormBlockFree, (void**)&orig_MemStormBlockFree, "P9 memorystorm block free"},
-            {(void*)0x004270F0, (void*)Hooked_VirtualDispatch,   (void**)&orig_VirtualDispatch,   "P10 virtual dispatch"},
-            {(void*)0x004283D0, (void*)Hooked_DelCSWrapper,      (void**)&orig_DelCSWrapper,      "P11 deleteCS wrapper"},
             // P12 stays out: it declares __cdecl where the client function is
             // __fastcall, so installing it corrupts the stack.
             // {(void*)0x00878760, (void*)Hooked_SoundVolumeLookup, (void**)&orig_SoundVolumeLookup, "P12 sound volume lookup"},
             // P13 stays out: nothing has established it is correct. Reinstating
             // it needs the evidence any new hook needs.
             // {(void*)0x00878610, (void*)Hooked_SoundMixUpdate,    (void**)&orig_SoundMixUpdate,    "P13 sound mix update"},
-            {(void*)0x008799E0, (void*)Hooked_SoundChannelAlloc, (void**)&orig_SoundChannelAlloc, "P14 sound channel alloc"},
             // P15 REMOVED: 0x879390 already hooked by W17 (wow_opt_hooks). Duplicate = MH_ERROR_ALREADY_CREATED.
             // {(void*)0x00879390, (void*)Hooked_SoundStop,         (void**)&orig_SoundStop,         "P15 sound stop"},
             // P16 REMOVED: 0x87F7A0 already hooked by W18 (wow_opt_hooks). P16 uses __cdecl(int) vs W18 __fastcall(void*,void*,...) — wrong CC.
@@ -543,11 +400,12 @@ namespace WowPerfHooks {
                 if (MH_EnableHook(h.addr) == MH_OK) {
                     Log("[WowPerf] %s: ACTIVE @ 0x%08X", h.name, (uintptr_t)h.addr);
                     installed++;
+                    if (h.addr == (void*)0x0084DEB0) g_luaTypeInstalled = true;
                 }
             }
         }
 
-        Log("[WowPerf] %d/20 performance hooks installed", installed);
+        Log("[WowPerf] %d performance hook(s) installed", installed);
         return installed > 0;
     }
 
@@ -556,21 +414,13 @@ namespace WowPerfHooks {
     }
 
     void DumpStats() {
-        // Seven lines for seven installed hooks.
-        //
-        // This printed nineteen counter pairs, twelve of which belong to
-        // entries commented out of the install table and can only ever read
-        // 0/0. That was harmless while this function ran only from ShutdownAll,
-        // which the DLL never reaches. It now runs from the periodic report, so
-        // twelve permanent zeroes would be repeated every five minutes for the
-        // length of a session. The reasons those twelve are not installed stay
-        // where they are, beside the table.
-        Log("[WowPerf] hits/calls below are plain counters on hooked client "
-            "functions and are lower bounds.");
-        Log("[WowPerf] PushStr: %d/%d | LuaType: %d/%d | MemStorm: %d/%d",
-            g_p1Hits, g_p1Calls, g_p5Fast, g_p5Calls, g_p8Batched, g_p8Calls);
-        Log("[WowPerf] BlockFree: %d/%d | VirtDisp: %d/%d | DelCS: %d/%d | ChanAlloc: %d/%d",
-            g_p9Inline, g_p9Calls, g_p10Cached, g_p10Calls,
-            g_p11Fast, g_p11Calls, g_p14Cached, g_p14Calls);
+        // One line, for the one hook the table can install. Counters of hooks that
+        // are not in it would only ever read 0/0, repeated every report interval.
+        if (!g_luaTypeInstalled) {
+            Log("[WowPerf] LuaType: not installed (UI_Lua/LuaTypeFast is off), nothing measured.");
+            return;
+        }
+        Log("[WowPerf] LuaType: %d answered here of %d calls; plain counters, lower bounds.",
+            g_p5Fast, g_p5Calls);
     }
 }
