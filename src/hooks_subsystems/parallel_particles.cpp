@@ -59,6 +59,7 @@
 #include <emmintrin.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 #include "parallel_particles.h"
 #include "config.h"
@@ -138,11 +139,11 @@ uintptr_t g_rejoin = kRejoin;
 
 // Staging areas: one per chunk plus one for the client's run when checking.
 // Each ends at a reserved, uncommitted page.
-uint8_t* g_regionEnd[kMaxChunks + 1];
-void*    g_regionBase[kMaxChunks + 1];
+uint8_t* g_regionEnd[kMaxChunks + 2];
+void*    g_regionBase[kMaxChunks + 2];   // the last is for repeating the client's run on a difference
 
 __declspec(align(64)) uint8_t g_emCopy[kMaxChunks][(kEmCopyBytes + 63) & ~63u];
-__declspec(align(64)) uint8_t g_sink[kMaxChunks + 1][64];
+__declspec(align(64)) uint8_t g_sink[kMaxChunks + 2][64];
 
 // Main-thread counters, read by the periodic report; lower bounds.
 unsigned long long g_emitters = 0, g_particles = 0;
@@ -328,6 +329,67 @@ void Retire(const char* what) {
         "after it runs the client's loop.", what);
 }
 
+// What differed, written for the first few differences only, because the retirement line
+// says "different vertex bytes" and nothing about which. One field session retired the
+// module after 9491 compared emitters; the log held no way to say whether the parallel
+// fill was wrong, the client's own loop gave different bytes from one run to the next, or
+// the emitter copy the chunks run on lacked a field the client read.
+//
+// The client's loop is run a second time into a staging area of its own. If the two
+// client runs disagree, the fill is not deterministic and no replacement can match it.
+unsigned g_diffLogged = 0;
+
+void LogVertexDifference(uint8_t* em, const Job& j, int chunks, uint8_t* const* stageBase,
+                         const uint8_t* aBase, uint32_t n, const Layout& L, uint32_t vpp,
+                         uint32_t count, const Writer& w0) {
+    if (g_diffLogged >= 3) return;
+    ++g_diffLogged;
+    uint32_t at = 0;
+    for (int c = 0; c < chunks; ++c) {
+        const size_t bytes = (size_t)j.out[c].w.count * L.stride;
+        const uint8_t* mine = stageBase[c];
+        const uint8_t* theirs = aBase + (size_t)at * L.stride;
+        size_t d = 0;
+        while (d < bytes && mine[d] == theirs[d]) ++d;
+        if (d < bytes) {
+            const uint32_t vertex = (uint32_t)(d / L.stride), off = (uint32_t)(d % L.stride);
+            const uint32_t particle = j.lo[c] + vertex / vpp;
+            size_t differing = 0;
+            for (size_t k = 0; k < bytes; ++k) differing += (mine[k] != theirs[k]);
+            Log("[ParallelParticles] difference: %u particles, %u vertices per particle, stride %d, "
+                "%d chunk(s); first in chunk %d at particle %u, vertex %u of it, byte %u of the "
+                "vertex (stream offsets %u %u %u %u, normal stream %s); %u byte(s) of %u differ in "
+                "all.", count, vpp, L.stride, chunks, c, particle, vertex % vpp, off,
+                L.off[0], L.off[1], L.off[2], L.off[3], L.sink ? "absent" : "present",
+                (unsigned)differing, (unsigned)bytes);
+            const uint32_t lo = off & ~15u;
+            char a[3 * 16 + 1] = {}, b2[3 * 16 + 1] = {};
+            for (int k = 0; k < 16 && lo + k < (uint32_t)L.stride; ++k) {
+                snprintf(a + 3 * k, 4, "%02X ", mine[(size_t)vertex * L.stride + lo + k]);
+                snprintf(b2 + 3 * k, 4, "%02X ", theirs[(size_t)vertex * L.stride + lo + k]);
+            }
+            Log("[ParallelParticles]   bytes %u..%u of that vertex: parallel %s | client %s",
+                lo, lo + 15, a, b2);
+            const uint8_t* pt = ParticleAt(em, particle);
+            char pb[3 * 32 + 1] = {};
+            for (int k = 0; k < 32; ++k) snprintf(pb + 3 * k, 4, "%02X ", pt[k]);
+            Log("[ParallelParticles]   that particle's first 32 bytes: %s", pb);
+            break;
+        }
+        at += j.out[c].w.count;
+    }
+    uint8_t* bBase;
+    Writer wb = StagingWriter(w0, L, g_regionEnd[kMaxChunks + 1], count * vpp,
+                              g_sink[kMaxChunks + 1], &bBase);
+    memset(bBase, 0xCD, (size_t)count * vpp * L.stride);
+    ClientLoop(em, &wb, count);
+    const bool repeats = wb.count == n && memcmp(bBase, aBase, (size_t)n * L.stride) == 0;
+    Log("[ParallelParticles]   the client's own loop run a second time on the same emitter %s.",
+        repeats ? "gave the same bytes, so the difference is in the parallel fill"
+                : "gave different bytes from its first run, so this fill is not deterministic and "
+                  "no replacement can match it");
+}
+
 void Parallel(uint8_t* em, void* writerPtr, uint32_t count) {
     Writer& real = *(Writer*)writerPtr;
     const Writer w0 = real;
@@ -434,6 +496,9 @@ void Parallel(uint8_t* em, void* writerPtr, uint32_t count) {
             memcmp(g_sink[lastWith], g_sink[kMaxChunks], 12) != 0)
             bad = "a different value in the dummy normal";
 
+        if (bad && strcmp(bad, "different vertex bytes") == 0)
+            LogVertexDifference(em, j, chunks, stageBase, aBase, n, L, vpp, count, w0);
+
         // The client's own answer goes out either way.
         memcpy(L.base, aBase, (size_t)n * L.stride);
         for (int k = 0; k < 4; ++k) real.p[k] = w0.p[k] + (size_t)n * w0.s[k];
@@ -502,7 +567,7 @@ bool BytesMatch(uintptr_t addr, const unsigned char* want, size_t n) {
 }
 
 bool ReserveRegions() {
-    for (int i = 0; i <= kMaxChunks; ++i) {
+    for (int i = 0; i <= kMaxChunks + 1; ++i) {
         void* r = VirtualAlloc(nullptr, kRegionBytes + 4096, MEM_RESERVE | MEM_TOP_DOWN, PAGE_NOACCESS);
         if (!r) return false;
         if (!VirtualAlloc(r, kRegionBytes, MEM_COMMIT, PAGE_READWRITE)) {

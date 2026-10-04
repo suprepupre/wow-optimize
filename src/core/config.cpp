@@ -861,7 +861,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptM2BatchCmpTransparent = GetPrivateProfileIntA("Graphics_Sound", "M2BatchCmpTransparent", 1, iniPath.c_str()) != 0;
         g_settings.OptM2BatchCmpSolid       = GetPrivateProfileIntA("Graphics_Sound", "M2BatchCmpSolid", 1, iniPath.c_str()) != 0;
         g_settings.OptParticleQuad         = GetPrivateProfileIntA("Graphics_Sound", "ParticleQuad", 0, iniPath.c_str()) != 0;
-        g_settings.OptParallelParticles    = GetPrivateProfileIntA("Graphics_Sound", "ParallelParticles", 1, iniPath.c_str()) != 0;
+        g_settings.OptParallelParticles    = GetPrivateProfileIntA("Graphics_Sound", "ParallelParticles", 0, iniPath.c_str()) != 0;
         g_settings.OptHorizonTestAABB      = GetPrivateProfileIntA("Graphics_Sound", "HorizonTestAABB", 1, iniPath.c_str()) != 0;
         g_settings.OptM2SkinProjection     = GetPrivateProfileIntA("Graphics_Sound", "M2SkinProjection", 0, iniPath.c_str()) != 0;
         g_settings.OptSStrHashFast         = GetPrivateProfileIntA("General", "SStrHashFast", 1, iniPath.c_str()) != 0;
