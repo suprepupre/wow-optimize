@@ -2774,7 +2774,9 @@ static int __cdecl Hooked_Math_Random(lua_State* L) {
 
         top->value.n = result;
         top->tt      = LUA_TNUMBER;
-        top->taint   = 0;
+        // lua_pushnumber stamps the running taint context on what it pushes; a zero
+        // here would hand an addon's tainted code an untainted number.
+        top->taint   = *(uint32_t*)ADDR_taint_global;
         SetStackTopFast(L, top + 1);
         g_mathRandomHits++;
         return 1;
