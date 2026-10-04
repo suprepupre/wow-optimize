@@ -40,7 +40,10 @@
 // That division is what makes reuse safe, and it was checked, not assumed:
 //
 //   - luaF_newproto (0x0085CF40) allocates 80 bytes and zeroes every field. It
-//     never touches dword_D4139C. A Proto carries no taint.
+//     never touches dword_D4139C. The Proto itself carries no taint, but its
+//     constants do: addk (0x00861F80) stores each with the taint current when it
+//     was compiled. The cache is keyed on that context for this reason; see
+//     TaintToken below.
 //   - luaF_newLclosure (0x0085CC90) allocates a fresh 32-byte taint block per
 //     closure and zeroes it, and writes the environment into cl+16.
 //   - f_parser stamps the pushed TValue with the taint current at push time.
@@ -118,6 +121,7 @@ constexpr uintptr_t kLuaYParser     = 0x00861AD0;  // Proto* (L, ZIO*, Mbuffer*,
 constexpr uintptr_t kLuaLLoadBuffer = 0x0084F860;  // int (L, buf, size, name)
 constexpr uintptr_t kGetSReader     = 0x0084F830;  // the reader luaL_loadbuffer installs
 constexpr uintptr_t kLuaPushValue   = 0x0084DE50;
+constexpr uintptr_t kTaintCell      = 0x00D4139C;  // dword_D4139C, the taint context the parser stamps constants with
 constexpr uintptr_t kLuaLRef        = 0x0084F6C0;
 
 constexpr int kRegistryIndex = -10000;
@@ -133,6 +137,8 @@ constexpr unsigned kZ_data   = 12;
 
 // Proto, from luaF_newproto at 0x0085CF40 (80 bytes, every field zeroed) and
 // open_func at 0x0085F410, which writes source at +36 and maxstacksize at +79.
+constexpr unsigned kP_k               = 12;
+constexpr unsigned kP_p               = 20;
 constexpr unsigned kP_code            = 16;
 constexpr unsigned kP_lineinfo        = 24;
 constexpr unsigned kP_source          = 36;
@@ -261,6 +267,8 @@ struct Entry {
     uint32_t      fpCode;
     uint32_t      fpLineinfo;
     uint32_t      fpSizecode;
+    // The taint context current when this chunk was compiled. See TaintToken.
+    uint32_t      taint;
 };
 
 // A recycled Proto is what the crash on 2026-08-22 was: the client faulted in
@@ -344,6 +352,8 @@ unsigned long g_stale = 0;
 // Entries dropped because the name string their Proto points at is not the one
 // the client's string table holds now. A drop, not a flush: see the hit path.
 unsigned long g_sourceMoved = 0;
+// Verified reuses whose constants' taint words differed from a fresh compile's.
+unsigned long g_taintDiffer = 0;
 unsigned long long g_bytesSaved = 0, g_bytesTooBig = 0;
 
 // What the cache saves, in time rather than in kilobytes.
@@ -378,14 +388,27 @@ struct Pending {
     const char* name;
     size_t      nameLen;
     void*       proto;
+    uint32_t    taint;
 };
-Pending g_pending = { false, 0, nullptr, 0, nullptr, 0, nullptr };
+Pending g_pending = { false, 0, nullptr, 0, nullptr, 0, nullptr, 0 };
 
 uint64_t Fnv1a(const void* d, size_t n, uint64_t h) {
     const unsigned char* p = (const unsigned char*)d;
     for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
     return h;
 }
+
+// The constants of a compiled chunk carry the taint context that was current when
+// it was compiled: addk (0x00861F80) stores each one with the word at dword_D4139C,
+// and LOADK hands that word on to the register and, when it is not zero, makes it the
+// running context. luaF_newproto zeroes the Proto and never reads the cell, which is
+// what the header above checked; the constants are written later, by the code
+// generator, and do carry it. A chunk first compiled while one addon was loading, and
+// served again to another addon or to the client's own secure code, would run with the
+// first one's taint. ProtosAgree compares the bytecode and the counts and not the
+// constants, so the verification could not have seen it. A chunk is therefore the same
+// chunk only when it was compiled under the same context.
+inline uint32_t TaintToken() { return *(volatile const uint32_t*)kTaintCell; }
 
 uint64_t KeyOf(const char* src, size_t srcLen, const char* name, size_t nameLen) {
     uint64_t h = Fnv1a(src, srcLen, 0xcbf29ce484222325ULL);
@@ -487,6 +510,35 @@ bool ProtosAgree(void* a, void* b, const char** what, bool* sourceMoved) {
     return true;
 }
 
+// The taint word of every constant, in the Proto and in the Protos nested in it. A
+// reuse is keyed on the context the chunk was compiled under, so a fresh compile in
+// the same context has to stamp the same words; this is the check that says it does,
+// where ProtosAgree compares the bytecode and the counts and never the constants.
+// Equal counts are assumed (ProtosAgree has already compared them at this level) and
+// are tested again for nested Protos.
+bool ConstantTaintsAgree(void* a, void* b, int depth) {
+    __try {
+        const uint32_t n = RD32(a, kP_sizek);
+        if (n != RD32(b, kP_sizek)) return false;
+        const char* ka = (const char*)RDP(a, kP_k);
+        const char* kb = (const char*)RDP(b, kP_k);
+        if (n && (!ka || !kb)) return false;
+        for (uint32_t i = 0; i < n; ++i)
+            if (RD32(ka + (size_t)i * 16, 12) != RD32(kb + (size_t)i * 16, 12)) return false;
+        const uint32_t np = RD32(a, kP_sizep);
+        if (np != RD32(b, kP_sizep)) return false;
+        if (np && depth >= 8) return true;
+        void* const* pa = (void* const*)RDP(a, kP_p);
+        void* const* pb = (void* const*)RDP(b, kP_p);
+        if (np && (!pa || !pb)) return false;
+        for (uint32_t i = 0; i < np; ++i)
+            if (!ConstantTaintsAgree(pa[i], pb[i], depth + 1)) return false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // Pulls the source out of the reader and decides what to do with this chunk.
 // Returns the cached Proto on a reuse that needs no check, or null to let the
 // client compile - with g_pending armed when the result is worth keeping.
@@ -540,11 +592,12 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
     }
     g_globalState = lG;
 
-    uint64_t key = KeyOf(src, srcLen, name, nameLen);
+    const uint32_t taint = TaintToken();
+    uint64_t key = KeyOf(src, srcLen, name, nameLen) ^ ((uint64_t)taint * 0xD6E8FEB86659FD93ULL);
     std::unordered_map<uint64_t, Entry>::iterator it = g_cache.find(key);
     if (it != g_cache.end()) {
         const Entry& e = it->second;
-        if (e.srcLen == srcLen && e.nameLen == nameLen &&
+        if (e.srcLen == srcLen && e.nameLen == nameLen && e.taint == taint &&
             memcmp(e.blob, src, srcLen) == 0 &&
             memcmp(e.blob + srcLen + 1, name, nameLen) == 0) {
 
@@ -596,6 +649,17 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
                     "for \"%s\" (%u bytes of source).",
                     what, name, (unsigned)srcLen);
                 Retire("a cached chunk did not match a fresh compile");
+                return fresh;
+            }
+            if (!ConstantTaintsAgree(e.proto, fresh, 0)) {
+                ++g_taintDiffer;
+                if (g_taintDiffer <= 3)
+                    Log("[ProtoCache] Dropped \"%s\": the stored Proto's constants carry "
+                        "different taint words from a fresh compile made under the same "
+                        "context. The rest of the cache is untouched.", name);
+                free(it->second.blob);
+                g_blobBytes -= (size_t)e.srcLen + e.nameLen + 2;
+                g_cache.erase(it);
                 return fresh;
             }
             if (sourceMoved) {
@@ -655,6 +719,7 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
                 g_pending.name    = name;
                 g_pending.nameLen = nameLen;
                 g_pending.proto   = use;
+                g_pending.taint   = taint;
             }
             return use;
         }
@@ -750,6 +815,7 @@ void* Classify(void* L, void* z, void* buff, const char* name, bool* checked) {
     g_pending.name    = name;
     g_pending.nameLen = nameLen;
     g_pending.proto   = nullptr;
+    g_pending.taint   = taint;
     return nullptr;
 }
 
@@ -874,6 +940,7 @@ int __cdecl Hooked_luaL_loadbuffer(void* L, const char* buf, size_t sz, const ch
                 e.fpCode     = RD32(g_pending.proto, kP_code);
                 e.fpLineinfo = RD32(g_pending.proto, kP_lineinfo);
                 e.fpSizecode = RD32(g_pending.proto, kP_sizecode);
+                e.taint      = g_pending.taint;
                 g_cache[g_pending.key] = e;
                 g_blobBytes += blobLen;
                 g_stored++;
@@ -1048,6 +1115,8 @@ void LogStats() {
             "before anything was reused.", g_diskServed, g_diskProved);
     }
 
+    Log("[ProtoCache] constant taint words: %lu checked reuse(s) agreed with a fresh compile, %lu differed.",
+        g_verified, g_taintDiffer);
     if (g_sourceMoved)
         Log("[ProtoCache]   %lu kept Proto(s) were dropped because the name "
             "string they point at is no longer the one the string table holds. "
