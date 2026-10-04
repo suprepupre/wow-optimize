@@ -873,6 +873,36 @@ static bool IsClientExtensionsProbe(DWORD code, uintptr_t at) {
     return false;
 }
 
+// Who was on the stack when a handled fault happened. A call through a bad function
+// pointer faults at the pointer and leaves the caller's return address at [ESP]; a
+// bad read leaves the faulting code's own caller further up. Words on the stack that
+// point into committed executable memory are listed with the allocation they sit in
+// and the offset from its base, which names the module without taking the loader
+// lock (VirtualQuery only, as the rest of this handler). Nearest first, at most
+// kCallers, from the first 128 words.
+static void LogFirstChanceCallers(const CONTEXT* ctx) {
+    if (!ctx) return;
+    static constexpr int kCallers = 6;
+    __try {
+        const uintptr_t* sp = (const uintptr_t*)ctx->Esp;
+        int shown = 0;
+        for (int i = 0; i < 128 && shown < kCallers; ++i) {
+            const uintptr_t v = sp[i];
+            if (v < 0x10000u) continue;
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((LPCVOID)v, &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
+            if (mbi.State != MEM_COMMIT) continue;
+            if (!(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) continue;
+            Log("!!!   stack[+0x%X] = 0x%08X  (allocation 0x%08X + 0x%X)", (unsigned)(i * 4), (unsigned)v,
+                (unsigned)(uintptr_t)mbi.AllocationBase, (unsigned)(v - (uintptr_t)mbi.AllocationBase));
+            ++shown;
+        }
+        if (shown == 0) Log("!!!   no word in the first 128 on the stack points into executable memory");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("!!!   the stack could not be read");
+    }
+}
+
 static LONG CALLBACK WowOpt_FirstChanceProbe(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -931,6 +961,7 @@ static LONG CALLBACK WowOpt_FirstChanceProbe(EXCEPTION_POINTERS* ep) {
         Log("!!! FIRST-CHANCE %s at 0x%08X TID=%lu - handled or not, it happened",
             ExceptionName(code), (unsigned)at, GetCurrentThreadId());
         LogAccessViolationDetail(ep->ExceptionRecord);
+        LogFirstChanceCallers(ep->ContextRecord);
         LogFlushImmediate();
     }
 
