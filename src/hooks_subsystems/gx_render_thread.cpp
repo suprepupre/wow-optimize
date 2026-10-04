@@ -178,6 +178,13 @@ uint64_t      g_ticksThrottle = 0;
 unsigned long g_clearFallbacks = 0;
 unsigned long g_presentFallbacks = 0;
 unsigned long g_consumerSleeps = 0;
+// What the render thread spent running commands, in time stamp counter ticks,
+// written by it alone and read by the report. A tick count is 64 bits and the
+// report is on another thread, so it is added with an interlocked add once per
+// batch and once per present, a few times a frame, not once per command.
+volatile LONG64 g_ticksBusy = 0;       // all commands, Present included
+volatile LONG64 g_ticksPresent = 0;    // Present alone: it waits for the display, which is not CPU work
+volatile LONG64 g_batches = 0;
 volatile HRESULT g_lastPresentHr = D3D_OK;
 uint64_t      g_tsc0 = 0;
 LARGE_INTEGER g_qpc0;
@@ -250,8 +257,10 @@ void Execute(CmdHdr* h) {
         break; }
     case OP_PRESENT: {
         CmdPresent* c = (CmdPresent*)h;
+        const uint64_t tp0 = __rdtsc();
         g_lastPresentHr = O<F_Present>(S_Present)(d, (c->flags & 1) ? &c->src : nullptr,
                                                    (c->flags & 2) ? &c->dst : nullptr, c->wnd, nullptr);
+        InterlockedExchangeAdd64(&g_ticksPresent, (LONG64)(__rdtsc() - tp0));
         GX_COMPILER_BARRIER();
         g_ring.framesConsumed = g_ring.framesConsumed + 1;
         SetEvent(g_ring.evFrame);
@@ -292,6 +301,7 @@ DWORD WINAPI RenderThreadProc(LPVOID) {
             continue;
         }
         unsigned n = 0;
+        const uint64_t tb0 = __rdtsc();
         while (rd != pub) {
             CmdHdr* h = (CmdHdr*)(R.base + (rd & kRingMask));
             __try {
@@ -306,6 +316,8 @@ DWORD WINAPI RenderThreadProc(LPVOID) {
         }
         GX_COMPILER_BARRIER();
         R.rd = rd;
+        InterlockedExchangeAdd64(&g_ticksBusy, (LONG64)(__rdtsc() - tb0));
+        InterlockedIncrement64(&g_batches);
     }
     return 0;
 }
@@ -1093,6 +1105,28 @@ void LogStats() {
         "(-1 ms: the run was too short to time.)",
         g_throttleWaits, toMs(g_ticksThrottle), g_drains, toMs(g_ticksDrain),
         g_waitsRingFull, toMs(g_ticksRingFull));
+    {
+        // The number GxRT exists for, from this session alone: Direct3D work the
+        // main thread no longer does, set against what it now waits for. Present
+        // is left out of the render thread's figure because it blocks for the
+        // display, and a thread blocked in Present is not doing work the main
+        // thread would have done. Queueing the commands is not subtracted: it is
+        // not measured, and it is small (a command is a few stores into the ring).
+        const double busy = toMs((uint64_t)(g_ticksBusy - g_ticksPresent));
+        const double present = toMs((uint64_t)g_ticksPresent);
+        const double waited = toMs(g_ticksThrottle) + toMs(g_ticksDrain) + toMs(g_ticksRingFull);
+        if (busy < 0.0 || g_presents == 0) {
+            Log("[GxRT]   work moved off the main thread: not measured, the run was too short to time.");
+        } else {
+            const double perFrame = busy / (double)g_presents;
+            const double waitFrame = waited / (double)g_presents;
+            Log("[GxRT]   the render thread ran commands for %.0f ms apart from Present (%.0f ms in Present, "
+                "waiting for the display): %.3f ms a frame of Direct3D work the main thread no longer does. "
+                "The main thread waited %.3f ms a frame for it. Difference, positive meaning saved: %.3f ms a "
+                "frame, before the cost of queueing, which is not measured. %lld batch(es) of commands.",
+                busy, present, perFrame, waitFrame, perFrame - waitFrame, (long long)g_batches);
+        }
+    }
     Log("[GxRT]   Clear with too many rectangles done in place: %lu. Present with a dirty region done in place: %lu.",
         g_clearFallbacks, g_presentFallbacks);
     Log("[GxRT]   %lu sync call(s) came from inside d3d9.dll and were let through without a drain; "
