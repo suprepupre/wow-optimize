@@ -210,7 +210,14 @@ __declspec(safebuffers) static inline int Fast_M2MeshPick(
         }
 
         if (!accept) {
-            if (z_height <= *bestHeight) {
+            // The client compares the interpolated height before it is stored as
+            // a float (fcom against the float in memory, then fstp dword), so the
+            // test is on the 53-bit value. Comparing the rounded float accepted a
+            // coplanar triangle whose height was a hair above the best so far and
+            // rounded to it, which handed back a different object with an equal
+            // stored height: the one disagreement in 3.1 million calls that
+            // retired this module.
+            if (z_height_dbl <= (double)*bestHeight) {
                 accept = true;
             }
         }
