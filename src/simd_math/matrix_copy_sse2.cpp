@@ -2219,9 +2219,10 @@ static inline float* Vec3InvScale_SSE2(float* this_vec, float s) {
 
 __declspec(noinline) static float* VerifyMatMulInPlace(float* self, void* edx, const float* other) {
     // Shadow verification
-    float client_m[16], our_m[16];
+    float client_m[16], our_m[16], our_pre[16];
     memcpy(client_m, self, sizeof(client_m));
     memcpy(our_m, self, sizeof(our_m));
+    memcpy(our_pre, self, sizeof(our_pre));
 
     __try {
         pOrigMatMulInPlace(client_m, nullptr, other);
@@ -2238,20 +2239,40 @@ __declspec(noinline) static float* VerifyMatMulInPlace(float* self, void* edx, c
         return self;
     }
 
+    // Bit for bit, except that two NaNs agree whatever their payloads: the x87
+    // unit answers a NaN operand with its own default NaN and the packed unit
+    // propagates the operand's payload, so a matrix with a NaN in it differs in
+    // bits and in nothing else. Anything else that differs is a disagreement.
     bool match = true;
+    int badAt = -1;
+    uint32_t badClient = 0, badOurs = 0;
     for (int i = 0; i < 16; ++i) {
         uint32_t cm, om;
         memcpy(&cm, &client_m[i], 4);
         memcpy(&om, &our_m[i], 4);
         if (cm != om) {
+            const bool bothNaN = (cm & 0x7F800000u) == 0x7F800000u && (cm & 0x007FFFFFu) != 0 &&
+                                 (om & 0x7F800000u) == 0x7F800000u && (om & 0x007FFFFFu) != 0;
+            if (bothNaN) continue;
             match = false;
+            badAt = i; badClient = cm; badOurs = om;
             break;
         }
     }
 
     if (!match) {
         InterlockedExchange(&g_matmul_ip_dead, 1);
-        Log("[MatrixSSE2] MatMulInPlace DISAGREED with client - retiring hook");
+        // What was multiplied, so the next report says why and not just that.
+        unsigned selfBits[16], otherBits[16];
+        for (int i = 0; i < 16; ++i) {
+            memcpy(&selfBits[i], &our_pre[i], 4);
+            memcpy(&otherBits[i], &other[i], 4);
+        }
+        Log("[MatrixSSE2] MatMulInPlace DISAGREED with client at element %d: client %08X, packed %08X "
+            "(self %08X %08X %08X %08X / %08X %08X %08X %08X ..., other %08X %08X %08X %08X / %08X %08X %08X %08X ...)"
+            " - retiring hook", badAt, badClient, badOurs,
+            selfBits[0], selfBits[1], selfBits[2], selfBits[3], selfBits[4], selfBits[5], selfBits[6], selfBits[7],
+            otherBits[0], otherBits[1], otherBits[2], otherBits[3], otherBits[4], otherBits[5], otherBits[6], otherBits[7]);
         memcpy(self, client_m, sizeof(client_m));
         return self;
     }
