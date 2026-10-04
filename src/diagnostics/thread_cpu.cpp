@@ -97,7 +97,11 @@ ULONGLONG PrevCpu(DWORD tid, bool* found) {
 
 } // namespace
 
-void Report() {
+// The work itself. Takes a snapshot of every thread in the system and opens each of this
+// process's, which cost 19.6 to 20.9 ms on the main thread in every periodic report of the
+// first logs that carried it ("slowest reporters": ThreadCpu::Report) - a pause the player
+// sees, five minutes apart, to read counters that need no particular thread.
+static void ReportNow() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap == INVALID_HANDLE_VALUE) {
         Log("[ThreadCpu] not measured: the thread list could not be read.");
@@ -191,6 +195,29 @@ void Report() {
                 (double)r.total100ns / 1e7, where, r.name[0] ? "  name: " : "", r.name);
         }
     }
+}
+
+namespace {
+volatile LONG g_running = 0;
+DWORD WINAPI ReportThread(LPVOID) {
+    ReportNow();
+    InterlockedExchange(&g_running, 0);
+    return 0;
+}
+} // namespace
+
+// Called from the periodic report on the main thread. Returns at once; the reading is done
+// by a short-lived thread, and a call that finds the last one still running is skipped
+// rather than queued (the next report is five minutes away).
+void Report() {
+    if (InterlockedCompareExchange(&g_running, 1, 0) != 0) return;
+    HANDLE h = CreateThread(nullptr, 64 * 1024, ReportThread, nullptr, 0, nullptr);
+    if (!h) {
+        InterlockedExchange(&g_running, 0);
+        Log("[ThreadCpu] not measured: the reading thread could not be created.");
+        return;
+    }
+    CloseHandle(h);
 }
 
 } // namespace ThreadCpu

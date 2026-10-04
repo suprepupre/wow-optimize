@@ -1,8 +1,9 @@
 // ============================================================================
 // Description: CPU time of every thread in the process, from the kernel's own
 //              per-thread counters, for the periodic report.
-// Safety & Threading: Called from the report thread. Opens each thread for
-//                     query access only and never suspends or touches one.
+// Safety & Threading: Report() is called from the periodic report and returns at once;
+//                     the reading runs on a short-lived thread of its own. It opens each
+//                     thread for query access only and never suspends or touches one.
 // ============================================================================
 
 #pragma once
