@@ -76,6 +76,13 @@
 extern "C" void Log(const char* fmt, ...);
 
 namespace AbTest {
+
+// Read by the inline fast paths in ab_test.h, so they live in the namespace and not
+// in the anonymous one below.
+bool     g_active    = false;
+bool     g_onNow     = true;
+uint32_t g_sampleSeq = 0;
+
 namespace {
 
 // Frame times are logarithmic and the histogram has to be too.
@@ -114,7 +121,6 @@ struct Phase {
     uint32_t stints    = 0;            // how many times this phase was entered
 };
 
-bool     g_active   = false;
 char     g_subject[32] = {};
 DWORD    g_periodMs = 20000;
 
@@ -129,7 +135,6 @@ DWORD    g_periodMs = 20000;
 constexpr int kMaxOffered = 96;
 constexpr int kMaxStats   = 32;
 
-bool     g_onNow    = true;
 bool     g_claimed  = false;    // some module answered to the configured name
 uint64_t g_standAside[kMaxStats] = {};   // hot-path calls each subject handed back
 
@@ -142,7 +147,6 @@ bool     g_bundle   = false;
 // counter because this is a hot path and a lock-prefixed increment there has
 // eaten whole optimizations in this project before.
 constexpr uint32_t kSampleMask = 255;
-uint32_t g_sampleSeq = 0;
 
 // A sample that spans a context switch or a hardware interrupt is not a
 // measurement of this function, and one of them is worth thousands of honest
@@ -454,20 +458,14 @@ bool DiagSubject(int index, const char** name) {
     return true;
 }
 
-bool StandAside() {
+bool StandAsideSlow() {
     if (g_onNow) return false;
     if (g_sweep) { ++g_sweepReached; return true; }
     ++g_standAside[g_rotIndex];
     return true;
 }
 
-unsigned long long TickIn() {
-    if (!g_active) return 0;
-    if ((++g_sampleSeq & kSampleMask) != 0) return 0;
-    return __rdtsc();
-}
-
-void TickOut(unsigned long long t) {
+void TickOutSlow(unsigned long long t) {
     if (!t) return;
     uint64_t d = __rdtsc() - t;
     if (d == 0 || d > kTickCeiling) { ++g_ticksDiscarded; return; }

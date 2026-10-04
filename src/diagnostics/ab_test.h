@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <intrin.h>
 
 // Alternates a feature on and off inside one session and reports the frame times
 // each way. See ab_test.cpp for why comparing two sessions cannot work here.
@@ -31,7 +32,14 @@ bool IsSubject(const char* name, bool* flag);
 // For the hot path of the module that answered true above: true means stand
 // aside and let the client's own code run, because the test is in an OFF stint.
 // Counts the call, so the report can say the subject was actually reached.
-bool StandAside();
+//
+// The two-line answer for the ON half is inline, because a replacement that runs
+// billions of times in a session paid a call for it each time: the harness was
+// 3.85% of one profiled session's executing time, in StandAside, TickIn and
+// TickOut alone, and only in a session that was measuring.
+extern bool g_onNow;
+bool StandAsideSlow();
+inline bool StandAside() { return g_onNow ? false : StandAsideSlow(); }
 
 // Timing the subject's own work, for features too small for frame time to see.
 //
@@ -44,8 +52,16 @@ bool StandAside();
 // TickIn returns 0 on the calls it is not sampling, and TickOut does nothing
 // with a 0. One call in 256 is sampled, so a function running thousands of times
 // a frame still yields thousands of samples an hour at no measurable cost.
-unsigned long long TickIn();
-void TickOut(unsigned long long t);
+extern bool g_active;
+extern unsigned int g_sampleSeq;
+// One call in 256 is sampled; the mask is 255 in ab_test.cpp (kSampleMask).
+inline unsigned long long TickIn() {
+    if (!g_active) return 0;
+    if ((++g_sampleSeq & 255u) != 0) return 0;
+    return __rdtsc();
+}
+void TickOutSlow(unsigned long long t);
+inline void TickOut(unsigned long long t) { if (t) TickOutSlow(t); }
 
 // Re-running one call with chosen replacements standing aside. For a caller that
 // has seen a result it doubts and wants to know which replacement produced it:
