@@ -97,6 +97,7 @@
 #include "ab_test.h"
 #include "session_verdict.h"
 #include "self_bench.h"
+#include "anim_track_census.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -259,6 +260,8 @@ void __cdecl Hooked_VecTrackBody(void* obj, void* state, void* track,
         orig_VecTrack(obj, state, track, out, defVec);
         return;
     }
+    if (AnimTrackCensus::g_on)
+        AnimTrackCensus::Observe(AnimTrackCensus::kVec3, obj, (const uint8_t*)state, (const uint8_t*)track, defVec);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         uint32_t saved[5], theirs[5];

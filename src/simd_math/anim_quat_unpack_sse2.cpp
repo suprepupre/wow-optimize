@@ -143,6 +143,7 @@
 #include "ab_test.h"
 #include "session_verdict.h"
 #include "self_bench.h"
+#include "anim_track_census.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -319,6 +320,8 @@ void __cdecl Hooked_TrackQuatBody(void* obj, void* state, void* track,
         orig_TrackQuat(obj, state, track, out, defQuat);
         return;
     }
+    if (AnimTrackCensus::g_on)
+        AnimTrackCensus::Observe(AnimTrackCensus::kQuat, obj, (const uint8_t*)state, (const uint8_t*)track, defQuat);
 
     if (!g_armed || (g_calls & kResampleMask) == 0) {
         uint32_t saved[6], theirs[6];

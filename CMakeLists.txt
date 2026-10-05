@@ -148,6 +148,8 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/strncmp_sse2.h
     src/diagnostics/anim_census.cpp
     src/diagnostics/anim_census.h
+    src/diagnostics/anim_track_census.cpp
+    src/diagnostics/anim_track_census.h
     src/diagnostics/crash_dumper.cpp
     src/hooks_subsystems/vertex_fmt_inline.cpp
     src/hooks_subsystems/objmgr_find_fast.cpp

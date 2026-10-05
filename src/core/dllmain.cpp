@@ -125,6 +125,7 @@
 #include "runtime_vm/lua_hget_dispatch.h"
 #include "runtime_vm/lua_pool_fast.h"
 #include "anim_census.h"
+#include "anim_track_census.h"
 #include "net_diag.h"
 #include "../simd_math/horizon_occlusion_sse2.h"
 #include "lua_getstr_inline.h"
@@ -5958,6 +5959,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("CameraWatch::LogStats", CameraWatch::LogStats());
     STAT_TIME("AbTest::LogStats", AbTest::LogStats());
     STAT_TIME("AnimCensus::LogStats", AnimCensus::LogStats());
+    STAT_TIME("AnimTrackCensus::LogStats", AnimTrackCensus::LogStats());
     STAT_TIME("PredictivePrefetch::LogStats", PredictivePrefetch::LogStats());
     STAT_TIME("TickListPrefetch::LogStats", TickListPrefetch::LogStats());
     STAT_TIME("LuaTableCensus::LogStats", LuaTableCensus::LogStats());
@@ -9675,6 +9677,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     if (Config::g_settings.OptTextureUnloadDelay) TextureUnloadDelay::Init();
     NetDiag::Init();
     AnimCensus::Init();
+    AnimTrackCensus::Init();
     HorizonOcclusion::Init();
     QualityGovernor::Init();
     if (Config::g_settings.OptSpellEffectCulling) SpellEffectCulling::Init();

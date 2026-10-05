@@ -653,6 +653,7 @@ namespace Config {
         // whether animation level-of-detail is worth building, and is meant to
         // answer that in one session and be switched off again.
         bool OptAnimCensus = false;
+        bool OptAnimTrackCensus = false;
         // SSE2 rasterisation for the terrain horizon builder at 0x0078F6A0,
         // 2.46% of main-thread execution in a tester's profile. Off by default
         // until a log shows the startup verification passing: it replaces a

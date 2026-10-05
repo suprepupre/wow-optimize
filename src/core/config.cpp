@@ -203,6 +203,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "M2AnimReuse", &Settings::OptM2AnimReuse },
     { "UI_Lua", "LuaAllocCensus", &Settings::OptLuaAllocCensus },
     { "Graphics_Sound", "AnimCensus", &Settings::OptAnimCensus },
+    { "Graphics_Sound", "AnimTrackCensus", &Settings::OptAnimTrackCensus },
     { "Graphics_Sound", "HorizonOcclusionSse2", &Settings::OptHorizonOcclusionSse2 },
     { "Combat_Net", "NetDiag", &Settings::OptNetDiag },
     { "General", "CrtFreeMsize", &Settings::OptCrtFreeMsize },
@@ -836,6 +837,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptM2AnimReuse  = GetPrivateProfileIntA("Graphics_Sound", "M2AnimReuse", 0, iniPath.c_str()) != 0;
         g_settings.OptLuaAllocCensus = GetPrivateProfileIntA("UI_Lua", "LuaAllocCensus", 0, iniPath.c_str()) != 0;
         g_settings.OptAnimCensus = GetPrivateProfileIntA("Graphics_Sound", "AnimCensus", 0, iniPath.c_str()) != 0;
+        g_settings.OptAnimTrackCensus = GetPrivateProfileIntA("Graphics_Sound", "AnimTrackCensus", 0, iniPath.c_str()) != 0;
         g_settings.OptHorizonOcclusionSse2 = GetPrivateProfileIntA("Graphics_Sound", "HorizonOcclusionSse2", 1, iniPath.c_str()) != 0;
         g_settings.OptNetDiag = GetPrivateProfileIntA("Combat_Net", "NetDiag", 1, iniPath.c_str()) != 0;
         g_settings.OptCrtFreeMsize = GetPrivateProfileIntA("General", "CrtFreeMsize", 1, iniPath.c_str()) != 0;
