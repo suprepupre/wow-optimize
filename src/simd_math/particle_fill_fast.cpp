@@ -161,7 +161,8 @@ enum Result { kEarly = 0, kEmitted = 1, kDecline = 2 };
 unsigned long long g_calls = 0;
 unsigned long long g_unsupported = 0;
 unsigned long long g_other = 0;       // other threads, dead, or an A/B control half
-unsigned long long g_declined = 0;    // NaN in the answer, or a stride the check cannot hold
+unsigned long long g_declined = 0;    // handed back, of which the three below
+unsigned long long g_declNaN = 0, g_declAngle = 0, g_declStride = 0, g_declDevice = 0;
 unsigned long long g_early = 0;
 unsigned long long g_answered[3] = {};
 unsigned long      g_verified[3] = {};
@@ -213,7 +214,7 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     if (kind == Kind::Spin) ((SpinFn)kSpinFn)(em, nullptr, particle, &rot0, &rate);
 
     const char* device = *(const char* const*)kDevicePtr;
-    if (!device) return kDecline;
+    if (!device) { ++g_declDevice; return kDecline; }
     if (*(const int32_t*)(device + kDeviceSwap) == 1) e.colour = SwapRedBlue(e.colour);
 
     Frame f;
@@ -232,13 +233,13 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
         const float angle = SpinAngle(particle, (uintptr_t)particle, flags, rate, rot0);
         // x87 and SSE2 keep different NaN payloads, and the sign of one differs after a
         // negation; the client's answer is the only one to give for a NaN angle.
-        if (angle != angle) return kDecline;
+        if (angle != angle) { ++g_declAngle; return kDecline; }
         ((SinCosFn)kSinCosFn)(angle, &f.sinv, &f.cosv);
         BuildSpin(em, f, cell, &q);
         break;
     }
     }
-    if (!AllFinite(q)) return kDecline;
+    if (!AllFinite(q)) { ++g_declNaN; return kDecline; }
 
     Commit(q, k, box, s);
     return kEmitted;
@@ -310,9 +311,12 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
     const Constants k = Client();
     const int ki = (int)kind - 1;
 
+    // A stride of zero is legal (a stream without normals writes every vertex to one dummy
+    // location, and both sides write the same bytes there in the same order); a negative one
+    // or one past the private buffers cannot be held.
     for (int i = 0; i < 4; ++i)
-        if (vb->stride[i] < kElemBytes[i] || vb->stride[i] > kMaxStride) {
-            ++g_declined;
+        if (vb->stride[i] < 0 || vb->stride[i] > kMaxStride) {
+            ++g_declined; ++g_declStride;
             return g_orig(em, edx, particle, vb);
         }
 
@@ -443,10 +447,12 @@ void LogStats() {
     }
     Log("[ParticleFillFast] %llu call(s): %llu answered here (%llu flat, %llu axes, %llu spin), "
         "%llu skipped by the client's own test, %llu of an emitter kind this does not do, %llu "
-        "handed back (a NaN in the answer, or a stride the check cannot hold), %llu from another "
-        "thread, after a retirement or in the A/B control half. Plain counters, lower bounds.",
+        "handed back (%llu a NaN in the answer, %llu a NaN spin angle, %llu a stride the check "
+        "cannot hold, %llu no device object), %llu from another thread, after a retirement or in "
+        "the A/B control half. Plain counters, lower bounds.",
         g_calls, g_answered[0] + g_answered[1] + g_answered[2], g_answered[0], g_answered[1],
-        g_answered[2], g_early, g_unsupported, g_declined, g_other);
+        g_answered[2], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
+        g_declDevice, g_other);
     if (g_mismatches) {
         Log("[ParticleFillFast]   DISABLED after a difference from the client's own output; the "
             "line that says which is earlier in this log.");
