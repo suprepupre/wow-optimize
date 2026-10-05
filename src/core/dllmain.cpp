@@ -113,6 +113,7 @@
 #include "particle_track_eval_sse2.h"
 #include "particle_quad_sse2.h"
 #include "particle_fill_fast.h"
+#include "../hooks_subsystems/particle_loop_prefetch.h"
 #include "parallel_particles.h"
 #include "shader_const_dedup_sse2.h"
 #include "batch_colour_convert.h"
@@ -5879,6 +5880,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("ParticleQuad::LogStats", ParticleQuad::LogStats());
     STAT_TIME("ParallelParticles::LogStats", ParallelParticles::LogStats());
     STAT_TIME("ParticleFillFast::LogStats", ParticleFillFast::LogStats());
+    STAT_TIME("ParticleLoopPrefetch::LogStats", ParticleLoopPrefetch::LogStats());
     STAT_TIME("FloorSplit::LogStats", FloorSplit::LogStats());
     STAT_TIME("SkyCloudTexels::LogStats", SkyCloudTexels::LogStats());
     STAT_TIME("FrustumAabb::LogStats", FrustumAabb::LogStats());
@@ -8619,6 +8621,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     ParticleQuad::Init();
     ParallelParticles::Init();
     ParticleFillFast::Init();
+    ParticleLoopPrefetch::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST
@@ -11646,6 +11649,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             ParticleQuad::Shutdown();
             ParallelParticles::Shutdown();
             ParticleFillFast::Shutdown();
+            ParticleLoopPrefetch::Shutdown();
             LuaVmFast::Shutdown();
             CollisionRayOutcode::Shutdown();
             RayTriangle::Shutdown();
