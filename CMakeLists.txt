@@ -553,6 +553,9 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/m2_batch_cmp_solid.h
     src/simd_math/particle_quad_sse2.cpp
     src/simd_math/particle_quad_sse2.h
+    src/simd_math/particle_fill_fast.cpp
+    src/simd_math/particle_fill_fast.h
+    src/simd_math/particle_fill_model.h
     src/hooks_subsystems/parallel_particles.cpp
     src/hooks_subsystems/parallel_particles.h
     src/simd_math/horizon_test_sse2.cpp

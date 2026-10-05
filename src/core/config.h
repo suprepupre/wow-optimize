@@ -689,6 +689,7 @@ namespace Config {
         bool OptM2BatchCmpSolid = true;
         bool OptParticleQuad = false;
         bool OptParallelParticles = false;
+        bool OptParticleFillFast = false;
         bool OptHorizonTestAABB = true;
         bool OptM2SkinProjection = false;
         bool OptSStrHashFast = true;
