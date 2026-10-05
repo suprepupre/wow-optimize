@@ -8,6 +8,7 @@
 #include "matrix_copy_sse2.h"
 #include "ab_test.h"
 #include "sampling_profiler.h"
+#include "session_verdict.h"
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -225,25 +226,82 @@ static float* __fastcall HookMatrixIdentity(float* self, void* edx) {
 // asking players to watch for artifacts.
 // The arithmetic on its own, so the self-test can exercise exactly the code the
 // hook runs rather than a second copy of it that might drift from it.
+// What the packed form above this used to be, and why it is not any more.
+//
+// It accumulated the four products of every element in the order 0 1 2 3 and was described as
+// bit-identical to the client. The self-test that said so compared with a tolerance of 1e-5 and
+// its random matrices almost never make a sum of four products round differently when the order
+// changes. The client adds them in a different order for every one of the sixteen elements, and
+// on inputs built so that a sum cancels the two differed in one matrix in a thousand, by one
+// unit in the last place (field log 2026-10-05: client 31DEA749, packed 31DEA748 at element 9 of
+// the in-place multiply, which calls this). Measured against the client's x87 sequence over
+// twenty million matrices, half of them built to cancel: the old order differed in 21031, this
+// one in none.
+//
+// out = A * B in the order sub_4C1F00 adds its products, read from the disassembly. Element
+// (row, column) is A[row][k0]*B[k0][column] + A[row][k1]*B[k1][column], then each of the next
+// two products added onto the running sum, with (k0 k1 k2 k3) by element:
+//
+//     row 0   2130   2103   1302   2013
+//     row 1   1230   1230   3210   1320
+//     row 2   1230   1320   3210   1320
+//     row 3   1230   1320   3210   1320
+//
+// A product of two floats is exact in a double and each addition rounds once at 53 bits, which
+// is what the client's x87 does here, so the order is the whole of the exactness. A fixed order
+// of 0 1 2 3 agreed with the client on four thousand random matrices and differed on one in a
+// thousand of those built so that a sum cancels.
+//
+// Rows 2 and 3 share an order in every column and are computed as the two lanes of one register;
+// the first two elements of row 1 share one and are the two lanes of another. The other ten
+// are scalar, each in its own order.
+#define MAT_PM(r, k, c) ((double)a[(r) * 4 + (k)] * (double)b[(k) * 4 + (c)])
+#define MAT_SCALAR_SUM(r, c, k0, k1, k2, k3) \
+    (((MAT_PM(r, k0, c) + MAT_PM(r, k1, c)) + MAT_PM(r, k2, c)) + MAT_PM(r, k3, c))
+
+static inline __m128d MatWidenTwo(const float* p) {
+    return _mm_cvtps_pd(_mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)p)));
+}
+
+// Two lanes, one chain: ((p0 + p1) + p2) + p3 in the given order, both lanes the same order.
+#define MAT_LANE_SUM(A, B, k0, k1, k2, k3) \
+    _mm_add_pd(_mm_add_pd(_mm_add_pd(_mm_mul_pd(A[k0], B[k0]), _mm_mul_pd(A[k1], B[k1])), \
+                          _mm_mul_pd(A[k2], B[k2])), _mm_mul_pd(A[k3], B[k3]))
+
 static inline void MatMul4x4_PackedDouble(float* out, const float* a, const float* b) {
-    // Each row of B widened to two double lanes: columns 0-1, then 2-3.
-    __m128d brow[4][2];
-    for (int k = 0; k < 4; ++k) {
-        __m128 row = _mm_loadu_ps(b + k * 4);
-        brow[k][0] = _mm_cvtps_pd(row);
-        brow[k][1] = _mm_cvtps_pd(_mm_movehl_ps(row, row));
-    }
-    for (int row = 0; row < 4; ++row) {
-        __m128d acc0 = _mm_setzero_pd();
-        __m128d acc1 = _mm_setzero_pd();
-        for (int k = 0; k < 4; ++k) {
-            __m128d av = _mm_set1_pd((double)a[row * 4 + k]);
-            acc0 = _mm_add_pd(acc0, _mm_mul_pd(av, brow[k][0]));
-            acc1 = _mm_add_pd(acc1, _mm_mul_pd(av, brow[k][1]));
-        }
-        _mm_storeu_ps(out + row * 4,
-                      _mm_movelh_ps(_mm_cvtpd_ps(acc0), _mm_cvtpd_ps(acc1)));
-    }
+    float t[16];
+
+    // Rows 2 and 3, lane 0 and lane 1.
+    __m128d A23[4], B23[4][4];
+    for (int k = 0; k < 4; ++k) A23[k] = _mm_set_pd((double)a[12 + k], (double)a[8 + k]);
+    for (int c = 0; c < 4; ++c)
+        for (int k = 0; k < 4; ++k) B23[c][k] = _mm_set1_pd((double)b[k * 4 + c]);
+    __m128d bc0[4], bc1[4], bc2[4], bc3[4];
+    for (int k = 0; k < 4; ++k) { bc0[k] = B23[0][k]; bc1[k] = B23[1][k]; bc2[k] = B23[2][k]; bc3[k] = B23[3][k]; }
+    const __m128d s20 = MAT_LANE_SUM(A23, bc0, 1, 2, 3, 0);
+    const __m128d s21 = MAT_LANE_SUM(A23, bc1, 1, 3, 2, 0);
+    const __m128d s22 = MAT_LANE_SUM(A23, bc2, 3, 2, 1, 0);
+    const __m128d s23 = MAT_LANE_SUM(A23, bc3, 1, 3, 2, 0);
+    t[8]  = (float)_mm_cvtsd_f64(s20); t[12] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(s20, s20));
+    t[9]  = (float)_mm_cvtsd_f64(s21); t[13] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(s21, s21));
+    t[10] = (float)_mm_cvtsd_f64(s22); t[14] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(s22, s22));
+    t[11] = (float)_mm_cvtsd_f64(s23); t[15] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(s23, s23));
+
+    // Row 1, columns 0 and 1 together.
+    __m128d A1[4], B01[4];
+    for (int k = 0; k < 4; ++k) { A1[k] = _mm_set1_pd((double)a[4 + k]); B01[k] = MatWidenTwo(b + k * 4); }
+    const __m128d s1 = MAT_LANE_SUM(A1, B01, 1, 2, 3, 0);
+    t[4] = (float)_mm_cvtsd_f64(s1);
+    t[5] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(s1, s1));
+
+    // The rest one at a time.
+    t[6] = (float)MAT_SCALAR_SUM(1, 2, 3, 2, 1, 0);
+    t[7] = (float)MAT_SCALAR_SUM(1, 3, 1, 3, 2, 0);
+    t[0] = (float)MAT_SCALAR_SUM(0, 0, 2, 1, 3, 0);
+    t[1] = (float)MAT_SCALAR_SUM(0, 1, 2, 1, 0, 3);
+    t[2] = (float)MAT_SCALAR_SUM(0, 2, 1, 3, 0, 2);
+    t[3] = (float)MAT_SCALAR_SUM(0, 3, 2, 0, 1, 3);
+    memcpy(out, t, sizeof(t));
 }
 
 // Run the client's own routine beside ours on the real binary before replacing
@@ -257,6 +315,7 @@ static bool SelfTestMatrixMultiply() {
     const int CASES = 4096;
     unsigned seed = 0x9E3779B9u;
     double worst = 0.0;
+    int mismatches = 0;
     float lhs[16], rhs[16], theirs[16], ours[16];
 
     for (int c = 0; c < CASES; ++c) {
@@ -270,6 +329,20 @@ static bool SelfTestMatrixMultiply() {
             seed = seed * 1103515245u + 12345u;
             rhs[i] = (((float)(int)(seed >> 16) / 32768.0f) - 1.0f) * scale;
         }
+        // Half the cases carry one element whose four products cancel to a few units in the
+        // last place, because that is where the order of the additions is visible in a float.
+        if (c & 4) {
+            const int row = (c >> 3) & 3, col = (c >> 5) & 3, kz = (c >> 7) & 3;
+            double sum = 0.0;
+            for (int k = 0; k < 4; ++k)
+                if (k != kz) sum += (double)lhs[row * 4 + k] * (double)rhs[k * 4 + col];
+            if (lhs[row * 4 + kz] != 0.0f) {
+                float v = (float)(-sum / (double)lhs[row * 4 + kz]);
+                for (int n = (int)((seed >> 8) % 5) - 2; n > 0; --n) v = nextafterf(v, 1e30f);
+                for (int n = (int)((seed >> 8) % 5) - 2; n < 0; ++n) v = nextafterf(v, -1e30f);
+                rhs[kz * 4 + col] = v;
+            }
+        }
 
         __try {
             original(theirs, lhs, rhs);
@@ -279,6 +352,7 @@ static bool SelfTestMatrixMultiply() {
         }
         MatMul4x4_PackedDouble(ours, lhs, rhs);
 
+        if (memcmp(theirs, ours, sizeof(theirs)) != 0) ++mismatches;
         for (int i = 0; i < 16; ++i) {
             float d = theirs[i] - ours[i];
             if (d < 0.0f) d = -d;
@@ -288,14 +362,31 @@ static bool SelfTestMatrixMultiply() {
         }
     }
 
-    if (worst > 1e-5) {
-        Log("[MatrixSSE2] Self-test FAILED: worst deviation %.3e over %d random "
-            "pairs - not hooking", worst, CASES);
+    if (mismatches != 0 || worst > 1e-5) {
+        Log("[MatrixSSE2] Self-test FAILED: %d of %d pairs differed from the client, worst "
+            "deviation %.3e - not hooking", mismatches, CASES, worst);
         return false;
     }
     Log("[MatrixSSE2] Self-test passed %d random pairs against the client's own "
         "routine, worst deviation %.3e", CASES, worst);
     return true;
+}
+
+volatile LONG g_matDead = 0;
+unsigned long g_matChecked = 0;
+unsigned long g_matAliased = 0;
+
+// Out of line: the formatting buffer must not sit in the hot function's frame.
+__declspec(noinline) static void RetireMatMul(const float* mine, const float* theirs) {
+    int at = 0;
+    while (at < 16 && memcmp(&mine[at], &theirs[at], 4) == 0) ++at;
+    InterlockedExchange(&g_matDead, 1);
+    InterlockedExchange(&g_matArmed, 0);
+    uint32_t m = 0, t = 0;
+    if (at < 16) { memcpy(&m, &mine[at], 4); memcpy(&t, &theirs[at], 4); }
+    Log("[MatrixSSE2] the multiply DISAGREED with the client at element %d: client %08X, this %08X. "
+        "Every multiply is the client's own from here on.", at, t, m);
+    Verdict::Add(Verdict::Bad, "the matrix multiply disagreed with the client and retired itself");
 }
 
 // The multiply's guarded probe, kept out of line for the same reason as the
@@ -337,16 +428,44 @@ static float* __cdecl HookMatrixMultiplyBody(float* result, float* a, float* b) 
     uintptr_t r = (uintptr_t)result, pa = (uintptr_t)a, pb = (uintptr_t)b;
     if (r > 0x10000 && r < 0xFFE00000 &&
         pa > 0x10000 && pa < 0xFFE00000 &&
-        pb > 0x10000 && pb < 0xFFE00000) {
+        pb > 0x10000 && pb < 0xFFE00000 && !g_matDead) {
+        // The client writes each element as it finishes it, so a result that is also an
+        // input is overwritten while later elements still read it. Computing the whole
+        // product first would give a different, and correct, matrix. Whatever the client
+        // does there is the answer, so those calls are its own.
+        if (r == pa || r == pb) {
+            ++g_matAliased;
+            return pOrigMatMul(result, a, b);
+        }
         if (g_matArmed) {
             // No exception frame and no stack cookie on this path.
             float out_val[16];
             MatMul4x4_PackedDouble(out_val, a, b);
             _ReadWriteBarrier();
+            // One call in 65536 also goes to the client and the two are compared bit for bit.
+            if ((g_matmul_calls & 0xFFFFu) == 0) {
+                float theirs[16];
+                pOrigMatMul(theirs, a, b);
+                if (memcmp(theirs, out_val, sizeof(theirs)) != 0) {
+                    RetireMatMul(out_val, theirs);
+                    memcpy(result, theirs, sizeof(theirs));
+                    return result;
+                }
+                ++g_matChecked;
+            }
             memcpy(result, out_val, 16 * sizeof(float));
             return result;
         }
         if (MultiplyGuarded(result, a, b)) {
+            // While proving, every call is compared with the client's as well.
+            float theirs[16];
+            pOrigMatMul(theirs, a, b);
+            if (memcmp(theirs, result, sizeof(theirs)) != 0) {
+                RetireMatMul(result, theirs);
+                memcpy(result, theirs, sizeof(theirs));
+                return result;
+            }
+            ++g_matChecked;
             if (++g_matProved >= kMatProve && g_matFaults == 0)
                 InterlockedExchange(&g_matArmed, 1);
             return result;
@@ -3512,6 +3631,12 @@ void MatrixCopySSE2_LogStats(void) {
         g_matProved, g_matFaults,
         g_matArmed ? "armed" : (g_matFaults ? "held on by a catch"
                                             : "still proving"));
+    Log("[MatrixSSE2]   multiply against the client: %lu call(s) compared bit for bit (every one "
+        "while proving, then one in 65536), %lu whose result was also an input and so were left "
+        "to the client; %s. Plain counters, lower bounds.",
+        g_matChecked, g_matAliased,
+        g_matDead ? "DISAGREED once and retired, the line that says where is earlier in this log"
+                  : "no difference seen");
     // The same guard on the vector normalise, which a tester profile puts at
     // 1.89% of executing time on its own.
     Log("[MatrixSSE2]   normalise guard: %lu call(s) ran under it, it caught %lu, "
