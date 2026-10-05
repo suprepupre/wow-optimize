@@ -142,11 +142,17 @@ struct Frame {
     float    sinv, cosv;      // Spin only
 };
 
+// Four corners. Positions are kept twice: as the doubles the client's register holds, which the
+// bounding box is compared against, and as the floats it stores. x and y travel as a pair in one
+// register (lane 0, lane 1) because every operation on them is the same operation.
 struct Quad {
-    double   X[4], Y[4], Z[4];     // as the client holds them before they go out as floats
-    float    x[4], y[4], z[4];
-    float    u[4], v[4];
+    __m128d  xy[4];
+    double   zd[4];
+    __m128   pos[4];      // x, y as floats in lanes 0 and 1
+    float    zf[4];
+    __m128   uv[4];       // u, v as floats in lanes 0 and 1
     uint32_t colour;
+    bool     zSame;       // the four z are one value
 };
 
 // 0x97BFF1..0x97C02D: where the tile sits in texture space.
@@ -169,49 +175,70 @@ inline Cell CellOrigin(const char* em, int32_t tile) {
 inline bool AllFinite(const Quad& q) {
     // A NaN in x87 and in SSE2 keeps different payloads when two of them meet; the
     // client's answer is the only one to give for those.
-    bool bad = false;
-    for (int i = 0; i < 4; ++i)
-        bad |= (q.x[i] != q.x[i]) | (q.y[i] != q.y[i]) | (q.z[i] != q.z[i]) |
-               (q.u[i] != q.u[i]) | (q.v[i] != q.v[i]);
-    return !bad;
+    __m128 bad = _mm_setzero_ps();
+    for (int i = 0; i < 4; ++i) {
+        bad = _mm_or_ps(bad, _mm_cmpunord_ps(q.pos[i], q.pos[i]));
+        bad = _mm_or_ps(bad, _mm_cmpunord_ps(q.uv[i], q.uv[i]));
+    }
+    if ((_mm_movemask_ps(bad) & 3) != 0) return false;
+    for (int i = 0; i < (q.zSame ? 1 : 4); ++i)
+        if (q.zf[i] != q.zf[i]) return false;
+    return true;
+}
+
+inline __m128d Pair(double lo, double hi) { return _mm_set_pd(hi, lo); }
+inline __m128d WidenPair(const float* p) {
+    return _mm_cvtps_pd(_mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)p)));
 }
 
 // 0x97C444: no spin, corners along one point. Four trips round the loop at 0x97C44A.
+// x = cx*w + px and y = cy*h + py, u = cu*du + u0, v = cv*dv + v0: a product of two floats is
+// exact in a double and the sum is rounded once, which is what the packed operations do.
 inline void BuildFlat(const char* em, const Constants& k, const Frame& f, const Cell& c, Quad* q) {
-    const double w = f.w, h = f.h;
-    const double du = Rd<float>(em, kOffDu), dv = Rd<float>(em, kOffDv);
+    const __m128d wh   = Pair(f.w, f.h);
+    const __m128d pxy  = Pair(f.px, f.py);
+    const __m128d dudv = Pair(Rd<float>(em, kOffDu), Rd<float>(em, kOffDv));
+    const __m128d uv0  = Pair(c.u0d, c.v0d);
     for (int i = 0; i < 4; ++i) {
-        const double X = (double)k.corner[2 * i] * w + (double)f.px;
-        const double Y = (double)k.corner[2 * i + 1] * h + (double)f.py;
-        q->X[i] = X; q->Y[i] = Y; q->Z[i] = (double)f.pz;
-        q->x[i] = (float)X; q->y[i] = (float)Y; q->z[i] = f.pz;
-        q->u[i] = (float)((double)k.uvCorner[2 * i] * du + c.u0d);
-        q->v[i] = (float)((double)k.uvCorner[2 * i + 1] * dv + c.v0d);
+        const __m128d xy = _mm_add_pd(_mm_mul_pd(WidenPair(k.corner + 2 * i), wh), pxy);
+        q->xy[i]  = xy;
+        q->pos[i] = _mm_cvtpd_ps(xy);
+        q->zd[i]  = (double)f.pz;
+        q->zf[i]  = f.pz;
+        q->uv[i]  = _mm_cvtpd_ps(_mm_add_pd(_mm_mul_pd(WidenPair(k.uvCorner + 2 * i), dudv), uv0));
     }
     q->colour = f.colour;
+    q->zSame = true;
 }
 
 // 0x97C2BF: no spin, corners placed along two axes.
+//   s0 = a9c*cyh + cxw*a90,  s1 = cyh*aA0 + cxw*a94,  s2 = cyh*aA4 + cxw*a98
 inline void BuildAxes(const char* em, const Constants& k, const Frame& f, const Cell& c, Quad* q) {
-    const double w = f.w, h = f.h;
-    const double du = Rd<float>(em, kOffDu), dv = Rd<float>(em, kOffDv);
-    const double a90 = k.axes[0], a94 = k.axes[1], a98 = k.axes[2];
-    const double a9c = k.axes[3], aA0 = k.axes[4], aA4 = k.axes[5];
+    const __m128d wh    = Pair(f.w, f.h);
+    const __m128d pxy   = Pair(f.px, f.py);
+    const __m128d dudv  = Pair(Rd<float>(em, kOffDu), Rd<float>(em, kOffDv));
+    const __m128d uv0   = Pair(c.u0d, (double)c.v0f);        // the stored float v, not the double
+    const __m128d cyRow = Pair(k.axes[3], k.axes[4]);        // a9c, aA0
+    const __m128d cxRow = Pair(k.axes[0], k.axes[1]);        // a90, a94
+    const __m128d aA4   = _mm_set_sd(k.axes[5]);
+    const __m128d a98   = _mm_set_sd(k.axes[2]);
+    const __m128d pz    = _mm_set_sd(f.pz);
     for (int i = 0; i < 4; ++i) {
-        const double cxw = (double)k.corner[2 * i] * w;
-        const double cyh = (double)k.corner[2 * i + 1] * h;
-        const double s0 = a9c * cyh + cxw * a90;
-        const double s1 = cyh * aA0 + cxw * a94;
-        const double s2 = cyh * aA4 + cxw * a98;
-        const double X = s0 + (double)f.px;
-        const double Y = s1 + (double)f.py;
-        const double Z = s2 + (double)f.pz;
-        q->X[i] = X; q->Y[i] = Y; q->Z[i] = Z;
-        q->x[i] = (float)X; q->y[i] = (float)Y; q->z[i] = (float)Z;
-        q->u[i] = (float)((double)k.uvCorner[2 * i] * du + c.u0d);
-        q->v[i] = (float)((double)k.uvCorner[2 * i + 1] * dv + (double)c.v0f);
+        const __m128d p   = _mm_mul_pd(WidenPair(k.corner + 2 * i), wh);   // cxw, cyh
+        const __m128d cx2 = _mm_unpacklo_pd(p, p);
+        const __m128d cy2 = _mm_unpackhi_pd(p, p);
+        const __m128d s01 = _mm_add_pd(_mm_mul_pd(cy2, cyRow), _mm_mul_pd(cx2, cxRow));
+        const __m128d s2  = _mm_add_sd(_mm_mul_sd(cy2, aA4), _mm_mul_sd(cx2, a98));
+        const __m128d xy  = _mm_add_pd(s01, pxy);
+        const __m128d z   = _mm_add_sd(s2, pz);
+        q->xy[i]  = xy;
+        q->pos[i] = _mm_cvtpd_ps(xy);
+        q->zd[i]  = _mm_cvtsd_f64(z);
+        q->zf[i]  = _mm_cvtss_f32(_mm_cvtsd_ss(_mm_setzero_ps(), z));
+        q->uv[i]  = _mm_cvtpd_ps(_mm_add_pd(_mm_mul_pd(WidenPair(k.uvCorner + 2 * i), dudv), uv0));
     }
     q->colour = f.colour;
+    q->zSame = false;
 }
 
 // The angle handed to sub_6F7A60 (0x97C59E..0x97C5B2), rounded to the float it is passed as.
@@ -223,36 +250,45 @@ inline float SpinAngle(const float* particle, uintptr_t particleAddr, uint32_t f
 }
 
 // 0x97C7B3..0x97CC0D: the four corners rotated by the angle whose sine and cosine are given.
+// The client builds each corner as two sums of three terms in a fixed order; the same order is
+// kept here, with a subtraction written as the addition of a negated term (exact, including
+// zero, because the sign bit is flipped and not the value taken from zero).
+//   V0  (px - cw) - sh,   (py - sw) + ch        V1  (px - cw) + sh,   (py - sw) - ch
+//   V2  (cw + px) - sh,   (ch + sw) + py        V3  (cw + sh) + px,   (sw + py) - ch
 inline void BuildSpin(const char* em, const Frame& f, const Cell& c, Quad* q) {
-    const double w = f.w, h = f.h, s = f.sinv, co = f.cosv;
-    const double cw = co * w, ch = co * h, sw = w * s, sh = h * s;
-    const double px = f.px, py = f.py;
-    q->X[0] = (px - cw) - sh;   q->Y[0] = (py - sw) + ch;
-    q->X[1] = (px - cw) + sh;   q->Y[1] = (py - sw) - ch;
-    q->X[2] = (cw + px) - sh;   q->Y[2] = (ch + sw) + py;
-    q->X[3] = (cw + sh) + px;   q->Y[3] = (sw + py) - ch;
-    const double du = Rd<float>(em, kOffDu), dv = Rd<float>(em, kOffDv);
-    const double u0 = c.u0f, v0 = c.v0f;
+    // [cw, ch] = cos * [w, h] and [sw, sh] = sin * [w, h]: products of two floats, exact.
+    const __m128d wh   = Pair(f.w, f.h);
+    const __m128d cwch = _mm_mul_pd(_mm_set1_pd((double)f.cosv), wh);
+    const __m128d swsh = _mm_mul_pd(_mm_set1_pd((double)f.sinv), wh);
+    const __m128d P    = Pair(f.px, f.py);
+    const __m128d lo   = _mm_castsi128_pd(_mm_set_epi64x(0, (long long)0x8000000000000000ull));  // flips lane 0
+    const __m128d hi   = _mm_castsi128_pd(_mm_set_epi64x((long long)0x8000000000000000ull, 0));  // flips lane 1
+    const __m128d cwsw = _mm_unpacklo_pd(cwch, swsh);                        // cw, sw
+    const __m128d shch = _mm_unpackhi_pd(swsh, cwch);                        // sh, ch
+    const __m128d nsh  = _mm_xor_pd(shch, lo);                               // -sh, ch
+    const __m128d nch  = _mm_xor_pd(shch, hi);                               // sh, -ch
+    const __m128d t    = _mm_sub_pd(P, cwsw);                                // px - cw, py - sw
+    q->xy[0] = _mm_add_pd(t, nsh);                                           // (px - cw) - sh, (py - sw) + ch
+    q->xy[1] = _mm_add_pd(t, nch);                                           // (px - cw) + sh, (py - sw) - ch
+    const __m128d r2 = _mm_add_pd(cwch, _mm_shuffle_pd(P, swsh, 0));         // cw + px, ch + sw
+    q->xy[2] = _mm_add_pd(r2, _mm_shuffle_pd(nsh, P, 2));                    // (cw + px) - sh, (ch + sw) + py
+    const __m128d r3 = _mm_add_pd(cwsw, _mm_shuffle_pd(shch, P, 2));         // cw + sh, sw + py
+    q->xy[3] = _mm_add_pd(r3, _mm_shuffle_pd(P, nch, 2));                    // (cw + sh) + px, (sw + py) - ch
     for (int i = 0; i < 4; ++i) {
-        q->Z[i] = (double)f.pz;
-        q->x[i] = (float)q->X[i]; q->y[i] = (float)q->Y[i]; q->z[i] = f.pz;
+        q->pos[i] = _mm_cvtpd_ps(q->xy[i]);
+        q->zd[i] = (double)f.pz;
+        q->zf[i] = f.pz;
     }
-    q->u[0] = c.u0f;               q->v[0] = c.v0f;
-    q->u[1] = c.u0f;               q->v[1] = (float)(v0 + dv);
-    q->u[2] = (float)(u0 + du);    q->v[2] = c.v0f;
-    q->u[3] = (float)(u0 + du);    q->v[3] = (float)(v0 + dv);
+    const __m128d dudv = Pair(Rd<float>(em, kOffDu), Rd<float>(em, kOffDv));
+    const __m128  a  = _mm_set_ps(0.0f, 0.0f, c.v0f, c.u0f);                // u0, v0 as stored
+    const __m128  b  = _mm_cvtpd_ps(_mm_add_pd(Pair(c.u0f, c.v0f), dudv));   // u0 + du, v0 + dv
+    const __m128  ab = _mm_unpacklo_ps(a, b);                               // a0, b0, a1, b1
+    q->uv[0] = a;
+    q->uv[1] = _mm_shuffle_ps(ab, ab, _MM_SHUFFLE(3, 3, 3, 0));            // u0, v0 + dv
+    q->uv[2] = _mm_shuffle_ps(ab, ab, _MM_SHUFFLE(3, 3, 2, 1));            // u0 + du, v0
+    q->uv[3] = b;
     q->colour = f.colour;
-}
-
-// The emitter's box, one vertex after another, each edge moved only by a strict
-// ordered comparison against the value the client still holds in a register.
-inline void GrowBox(float* box, double X, double Y, double Z) {
-    if ((double)box[0] > X) box[0] = (float)X;    // 0x218
-    if ((double)box[1] > Y) box[1] = (float)Y;    // 0x21C
-    if (Z < (double)box[2]) box[2] = (float)Z;    // 0x220
-    if ((double)box[3] < X) box[3] = (float)X;    // 0x224
-    if ((double)box[4] < Y) box[4] = (float)Y;    // 0x228
-    if (Z > (double)box[5]) box[5] = (float)Z;    // 0x22C
+    q->zSame = true;
 }
 
 // Where the four vertex streams are written, and how far each has got.
@@ -264,17 +300,71 @@ struct Streams {
 
 constexpr int kElemBytes[4] = { 12, 12, 4, 8 };
 
+// The emitter's box, exactly as the client does it: one corner after another, an edge moving
+// only on a strict ordered comparison of the double the client still holds in a register against
+// the float it stored last, and the float of that double going in.
+inline void GrowBoxSequential(const Quad& q, float* box) {
+    for (int v = 0; v < 4; ++v) {
+        double xy[2];
+        _mm_storeu_pd(xy, q.xy[v]);
+        if ((double)box[0] > xy[0]) box[0] = (float)xy[0];     // 0x218
+        if ((double)box[1] > xy[1]) box[1] = (float)xy[1];     // 0x21C
+        if (q.zd[v] < (double)box[2]) box[2] = (float)q.zd[v]; // 0x220
+        if ((double)box[3] < xy[0]) box[3] = (float)xy[0];     // 0x224
+        if ((double)box[4] < xy[1]) box[4] = (float)xy[1];     // 0x228
+        if (q.zd[v] > (double)box[5]) box[5] = (float)q.zd[v]; // 0x22C
+    }
+}
+
+// The same result with the four corners reduced first. An edge that moves ends at the float of the
+// extreme, and one a later corner would have moved again lands on the same float because rounding
+// is monotonic; min and max below keep the earlier of two equal values, as the client's strict
+// comparisons do. One case differs, and only in the sign of a zero: when the extreme is exactly
+// zero and an earlier corner was a tiny coordinate of the other sign, below half the smallest
+// float, the client has already stored -0.0 (or +0.0) from that corner and a zero of the other
+// sign is not strictly beyond it, where the reduction would store the extreme's own zero. They
+// compare equal and nothing downstream can tell them apart, but they are different bytes. An
+// extreme that is exactly zero is therefore handed to the sequential form.
+inline void GrowBox(const Quad& q, float* box) {
+    __m128d mn = q.xy[0], mx = q.xy[0];
+    for (int i = 1; i < 4; ++i) {
+        mn = _mm_min_pd(q.xy[i], mn);        // new < old ? new : old
+        mx = _mm_max_pd(q.xy[i], mx);        // new > old ? new : old
+    }
+    __m128d zmn = _mm_set_sd(q.zd[0]), zmx = zmn;
+    if (!q.zSame) {
+        for (int i = 1; i < 4; ++i) {
+            zmn = _mm_min_sd(_mm_set_sd(q.zd[i]), zmn);
+            zmx = _mm_max_sd(_mm_set_sd(q.zd[i]), zmx);
+        }
+    }
+    const __m128d zero = _mm_setzero_pd();
+    const int exactZero = _mm_movemask_pd(_mm_or_pd(_mm_cmpeq_pd(mn, zero), _mm_cmpeq_pd(mx, zero))) |
+                          _mm_movemask_pd(_mm_or_pd(_mm_cmpeq_sd(zmn, zero), _mm_cmpeq_sd(zmx, zero))) ;
+    if (exactZero) {
+        GrowBoxSequential(q, box);
+        return;
+    }
+    const int lo = _mm_movemask_pd(_mm_cmpgt_pd(WidenPair(box + 0), mn));    // 0x218, 0x21C
+    if (lo & 1) box[0] = (float)_mm_cvtsd_f64(mn);
+    if (lo & 2) box[1] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(mn, mn));
+    const int hi = _mm_movemask_pd(_mm_cmplt_pd(WidenPair(box + 3), mx));    // 0x224, 0x228
+    if (hi & 1) box[3] = (float)_mm_cvtsd_f64(mx);
+    if (hi & 2) box[4] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(mx, mx));
+    if (_mm_comilt_sd(zmn, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[2])))) box[2] = (float)_mm_cvtsd_f64(zmn);   // 0x220
+    if (_mm_comigt_sd(zmx, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[5])))) box[5] = (float)_mm_cvtsd_f64(zmx);   // 0x22C
+}
+
 inline void Commit(const Quad& q, const Constants& k, float* box, Streams* s) {
     for (int v = 0; v < 4; ++v) {
         char* p = s->ptr[0] + v * s->stride[0];
-        memcpy(p, &q.x[v], 4); memcpy(p + 4, &q.y[v], 4); memcpy(p + 8, &q.z[v], 4);
-        GrowBox(box, q.X[v], q.Y[v], q.Z[v]);
-        char* n = s->ptr[1] + v * s->stride[1];
-        memcpy(n, k.normal, 12);
+        _mm_storel_pi((__m64*)p, q.pos[v]);
+        memcpy(p + 8, &q.zf[v], 4);
+        memcpy(s->ptr[1] + v * s->stride[1], k.normal, 12);
         memcpy(s->ptr[2] + v * s->stride[2], &q.colour, 4);
-        char* t = s->ptr[3] + v * s->stride[3];
-        memcpy(t, &q.u[v], 4); memcpy(t + 4, &q.v[v], 4);
+        _mm_storel_pi((__m64*)(s->ptr[3] + v * s->stride[3]), q.uv[v]);
     }
+    GrowBox(q, box);
     for (int i = 0; i < 4; ++i) s->ptr[i] += 4 * s->stride[i];
     s->count += 4;
 }

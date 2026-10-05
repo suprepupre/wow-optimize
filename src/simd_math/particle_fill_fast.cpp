@@ -38,21 +38,43 @@
 // line for line, with the three calls it makes replaced (the matrix transform by
 // its own instruction sequence, the sine and cosine by supplied values).
 //
-//     29703478 fills compared   0 differed   (flat, axis-placed and spun in about
+//     41963158 fills compared   0 differed   (flat, axis-placed and spun in about
 //                                              equal parts; half the inputs shaped
 //                                              so that a sum cancels to a few ulps,
 //                                              which is where the order of
-//                                              additions can show in a float)
-//       244380 more declined     a NaN in the answer, handed to the client
+//                                              additions can show in a float; some
+//                                              runs with NaN, infinity, denormals and
+//                                              both zeros in every field, some with
+//                                              box edges within ulps of a corner)
+//       619106 more declined     a NaN in the answer, handed to the client
 //
-// A harness that has never failed has not been shown to be able to, so seven
-// deliberately wrong versions of the header were run through it: the other
-// order of three additions in each of two spun corners and one more, the other
-// order in the axis sum, the other order in the matrix transform, and a texture
-// row taken from the rounded value where the client uses the unrounded one. Each
-// was caught. Two further changes were not and are equivalent: comparing the
-// bounding box in float instead of double (the box takes the rounded value
-// either way) and adding two texture floats in float instead of double.
+// A harness that has never failed has not been shown to be able to, so wrong
+// versions of the header were run through it. Against the packed form that is
+// shipped: a box edge moved on equal as well as on strictly beyond (twice), the
+// texture row taken from the double where the client stores the float, one spun
+// corner built from the wrong term, and the two zeros of a tie resolved the other
+// way round, which only inputs built to carry negative zeros expose. Against the
+// scalar form with the same arithmetic, which this replaced: the other order of
+// three additions in four places, in the axis sum and in the matrix transform.
+// Every one was caught. Two changes were not and are equivalent: comparing the
+// box in float instead of double (it ends at the rounded value either way) and
+// adding two texture floats in float instead of double.
+//
+// Two differences the harness found in this form and that are handled rather than
+// excused. A coordinate below half the smallest float rounds to -0.0, and the client
+// then keeps it against a later exact +0.0, which is not strictly beyond it; the
+// reduction of the four corners would store +0.0. An extreme that is exactly zero is
+// therefore sent through the corner-by-corner form (GrowBoxSequential). And a NaN
+// spin angle is declined, since x87 and SSE2 give the negated NaN different sign bits.
+//
+// Speed, from the same harness, warm caches, the client's instruction sequence for
+// the body against this, excluding the calls the client keeps (evaluator, spin
+// values, sine and cosine): flat 211 cycles against 91, axis-placed 239 against 138,
+// spun 194 against 121. The first version, with a scalar compare for every corner,
+// was 1.1 to 1.3 times faster and not worth shipping: six comparisons and eight
+// float-double conversions per corner cost as much as the x87 did. Whether that
+// is a gain in the game depends on how much of the call is the part kept, which is
+// not measured here; the learning phase times both halves with SelfBench.
 //
 // Verification, predict-then-compare. The function writes four vertex streams,
 // the emitter's bounding box and the stream pointers. While learning, the
@@ -208,6 +230,9 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     case Kind::Axes: BuildAxes(em, k, f, cell, &q); break;
     default: {
         const float angle = SpinAngle(particle, (uintptr_t)particle, flags, rate, rot0);
+        // x87 and SSE2 keep different NaN payloads, and the sign of one differs after a
+        // negation; the client's answer is the only one to give for a NaN angle.
+        if (angle != angle) return kDecline;
         ((SinCosFn)kSinCosFn)(angle, &f.sinv, &f.cosv);
         BuildSpin(em, f, cell, &q);
         break;
