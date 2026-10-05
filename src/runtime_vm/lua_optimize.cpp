@@ -740,6 +740,76 @@ static int BoundedGcStep(lua_State* L, int stepKB, double budgetMs) {
     return done;
 }
 
+// The collector's last resort, which used to be unreachable exactly when it was needed.
+//
+// Field logs 2026-10-05/06 (Whitemane, a player with a great many WeakAuras): five of thirteen
+// sessions ended in the client's own fatal dialog, "Not enough memory resources are available",
+// from M2Shared.cpp:267 or lmemPool.cpp:311 asking for 10 to 14 MB when the largest free block
+// below 2 GB was 3 to 6 MB and 231 MB were free in the whole address space. Every one of them had
+// Lua memory between 1.4 and 1.85 GB, and the emergency collector, when it did run, took
+// 1445 MB to 267 MB, 1085 to 299: a gigabyte of the heap was garbage the incremental collector
+// had not got to. Three things kept it from getting there:
+//   - StepGC is skipped on any frame over 50 ms, and a raid with that many auras runs at a 75 ms
+//     95th percentile, so the collector stood still in the very frames that fed it;
+//   - the emergency collector sat at the end of the ordinary branch, behind two branches that
+//     return first, so in combat it was never reached;
+//   - and the memory figure it read was refreshed by a counter only the ordinary branch advances.
+// A fatal dialog costs the session, a collection of a gigabyte costs a second or two. This
+// reads the figure itself, ahead of every branch and on every frame length, and runs a full
+// collection when the heap is large and has grown by a good margin since the last one.
+static unsigned long g_gcFullCollects = 0;
+
+static void GuardLuaMemory(lua_State* L, double frameMs) {
+    if (!State.gcOptimized || !Api.lua_gc || !L) return;
+    if (g_isSwapping.load(std::memory_order_acquire) || g_isReloading.load(std::memory_order_acquire)) return;
+    if (Config.isLoading) return;
+
+    static unsigned s_calls = 0;
+    static double   s_lastAfterMB = 0.0;
+    static DWORD    s_lastTick = 0;
+
+    // Frames can be 60 ms and calls 16 a second; every eighth call is twice a second.
+    if ((++s_calls & 7) == 0) {
+        __try {
+            const int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
+            const int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
+            State.luaMemoryKB = kb + (b / 1024.0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+    }
+    const double memMB = State.luaMemoryKB / 1024.0;
+    if (memMB < 450.0) return;
+
+    const SIZE_T vaLargest = HeapCompactor_GetCachedLowHalf();
+    const bool pressure = vaLargest != 0 && vaLargest < 48u * 1024 * 1024;
+    const bool big = memMB > 700.0 || pressure;
+    if (!big) return;
+
+    const DWORD now = GetTickCount();
+    if ((DWORD)(now - s_lastTick) < 4000) return;
+    // A live set that is simply large would be collected again and again for nothing: wait for
+    // real growth past what the last collection left.
+    if (memMB < s_lastAfterMB + (pressure ? 100.0 : 150.0)) return;
+
+    __try {
+        Api.lua_gc(L, LUA_GCCOLLECT, 0);
+        const int kb = Api.lua_gc(L, LUA_GCCOUNT, 0);
+        const int b  = Api.lua_gc(L, LUA_GCCOUNTB, 0);
+        State.luaMemoryKB = kb + (b / 1024.0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        State.gcOptimized = false;
+        return;
+    }
+    s_lastAfterMB = State.luaMemoryKB / 1024.0;
+    s_lastTick = now;
+    ++g_gcFullCollects;
+    State.fullCollects++;
+    Log("[LuaOpt] FULL GC at %.0f MB (%s%s, frame %.0f ms): %.1f MB -> %.1f MB", memMB,
+        memMB > 700.0 ? "over 700 MB" : "", pressure ? (memMB > 700.0 ? ", low 2 GB under 48 MB" : "low 2 GB under 48 MB") : "",
+        frameMs, memMB, s_lastAfterMB);
+}
+
 static void StepGC(lua_State* L, double frameMs) {
     if (!State.gcOptimized || !Api.lua_gc) return;
 
@@ -2184,7 +2254,12 @@ void OnMainThreadSleep(DWORD mainThreadId, double frameMs) {
 #endif
     }
 
-    if (!verySlowFrame) {
+    GuardLuaMemory(Api.L, frameMs);
+
+    // A frame this long used to skip the collector altogether. With a large heap that is the
+    // frame that most needs it; the step is bounded by its time budget, so it cannot make the
+    // frame much worse.
+    if (!verySlowFrame || State.luaMemoryKB > 300.0 * 1024) {
         StepGC(Api.L, frameMs);
     }
 
@@ -2328,6 +2403,7 @@ void LogStats() {
             State.fullCollects);
         return;
     }
+    Log("[LuaOpt] full collections forced by a large heap: %lu.", g_gcFullCollects);
     Log("[LuaOpt] GC step budget: %lu step(s) stopped by their time budget (3 ms a frame, 1.5 on a slow "
         "frame, 5 under address-space pressure) before their kilobytes were spent; the rest of that "
         "step is not carried over. Plain counter, lower bound.", g_gcBudgetCuts);
