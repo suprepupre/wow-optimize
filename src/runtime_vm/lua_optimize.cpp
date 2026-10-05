@@ -703,6 +703,42 @@ static int g_loadingGraceFrames = 0;
 
 // Smoothed net allocation rate (bytes/frame) for adaptive GC
 static double g_smoothedNetAlloc = 0.0;
+static unsigned long g_gcBudgetCuts = 0;   // steps stopped by the time budget before their kilobytes were spent
+static bool g_gcVaPressure = false;
+
+// lua_gc(LUA_GCSTEP, kb) is not a step of kb kilobytes of work. The client's lua_gc (sub_84ED50,
+// case 5) sets the threshold kb<<10 below the allocated total and calls luaC_step in a loop until
+// it is above it again, and luaC_step (sub_85B950) carries the shortfall as debt, paying 1024 of
+// it a call. So a step of kb is kb calls of luaC_step, each running a few thousand work units,
+// whatever those units cost in time. In the sweep of the string table a unit is a tenth of a
+// bucket, so a few thousand units is a few hundred buckets, and 258 KB of step is tens of
+// thousands of buckets, each a cache miss: a frame of 15 to 30 ms. Under address-space pressure
+// the step is tripled to 8 MB, and the same call was a frame of 376 ms on average, 22 of them in
+// a ten hour session, every one of them with sweeplist under StepGC in the stack (FreezeCatcher,
+// 2026-10-05).
+//
+// So the step is cut into pieces of kGcChunkKB and stopped when the frame's share of time is
+// spent. The pacing is the same - the same total of requested kilobytes, spread over more
+// frames when a frame cannot afford it - and the worst case is one piece past the budget.
+// The cycle ending (the state returning to pause) also ends the step, as it ends the client's.
+constexpr int kGcChunkKB = 16;
+
+static int BoundedGcStep(lua_State* L, int stepKB, double budgetMs) {
+    if (g_gcPerfFreq.QuadPart == 0) QueryPerformanceFrequency(&g_gcPerfFreq);
+    LARGE_INTEGER t0, t;
+    QueryPerformanceCounter(&t0);
+    int done = 0;
+    for (int left = stepKB; left > 0; left -= kGcChunkKB) {
+        const int chunk = left < kGcChunkKB ? left : kGcChunkKB;
+        if (Api.lua_gc(L, LUA_GCSTEP, chunk)) { done = 1; break; }
+        QueryPerformanceCounter(&t);
+        if ((double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)g_gcPerfFreq.QuadPart >= budgetMs) {
+            ++g_gcBudgetCuts;
+            break;
+        }
+    }
+    return done;
+}
 
 static void StepGC(lua_State* L, double frameMs) {
     if (!State.gcOptimized || !Api.lua_gc) return;
@@ -750,7 +786,7 @@ static void StepGC(lua_State* L, double frameMs) {
         LARGE_INTEGER before, after;
         QueryPerformanceCounter(&before);
         __try {
-            Api.lua_gc(L, LUA_GCSTEP, stepKB);
+            BoundedGcStep(L, stepKB, frameMs > 16.0 ? 1.5 : 3.0);
             State.gcStepsTotal++;
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             State.gcOptimized = false;
@@ -831,7 +867,9 @@ static void StepGC(lua_State* L, double frameMs) {
         // figure until 2026-09-02, so in a session whose low half was down to a
         // 1MB largest block it saw 1237MB and never stepped harder once.
         SIZE_T vaLargest = HeapCompactor_GetCachedLowHalf();
+        g_gcVaPressure = false;
         if (vaLargest != 0 && vaLargest < 48u * 1024 * 1024) {
+            g_gcVaPressure = true;
             stepKB *= 3;
             if (stepKB > 8192) stepKB = 8192;
         }
@@ -841,7 +879,10 @@ static void StepGC(lua_State* L, double frameMs) {
     QueryPerformanceCounter(&before);
 
     __try {
-        int done = Api.lua_gc(L, LUA_GCSTEP, stepKB);
+        // Three milliseconds a frame, one and a half on a frame that is already slow, five when
+        // the low 2 GB is running out and collecting harder is the point.
+        const double budgetMs = g_gcVaPressure ? 5.0 : (frameMs > 16.0 ? 1.5 : 3.0);
+        int done = BoundedGcStep(L, stepKB, budgetMs);
         State.gcStepsTotal++;
         if (done) {
             State.fullCollects++;
@@ -2287,6 +2328,9 @@ void LogStats() {
             State.fullCollects);
         return;
     }
+    Log("[LuaOpt] GC step budget: %lu step(s) stopped by their time budget (3 ms a frame, 1.5 on a slow "
+        "frame, 5 under address-space pressure) before their kilobytes were spent; the rest of that "
+        "step is not carried over. Plain counter, lower bound.", g_gcBudgetCuts);
     Log("[LuaOpt] Lua memory %.1f MB (%s). Manual GC stepping is %s. Collection "
         "counter %d (completed incremental cycles plus emergency and "
         "loading-screen steps); the emergency collector starts at 300 MB and "
