@@ -237,6 +237,12 @@ bool InSweepFamily(const char* n) {
 }
 
 int      g_rotIndex = 0;        // which offered subject is currently measured
+// Where that subject's frame times go. A rotating run measures every subject in
+// turn and keeps each in the slot of its rank, so it is the rank and only the
+// first kMaxStats can take part. A named run measures one subject, so it always
+// uses slot 0, whatever rank the subject registered at: tying it to the rank
+// left a subject registered past kMaxStats unmeasurable by name.
+int      g_statIndex = 0;
 int      g_rotPairs = 0;        // completed ON/OFF pairs on the current subject
 
 // Pairs, not stints. The counter behind this only advances on a switch INTO the
@@ -385,7 +391,7 @@ static void CountOpeningStint() {
     static bool s_done = false;
     if (s_done) return;
     s_done = true;
-    g_on[g_rotIndex].stints = 1;
+    g_on[g_statIndex].stints = 1;
 }
 
 bool IsSubject(const char* name, bool* flag) {
@@ -420,19 +426,14 @@ bool IsSubject(const char* name, bool* flag) {
         if (slot >= kMaxStats) return false;    // no statistics slot for it
         g_claimed = true;
         if (slot != g_rotIndex) return false;
+        g_statIndex = slot;
         CountOpeningStint();
         return true;
     }
     if (lstrcmpiA(g_subject, name) != 0) return false;
-    if (slot >= kMaxStats) {
-        Log("[AbTest] '%s' registered as subject number %d and only the first %d "
-            "keep statistics, so it cannot be measured on its own this session; "
-            "AbTestSubject=bundle measures every subject together.",
-            name, slot + 1, kMaxStats);
-        return false;
-    }
     g_claimed = true;
-    g_rotIndex = slot;                 // so the stats land in this subject's slot
+    g_rotIndex = slot;                 // its flag
+    g_statIndex = 0;                   // the one subject of a named run
     CountOpeningStint();
     return true;
 }
@@ -477,7 +478,7 @@ bool DiagSubject(int index, const char** name) {
 bool StandAsideSlow() {
     if (g_onNow) return false;
     if (g_sweep) { ++g_sweepReached; return true; }
-    ++g_standAside[g_rotIndex];
+    ++g_standAside[g_statIndex];
     return true;
 }
 
@@ -485,7 +486,7 @@ void TickOutSlow(unsigned long long t) {
     if (!t) return;
     uint64_t d = __rdtsc() - t;
     if (d == 0 || d > kTickCeiling) { ++g_ticksDiscarded; return; }
-    Phase& p = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
+    Phase& p = g_onNow ? g_on[g_statIndex] : g_off[g_statIndex];
     ++p.workCalls;
     p.workTicks += d;
 }
@@ -608,14 +609,14 @@ void OnFrame() {
 
     if ((DWORD)(now - g_phaseStart) >= g_periodMs) {
         {
-            Phase& ending = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
+            Phase& ending = g_onNow ? g_on[g_statIndex] : g_off[g_statIndex];
             if (ending.stintFrames >= kMinStintFrames) {
                 const double m = ending.stintSum / (double)ending.stintFrames;
-                if (g_havePrevStint && g_prevStintOn != g_onNow && g_rotIndex < 32) {
+                if (g_havePrevStint && g_prevStintOn != g_onNow && g_statIndex < 32) {
                     const double diff = g_onNow ? (m - g_prevStintMean) : (g_prevStintMean - m);
-                    ++g_pairN[g_rotIndex];
-                    g_pairSum[g_rotIndex] += diff;
-                    g_pairSq[g_rotIndex] += diff * diff;
+                    ++g_pairN[g_statIndex];
+                    g_pairSum[g_statIndex] += diff;
+                    g_pairSq[g_statIndex] += diff * diff;
                 }
                 g_prevStintMean = m;
                 g_prevStintOn = g_onNow;
@@ -650,12 +651,13 @@ void OnFrame() {
                 if (g_flag[next]) break;
             }
             g_rotIndex = next;
+            g_statIndex = next;
             g_havePrevStint = false;        // the neighbour belongs to the subject just left
             if (g_flag[g_rotIndex]) *g_flag[g_rotIndex] = true;
             Log("[AbTest] now measuring '%s'", g_offered[g_rotIndex]);
         }
 
-        ++(g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex]).stints;
+        ++(g_onNow ? g_on[g_statIndex] : g_off[g_statIndex]).stints;
     }
 
     if (first)         { ++g_dropped; return; }   // no previous frame to measure from
@@ -665,9 +667,9 @@ void OnFrame() {
     // in whichever half the stint was in and say nothing about either.
     if (!FrameBench::GameInFocus()) { ++g_dropped; return; }
 
-    Add(g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex], frameMs);
+    Add(g_onNow ? g_on[g_statIndex] : g_off[g_statIndex], frameMs);
     {
-        Phase& cur = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
+        Phase& cur = g_onNow ? g_on[g_statIndex] : g_off[g_statIndex];
         cur.stintSum += frameMs;
         ++cur.stintFrames;
     }
@@ -695,11 +697,14 @@ static void AdoptEarlyRegistrants() {
         }
         return;
     }
-    const int span = g_offeredCount < kMaxStats ? g_offeredCount : kMaxStats;
+    // A named run looks through every registrant: its one subject is measured in
+    // slot 0, so its rank does not matter. A rotation keeps a slot per rank.
+    const int span = (!g_rotate || g_offeredCount < kMaxStats) ? g_offeredCount : kMaxStats;
     for (int i = 0; i < span; ++i) {
         if (!g_flag[i]) continue;
         if (!g_rotate && lstrcmpiA(g_subject, g_offered[i]) != 0) continue;
         g_rotIndex = i;
+        g_statIndex = g_rotate ? i : 0;
         g_claimed = true;
         *g_flag[i] = true;
         CountOpeningStint();
@@ -1117,7 +1122,7 @@ void LogStats() {
             "same client with every one of them standing aside.", g_offeredCount);
         LogOffered("these are the subjects in the bundle");
     }
-    if (g_offeredCount > kMaxStats && !g_bundle)
+    if (g_offeredCount > kMaxStats && g_rotate)
         Log("[AbTest] %d subjects registered and only the first %d keep "
             "statistics; the rest run as their own switches say and are not "
             "measured. AbTestSubject=bundle measures all of them together.",
