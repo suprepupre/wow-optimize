@@ -116,6 +116,7 @@
 #include "../hooks_subsystems/particle_loop_prefetch.h"
 #include "../hooks_subsystems/addon_memory_walk.h"
 #include "../hooks_subsystems/async_poll_spin.h"
+#include "../runtime_vm/lua_collect_skip.h"
 #include "parallel_particles.h"
 #include "shader_const_dedup_sse2.h"
 #include "batch_colour_convert.h"
@@ -5886,6 +5887,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("ParticleLoopPrefetch::LogStats", ParticleLoopPrefetch::LogStats());
     STAT_TIME("AddonMemoryWalk::LogStats", AddonMemoryWalk::LogStats());
     STAT_TIME("AsyncPollSpin::LogStats", AsyncPollSpin::LogStats());
+    STAT_TIME("LuaCollectSkip::LogStats", LuaCollectSkip::LogStats());
     STAT_TIME("FloorSplit::LogStats", FloorSplit::LogStats());
     STAT_TIME("SkyCloudTexels::LogStats", SkyCloudTexels::LogStats());
     STAT_TIME("FrustumAabb::LogStats", FrustumAabb::LogStats());
@@ -8636,6 +8638,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     ParticleLoopPrefetch::Init();
     AddonMemoryWalk::Init();
     AsyncPollSpin::Init();
+    LuaCollectSkip::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST
@@ -11667,6 +11670,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             ParticleLoopPrefetch::Shutdown();
             AddonMemoryWalk::Shutdown();
             AsyncPollSpin::Shutdown();
+            LuaCollectSkip::Shutdown();
             LuaVmFast::Shutdown();
             CollisionRayOutcode::Shutdown();
             RayTriangle::Shutdown();
