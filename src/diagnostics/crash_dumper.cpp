@@ -867,6 +867,11 @@ static volatile LONG s_firstChanceLogged = 0;
 // Totals, so the log can state the scale without printing every occurrence.
 static volatile LONG g_firstChanceTotal   = 0;
 static volatile LONG g_firstChanceRepeats = 0;
+// Faults whose instruction lies inside this DLL. Several of our own readers walk
+// client structures from another thread behind an __except and expect to fault now
+// and then; the report separates them from everyone else's.
+static volatile LONG g_firstChanceOurs    = 0;
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 static const LONG FIRST_CHANCE_LOG_LIMIT = 8;
 
 static bool IsFatalClass(DWORD code) {
@@ -1001,6 +1006,11 @@ static LONG CALLBACK WowOpt_FirstChanceProbe(EXCEPTION_POINTERS* ep) {
     // counted thereafter.
     static uintptr_t s_lastFaultAddr = 0;
     ++g_firstChanceTotal;
+    {
+        const uintptr_t lo = (uintptr_t)&__ImageBase;
+        const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(lo + __ImageBase.e_lfanew);
+        if (at >= lo && at - lo < nt->OptionalHeader.SizeOfImage) ++g_firstChanceOurs;
+    }
     if (at != s_lastFaultAddr) {
         s_lastFaultAddr = at;
         CrashDumper::Trace("first-chance %s at 0x%08X TID=%lu",
@@ -1329,20 +1339,25 @@ void ReportFirstChanceSummary() {
         "someone (%ld of them repeats of the previous address). These are not "
         "crashes - something is using exceptions as control flow.",
         total, (LONG)g_firstChanceRepeats);
+    Log("[FirstChance]   %ld of them were raised by instructions inside wow_optimize.dll "
+        "(readers that walk client structures behind an __except), %ld elsewhere.",
+        (LONG)g_firstChanceOurs, total - (LONG)g_firstChanceOurs);
 
     // A count that stops moving after startup is a client that throws while
     // setting itself up and then behaves; one that keeps climbing is something
     // faulting on a hot path and being caught. The two read identically from a
     // single report and differently across two, so what is worth surfacing is
     // the growth rather than the total.
+    // Our own readers are left out of the warning: they fault by design.
+    const LONG others = total - (LONG)g_firstChanceOurs;
     static LONG s_lastTotal = -1;
-    if (s_lastTotal >= 0 && total > s_lastTotal) {
+    if (s_lastTotal >= 0 && others > s_lastTotal) {
         Verdict::Add(Verdict::Warn,
                      "fatal-class exceptions are still being raised and caught - "
                      "%ld more since the last report, %ld in all",
-                     total - s_lastTotal, total);
+                     others - s_lastTotal, others);
     }
-    s_lastTotal = total;
+    s_lastTotal = others;
 }
 
 void ReportFeatureActivity() {
