@@ -63,6 +63,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <cstdio>
 #include <intrin.h>
 
@@ -119,7 +120,22 @@ struct Phase {
     uint32_t over      = 0;            // above 120 ms, kept out of the histogram
     double   overMs    = 0.0;          // and what they contributed to the mean
     uint32_t stints    = 0;            // how many times this phase was entered
+    double   stintSum  = 0.0;          // the stint now running, for the pairing below
+    uint32_t stintFrames = 0;
 };
+
+// Adjacent ON and OFF stints, paired. A difference of means over two hours says how big the
+// difference is and nothing about how sure to be of it: prince's session of 2026-10-07 read
+// +6.1% over about 300 stints with no figure for the noise. The frame time drifts with where the
+// player is, so a stint is compared with the one next to it, and the spread of those differences
+// gives a standard error. Stints with fewer than kMinStintFrames frames (a load, a stall) do not
+// count. A positive difference is ON slower.
+constexpr uint32_t kMinStintFrames = 200;
+double   g_prevStintMean = 0.0;
+bool     g_prevStintOn = false;
+bool     g_havePrevStint = false;
+uint32_t g_pairN[32] = {};
+double   g_pairSum[32] = {}, g_pairSq[32] = {};
 
 char     g_subject[32] = {};
 DWORD    g_periodMs = 20000;
@@ -591,6 +607,25 @@ void OnFrame() {
     if (g_phaseStart == 0) g_phaseStart = now;
 
     if ((DWORD)(now - g_phaseStart) >= g_periodMs) {
+        {
+            Phase& ending = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
+            if (ending.stintFrames >= kMinStintFrames) {
+                const double m = ending.stintSum / (double)ending.stintFrames;
+                if (g_havePrevStint && g_prevStintOn != g_onNow && g_rotIndex < 32) {
+                    const double diff = g_onNow ? (m - g_prevStintMean) : (g_prevStintMean - m);
+                    ++g_pairN[g_rotIndex];
+                    g_pairSum[g_rotIndex] += diff;
+                    g_pairSq[g_rotIndex] += diff * diff;
+                }
+                g_prevStintMean = m;
+                g_prevStintOn = g_onNow;
+                g_havePrevStint = true;
+            } else {
+                g_havePrevStint = false;
+            }
+            ending.stintSum = 0.0;
+            ending.stintFrames = 0;
+        }
         g_onNow = !g_onNow;
         g_phaseStart = now;
         g_settle = kSettleFrames;
@@ -615,6 +650,7 @@ void OnFrame() {
                 if (g_flag[next]) break;
             }
             g_rotIndex = next;
+            g_havePrevStint = false;        // the neighbour belongs to the subject just left
             if (g_flag[g_rotIndex]) *g_flag[g_rotIndex] = true;
             Log("[AbTest] now measuring '%s'", g_offered[g_rotIndex]);
         }
@@ -630,6 +666,11 @@ void OnFrame() {
     if (!FrameBench::GameInFocus()) { ++g_dropped; return; }
 
     Add(g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex], frameMs);
+    {
+        Phase& cur = g_onNow ? g_on[g_rotIndex] : g_off[g_rotIndex];
+        cur.stintSum += frameMs;
+        ++cur.stintFrames;
+    }
 }
 
 // Init runs after most modules have installed, and a module that registers
@@ -816,6 +857,21 @@ static void ReportSubject(int i, const char* name) {
                 "closest thing to a controlled figure this project can produce.",
                 d < 0 ? -d : d, d > 0 ? "faster" : "slower",
                 meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
+            // How sure to be of it: the same stints, paired with their neighbours.
+            if (i < 32 && g_pairN[i] >= 4) {
+                const double n = (double)g_pairN[i];
+                const double mean = g_pairSum[i] / n;
+                const double var = (g_pairSq[i] - n * mean * mean) / (n - 1.0);
+                const double se = sqrt(var > 0.0 ? var / n : 0.0);
+                const bool clear = mean > 1.96 * se || mean < -1.96 * se;
+                Log("[AbTest]     paired by neighbouring stints: ON is %.3f ms %s, standard error %.3f ms over %u "
+                    "pairs (95%% interval %.3f to %.3f). %s", mean < 0 ? -mean : mean, mean > 0 ? "slower" : "faster",
+                    se, g_pairN[i], mean - 1.96 * se, mean + 1.96 * se,
+                    clear ? "The interval excludes zero."
+                          : "The interval includes zero: this session does not tell the two halves apart.");
+            } else {
+                Log("[AbTest]     fewer than four complete pairs of stints, so no figure for the noise yet.");
+            }
             // A census called from inside a subject's own hook runs in the ON half and not in the
             // OFF half, where the hook stands aside before reaching it, so its cost is booked as
             // the bundle's. prince's 2026-10-07 session had AnimTrackCensus on beside a bundle
