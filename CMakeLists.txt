@@ -558,6 +558,7 @@ add_library(wow_optimize SHARED
     src/simd_math/particle_fill_fast.cpp
     src/simd_math/particle_fill_fast.h
     src/simd_math/particle_fill_model.h
+    src/simd_math/particle_eval_model.h
     src/hooks_subsystems/particle_loop_prefetch.cpp
     src/hooks_subsystems/particle_loop_prefetch.h
     src/hooks_subsystems/addon_memory_walk.cpp

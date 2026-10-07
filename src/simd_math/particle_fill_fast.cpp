@@ -86,6 +86,24 @@
 //
 // What is not measured here: how often each kind occurs in play. The report
 // says, per kind, how many calls it answered and how many it handed back.
+//
+// The track evaluator. The evaluator sub_979E90 (colour, alpha, size, tile and
+// extra tracks, and the two generators it draws its size variation from) is a
+// function of the emitter and the particle's first words and writes only its
+// five outputs, so it is replaced too, in particle_eval_model.h, and checked on
+// its own: for the first 20000 particles of an emitter whose colour-function flag
+// is clear, and one call in 4096 after, the client's routine and the model are
+// run on the same particle and their five outputs compared, and the model
+// answers only after those agree. A comparison that fails is followed by two more
+// calls of the client's routine; if it does not repeat itself the difference is not
+// the model's and the sample is dropped, otherwise the model retires and the client's
+// evaluator is called again. The model declines (the client's routine runs) on a key
+// fraction that is not finite, a null array or a search that would read outside its
+// array. Offline against the client's own x87 code for the evaluator and its callees,
+// generated from the disassembly, over six million random emitters with the
+// integer, colour and alpha values taken before they are rounded as well as after:
+// no difference; fifteen wrong versions were each caught except those that are
+// the same arithmetic, which the report in the commit lists.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -98,6 +116,7 @@
 
 #include "particle_fill_fast.h"
 #include "particle_fill_model.h"
+#include "particle_eval_model.h"
 #include "MinHook.h"
 #include "version.h"
 #include "config.h"
@@ -169,6 +188,20 @@ unsigned long      g_verified[3] = {};
 unsigned           g_mismatches = 0;
 unsigned           g_unstable = 0;     // differences that the evaluator's own re-run explains
 
+// The model of sub_979E90, used in place of the client's routine once it has agreed with it on
+// kEvalLearn particles. Plain flags and counters, main thread only.
+constexpr uintptr_t kRngTableAddr = 0x009F1700;
+constexpr unsigned long kEvalLearn = 20000;
+alignas(16) uint8_t g_evalTable[260];
+bool               g_evalReady = false;      // constants and table read and matching
+bool               g_evalArmed = false;
+bool               g_evalDead = false;
+int                g_evalBench = -1;
+unsigned long      g_evalChecked = 0;        // comparisons that agreed
+unsigned long      g_evalDeclined = 0;       // the model handed a particle back to the client's routine
+unsigned           g_evalMismatch = 0;
+unsigned           g_evalUnstable = 0;       // differences that the client's own re-run explains
+
 // What the last Process saw from the evaluator, for the check that follows a difference. Plain
 // stores, main thread only.
 uint32_t g_lastColour = 0;
@@ -198,6 +231,17 @@ Constants Client() {
     return k;
 }
 
+// The model of sub_979E90 into the same five outputs. False: the client's routine must run.
+__declspec(noinline) bool EvalModel(const char* em, const float* particle, Evaluated* e) {
+    ParticleEvalModel::Out o;
+    if (!ParticleEvalModel::Eval(em, particle, g_evalTable, &o)) {
+        ++g_evalDeclined;
+        return false;
+    }
+    e->colour = o.colour; e->w = o.w; e->h = o.h; e->tile = o.tile; e->extra = o.extra;
+    return true;
+}
+
 // One particle. Writes nothing until the answer is complete and has no NaN in it.
 //
 // No stack cookie: this runs once per particle and the cookie is a load, an xor and a store
@@ -214,8 +258,9 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
     Evaluated e;
     e.colour = 0; e.w = 0.0f; e.h = 0.0f; e.tile = 0; e.extra = 0;
-    ((EvalFn)((flags & kFlagColourFn) ? kEvalColour : kEvalPlain))(
-        em, nullptr, particle, &e.colour, &e.w, &e.tile, &e.extra);
+    if (!(g_evalArmed && !(flags & kFlagColourFn) && EvalModel(em, particle, &e)))
+        ((EvalFn)((flags & kFlagColourFn) ? kEvalColour : kEvalPlain))(
+            em, nullptr, particle, &e.colour, &e.w, &e.tile, &e.extra);
     g_lastColour = e.colour;
     g_lastTile = e.tile;
     g_lastAgeBits = *(const uint32_t*)particle;
@@ -338,6 +383,61 @@ __declspec(noinline) bool EvaluatorMoved(char* em, float* particle, char* detail
            ageNow != g_lastAgeBits;
 }
 
+// The client's evaluator and the model on one particle, outputs compared. Pure on both sides, so
+// running both changes nothing the fill sees.
+__declspec(noinline) void CheckEvaluator(char* em, float* particle) {
+    Evaluated c, d;
+    c.colour = 0; c.w = c.h = 0.0f; c.tile = c.extra = 0;
+    d = c;
+    ParticleEvalModel::Out o;
+    bool modelOk;
+    const bool mineFirst = (g_evalChecked & 1) != 0;       // alternate, so neither side always meets the cold caches
+    const uint64_t t0 = SelfBench::Now();
+    if (mineFirst) modelOk = ParticleEvalModel::Eval(em, particle, g_evalTable, &o);
+    const uint64_t t1 = SelfBench::Now();
+    ((EvalFn)kEvalPlain)(em, nullptr, particle, &c.colour, &c.w, &c.tile, &c.extra);
+    const uint64_t t2 = SelfBench::Now();
+    if (!mineFirst) modelOk = ParticleEvalModel::Eval(em, particle, g_evalTable, &o);
+    const uint64_t t3 = SelfBench::Now();
+    if (!modelOk) { ++g_evalDeclined; return; }
+    if (g_evalBench >= 0) {
+        const uint64_t mine = mineFirst ? (t1 - t0) : (t3 - t2);
+        SelfBench::Pair(g_evalBench, mine, t2 - t1);
+    }
+    if (c.colour == o.colour && memcmp(&c.w, &o.w, 4) == 0 && memcmp(&c.h, &o.h, 4) == 0 &&
+        c.tile == o.tile && c.extra == o.extra) {
+        if (++g_evalChecked >= kEvalLearn && !g_evalDead && !g_evalArmed) {
+            g_evalArmed = true;
+            Log("[ParticleFillFast] the track evaluator model agreed with the client's sub_979E90 on %lu "
+                "particles; it answers from here, and one call in %lu is compared again.", g_evalChecked, kResampleMask + 1);
+        }
+        return;
+    }
+    // A difference. Is the client's routine the same twice on this particle?
+    Evaluated c2 = d, c3 = d;
+    ((EvalFn)kEvalPlain)(em, nullptr, particle, &c2.colour, &c2.w, &c2.tile, &c2.extra);
+    ((EvalFn)kEvalPlain)(em, nullptr, particle, &c3.colour, &c3.w, &c3.tile, &c3.extra);
+    const bool stable = c2.colour == c.colour && c3.colour == c.colour && c2.tile == c.tile && c3.tile == c.tile &&
+                        c2.extra == c.extra && c3.extra == c.extra &&
+                        memcmp(&c2.w, &c.w, 4) == 0 && memcmp(&c3.w, &c.w, 4) == 0 &&
+                        memcmp(&c2.h, &c.h, 4) == 0 && memcmp(&c3.h, &c.h, 4) == 0;
+    if (!stable) {
+        if (++g_evalUnstable <= 5)
+            Log("[ParticleFillFast] the client's own evaluator gave different answers for one particle (colour %08X, "
+                "%08X, %08X); that comparison is dropped.", c.colour, c2.colour, c3.colour);
+        return;
+    }
+    ++g_mismatches;
+    ++g_evalMismatch;
+    g_evalDead = true;
+    g_evalArmed = false;
+    Log("[ParticleFillFast] the track evaluator model RETIRED (flags %08X, age bits %08X): colour client %08X, model %08X; "
+        "w %08X/%08X; h %08X/%08X; tile %d/%d; extra %d/%d. The client's sub_979E90 runs again.",
+        Rd<uint32_t>(em, kOffFlags), *(const uint32_t*)particle, c.colour, o.colour, *(uint32_t*)&c.w, *(uint32_t*)&o.w,
+        *(uint32_t*)&c.h, *(uint32_t*)&o.h, c.tile, o.tile, c.extra, o.extra);
+    Verdict::Add(Verdict::Bad, "ParticleFillFast's track evaluator model differed from the client's sub_979E90 and retired itself for this session");
+}
+
 __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb, Kind kind) {
     const Constants k = Client();
     const int ki = (int)kind - 1;
@@ -405,6 +505,10 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
         return g_orig(em, edx, particle, vb);
     }
 
+    if (g_evalReady && !g_evalDead && !(Rd<uint32_t>(em, kOffFlags) & kFlagColourFn) &&
+        (g_evalChecked < kEvalLearn || ((unsigned long)g_calls & kResampleMask) == 0))
+        CheckEvaluator(em, particle);
+
     const int ki = (int)kind - 1;
     if (g_verified[ki] < kLearnCalls || ((unsigned long)g_calls & kResampleMask) == 0)
         return Learn(em, edx, particle, vb, kind);
@@ -428,6 +532,28 @@ bool BytesMatch(uintptr_t addr, const unsigned char* want, size_t n) {
 }
 
 }  // namespace
+
+// The constants the model was written against, and the generator's table, read from the client.
+// Any difference and the evaluator stays the client's.
+bool PrepareEvaluator() {
+    struct K { uintptr_t addr; float want; } const consts[] = {
+        { 0x009EA0B4, ParticleEvalModel::kC },      { 0x009E1134, ParticleEvalModel::kMinLife },
+        { 0x009E30C0, ParticleEvalModel::k255 },    { 0x00A4040C, ParticleEvalModel::kTwo },
+        { 0x009E8CD0, ParticleEvalModel::kFloor },  { 0x009E1130, ParticleEvalModel::kOne } };
+    __try {
+        for (const K& k : consts) {
+            if (memcmp((const void*)k.addr, &k.want, 4) != 0) {
+                Log("[ParticleFillFast] track evaluator model NOT used: the constant at 0x%08X is not the one it was written against.", (unsigned)k.addr);
+                return false;
+            }
+        }
+        memcpy(g_evalTable, (const void*)kRngTableAddr, sizeof(g_evalTable));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[ParticleFillFast] track evaluator model NOT used: its constants could not be read.");
+        return false;
+    }
+    return true;
+}
 
 bool Init() {
     if (!Config::g_settings.OptParticleFillFast) return true;
@@ -454,6 +580,8 @@ bool Init() {
     g_installed = true;
     g_abSubject = AbTest::IsSubject("ParticleFillFast", &g_abSubject);
     g_benchSlot = SelfBench::Register("ParticleFillFast");
+    g_evalBench = SelfBench::Register("ParticleEvalModel");
+    g_evalReady = PrepareEvaluator();
     SamplingProfiler::RegisterSelfSymbol("ParticleFillFast", (const void*)&Detour);
 
     Log("[ParticleFillFast] ACTIVE on the per-particle vertex fill (sub_97BE80 @ 0x%08X) for "
@@ -494,6 +622,15 @@ void LogStats() {
         g_calls, g_answered[0] + g_answered[1] + g_answered[2], g_answered[0], g_answered[1],
         g_answered[2], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
         g_declDevice, g_other);
+    if (!g_evalReady)
+        Log("[ParticleFillFast]   track evaluator model: not used (constants or table not read).");
+    else if (g_evalDead)
+        Log("[ParticleFillFast]   track evaluator model: RETIRED after a difference from the client's routine (line earlier in this log); "
+            "%lu comparisons agreed before it.", g_evalChecked);
+    else
+        Log("[ParticleFillFast]   track evaluator model: %lu of %lu comparisons agreed so far, %s; %lu particle(s) handed back to the client's "
+            "routine; %u comparison(s) dropped because the client's routine did not repeat itself. Plain counters, lower bounds.",
+            g_evalChecked, kEvalLearn, g_evalArmed ? "answering" : "still the client's routine", g_evalDeclined, g_evalUnstable);
     if (g_unstable)
         Log("[ParticleFillFast]   %u comparison(s) differed because the client's colour and tile "
             "evaluator did not answer the same twice for one particle; those fills were left "
