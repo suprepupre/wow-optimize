@@ -1,7 +1,7 @@
 #include "async_tex_loader.h"
 #include "core/config.h"
 #include "../allocators/loading_defrag.h"
-#include "../../build/_deps/minhook-src/include/MinHook.h"
+#include "MinHook.h"
 #include <windows.h>
 #include <string>
 #include <vector>

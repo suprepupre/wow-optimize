@@ -22,7 +22,7 @@ struct RcuObjectArray {
 };
 
 static std::atomic<RcuObjectArray*> g_rcuArray{nullptr};
-static std::atomic<RcuObjectArray*> g_oldArrays[16]{nullptr};
+static std::atomic<RcuObjectArray*> g_oldArrays[16]{};
 
 typedef int (__cdecl *ClntObjMgrEnum_fn)(int (__cdecl *callback)(uint32_t, uint32_t, int), int context);
 static ClntObjMgrEnum_fn orig_ClntObjMgrEnum = nullptr;

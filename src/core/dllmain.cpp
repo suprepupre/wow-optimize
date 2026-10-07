@@ -1391,7 +1391,7 @@ static bool InstallGetPrivateProfileCache();
 static bool InstallLuaHGetStrCache();
 static bool InstallCombatLogFullCache();
 static void ClearLuaHGetStrCache();
-static bool InstallLuaPushStringCache();
+static bool InstallLuaPushStringCacheLocal();  // not the one lua_pushstring_cache.h declares
 static void ClearLuaPushStringCache();
 static bool InstallLuaRawGetICache();
 
@@ -6593,7 +6593,7 @@ static int __cdecl hooked_lua_pushstring(int L, const char* s) {
 #endif
 }
 
-static bool InstallLuaPushStringCache() {
+static bool InstallLuaPushStringCacheLocal() {
 #if CRASH_TEST_DISABLE_LUA_PUSHSTRING
     Log("lua_pushstring cache: DISABLED (crash isolation)");
     return false;

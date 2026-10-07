@@ -197,12 +197,12 @@ void SSE2_Vec3Normalize(float* __restrict v) {
     rlen = _mm_shuffle_ps(rlen, rlen, _MM_SHUFFLE(0,0,0,0));
     xyz = _mm_mul_ps(xyz, rlen);
 
-    float out_x = xyz.m128_f32[0];
-    float out_y = xyz.m128_f32[1];
-    float out_z = xyz.m128_f32[2];
-    v[0] = out_x;
-    v[1] = out_y;
-    v[2] = out_z;
+    // m128_f32 is an MSVC extension; a store reads the same lanes anywhere.
+    alignas(16) float out[4];
+    _mm_store_ps(out, xyz);
+    v[0] = out[0];
+    v[1] = out[1];
+    v[2] = out[2];
 }
 
 // Frustum Culling SIMD Implementation
@@ -264,7 +264,7 @@ int SSE2_FrustumCull6(const float aabbMin[3], const float aabbMax[3],
 }
 
 // Color/Alpha Batch SIMD Conversion
-void SSE2_BGRAtoARGB_Batch(const uint8_t* __restrict src,
+WO_TARGET_SSSE3 void SSE2_BGRAtoARGB_Batch(const uint8_t* __restrict src,
                            uint8_t* __restrict dst,
                            size_t pixelCount) {
     const __m128i bMask = _mm_setr_epi8(2,1,0,3, 6,5,4,7, 10,9,8,11, 14,13,12,15);
@@ -288,7 +288,7 @@ void SSE2_BGRAtoARGB_Batch(const uint8_t* __restrict src,
     }
 }
 
-void SSE2_PremultiplyAlpha_Batch(const uint8_t* __restrict src,
+WO_TARGET_SSSE3 void SSE2_PremultiplyAlpha_Batch(const uint8_t* __restrict src,
                                   uint8_t* __restrict dst,
                                   size_t pixelCount) {
     const __m128i alphaMask = _mm_setr_epi8(

@@ -845,6 +845,21 @@ static inline bool RunningUnderTranslation() { return IsWine() || IsRosetta(); }
 #endif
 
 // ================================================================
+// SSSE3 on one function
+// MSVC compiles an SSSE3 intrinsic such as _mm_shuffle_epi8 under its default
+// /arch:SSE2; clang-cl refuses it unless the function is built for SSSE3. This
+// marks the few functions that use one, so the cross-build compiles them and
+// nothing else is built for a newer instruction set. Empty under MSVC.
+// ================================================================
+#ifndef WO_TARGET_SSSE3
+#if defined(__clang__)
+#define WO_TARGET_SSSE3 __attribute__((target("ssse3")))
+#else
+#define WO_TARGET_SSSE3
+#endif
+#endif
+
+// ================================================================
 // Wine/Rosetta safe hook wrapper
 // MinHook patching WoW .text section (0x00400000-0x00FFFFFF) may
 // invalidate JIT translations. System DLL hooks are safe (separate modules).
