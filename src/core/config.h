@@ -693,6 +693,7 @@ namespace Config {
         bool OptParallelParticles = false;
         bool OptParticleFillFast = false;
         bool OptParticleLoopPrefetch = false;
+        bool OptAddonMemoryWalk = false;
         bool OptHorizonTestAABB = true;
         bool OptM2SkinProjection = false;
         bool OptSStrHashFast = true;
