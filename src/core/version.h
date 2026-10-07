@@ -1056,6 +1056,29 @@ static inline MH_STATUS WineSafe_CreateHook(void* target, void* detour, void** o
 
 #define MH_CreateHook WowOpt_CreateHookGuarded
 
+// Sixteen bytes at an address as hex, for the log line of a module that declined because the
+// client's bytes are not the ones it was written against. 'Not the bytes it was read from' is
+// the whole of what such a line used to say; whether they are another build's or somebody
+// else's detour (an E9 or FF 25 first) decides whether the module can ever run there.
+static inline void WowOpt_HexBytes(uintptr_t addr, char* out, size_t cap) {
+    // No stdio here: this header is included before it, so the hex is built by hand.
+    static const char digits[] = "0123456789ABCDEF";
+    if (cap < 4) { if (cap) out[0] = 0; return; }
+    out[0] = 0;
+    __try {
+        const unsigned char* p = (const unsigned char*)addr;
+        size_t n = 0;
+        for (int i = 0; i < 16 && n + 4 < cap; ++i) {
+            if (i) out[n++] = ' ';
+            out[n++] = digits[p[i] >> 4];
+            out[n++] = digits[p[i] & 15];
+        }
+        out[n] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '?'; out[1] = 0;
+    }
+}
+
 // Hook-enable batching shared across modules. Each MH_EnableHook freezes every
 // process thread (~20ms via a system-wide thread snapshot). During MainThread's
 // synchronous install sequence g_hookBatchMode is 1, so enables routed through

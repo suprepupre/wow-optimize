@@ -638,8 +638,10 @@ bool Init() {
     if (!Config::g_settings.OptParticleFillFast) return true;
 
     if (!BytesMatch(kTarget, kPrologue, sizeof(kPrologue))) {
+        char found[64];
+        WowOpt_HexBytes(kTarget, found, sizeof(found));
         Log("[ParticleFillFast] NOT active: the bytes at 0x%08X are not the particle fill this "
-            "was read from, so nothing was hooked.", (unsigned)kTarget);
+            "was read from, so nothing was hooked. Found: %s", (unsigned)kTarget, found);
         return false;
     }
     if (!WowOpt_ClientPatchAllowed((const void*)kTarget)) {

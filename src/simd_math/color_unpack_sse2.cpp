@@ -1247,7 +1247,15 @@ bool Init() {
 
     auto CheckPrologue8 = [](void* addr, const unsigned char expected[8], const char* name) -> bool {
         if (IsBadReadPtr(addr, 8) || memcmp(addr, expected, 8) != 0) {
-            Log("[ColorUnpack] BAD PROLOGUE for %s at 0x%08X", name, (uintptr_t)addr);
+            // prince's client (2026-10-07) declined Color_PackBGRA with this bare line. Whether the
+            // bytes are another build's or a detour somebody else put there (E9 or FF 25 first)
+            // is what decides if this module can ever run on that client, so say what is there.
+            unsigned char got[8] = {};
+            if (!IsBadReadPtr(addr, 8)) memcpy(got, addr, 8);
+            Log("[ColorUnpack] BAD PROLOGUE for %s at 0x%08X: found %02X %02X %02X %02X %02X %02X %02X %02X, "
+                "expected %02X %02X %02X %02X %02X %02X %02X %02X", name, (uintptr_t)addr,
+                got[0], got[1], got[2], got[3], got[4], got[5], got[6], got[7],
+                expected[0], expected[1], expected[2], expected[3], expected[4], expected[5], expected[6], expected[7]);
             return false;
         }
         return true;
