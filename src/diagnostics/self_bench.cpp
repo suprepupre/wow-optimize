@@ -77,6 +77,16 @@ int  g_count = 0;
 // different order, not for trimming a distribution.
 constexpr uint64_t kAbsurdCycles = 2000000ull;
 
+// The fixed cap cannot see an outlier below it. ParticleFillFast read 5.9 to 12.6 times slower than
+// the client in three reports from one tester's session, and the excess was the same 3.0e8 cycles
+// in all three: a few hundred pairs of up to two million cycles each, all in the first thirty
+// thousand pairs, then diluted as normal ones piled up. Once a slot has enough pairs to know what
+// a normal one costs, a half more than 64 times the running mean (and over 20000 cycles) is an
+// interruption and not the code.
+constexpr uint64_t kWarmPairs = 64;
+constexpr uint64_t kAdaptiveFactor = 64;
+constexpr uint64_t kAdaptiveFloor = 20000;
+
 }  // namespace
 
 int Register(const char* name) {
@@ -92,6 +102,16 @@ void Pair(int id, uint64_t oursCycles, uint64_t theirsCycles) {
     if (oursCycles > kAbsurdCycles || theirsCycles > kAbsurdCycles) {
         ++s.discarded;
         return;
+    }
+    if (s.pairs >= kWarmPairs) {
+        uint64_t capOurs = kAdaptiveFactor * (s.ours / s.pairs);
+        uint64_t capTheirs = kAdaptiveFactor * (s.theirs / s.pairs);
+        if (capOurs < kAdaptiveFloor) capOurs = kAdaptiveFloor;
+        if (capTheirs < kAdaptiveFloor) capTheirs = kAdaptiveFloor;
+        if (oursCycles > capOurs || theirsCycles > capTheirs) {
+            ++s.discarded;
+            return;
+        }
     }
     s.ours += oursCycles;
     s.theirs += theirsCycles;

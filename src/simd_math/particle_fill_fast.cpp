@@ -167,6 +167,13 @@ unsigned long long g_early = 0;
 unsigned long long g_answered[3] = {};
 unsigned long      g_verified[3] = {};
 unsigned           g_mismatches = 0;
+unsigned           g_unstable = 0;     // differences that the evaluator's own re-run explains
+
+// What the last Process saw from the evaluator, for the check that follows a difference. Plain
+// stores, main thread only.
+uint32_t g_lastColour = 0;
+int32_t  g_lastTile = 0;
+uint32_t g_lastAgeBits = 0;
 
 const char* const kKindName[3] = { "flat", "axes", "spin" };
 
@@ -209,6 +216,9 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     e.colour = 0; e.w = 0.0f; e.h = 0.0f; e.tile = 0; e.extra = 0;
     ((EvalFn)((flags & kFlagColourFn) ? kEvalColour : kEvalPlain))(
         em, nullptr, particle, &e.colour, &e.w, &e.tile, &e.extra);
+    g_lastColour = e.colour;
+    g_lastTile = e.tile;
+    g_lastAgeBits = *(const uint32_t*)particle;
 
     float rot0 = 0.0f, rate = 0.0f;
     if (kind == Kind::Spin) ((SpinFn)kSpinFn)(em, nullptr, particle, &rot0, &rate);
@@ -307,6 +317,27 @@ __declspec(noinline) void Retire(Kind kind, uint32_t flags, const char* why) {
                  "client and retired itself for this session");
 }
 
+// A difference in the verification can be the evaluator's doing and not this module's: the colour
+// and tile come from a client routine that this side and the client's own fill each call once per
+// particle, and if that routine does not return the same thing twice for one particle (a particle
+// advanced in between, state it reads that something else changes) the two outputs differ
+// whatever this module computes. Asked after a difference, by calling the evaluator twice more.
+// True when the evaluator now answers differently from what Process was given, or from itself.
+__declspec(noinline) bool EvaluatorMoved(char* em, float* particle, char* detail, size_t cap) {
+    const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
+    Evaluated a, b;
+    a.colour = b.colour = 0; a.w = b.w = 0.0f; a.h = b.h = 0.0f; a.tile = b.tile = 0; a.extra = b.extra = 0;
+    EvalFn fn = (EvalFn)((flags & kFlagColourFn) ? kEvalColour : kEvalPlain);
+    fn(em, nullptr, particle, &a.colour, &a.w, &a.tile, &a.extra);
+    fn(em, nullptr, particle, &b.colour, &b.w, &b.tile, &b.extra);
+    const uint32_t ageNow = *(const uint32_t*)particle;
+    snprintf(detail, cap, "; the evaluator now gives colour %08X then %08X against %08X when this was worked out, "
+             "tile %d then %d against %d, particle age bits %08X now and %08X then",
+             a.colour, b.colour, g_lastColour, a.tile, b.tile, g_lastTile, ageNow, g_lastAgeBits);
+    return a.colour != g_lastColour || b.colour != a.colour || a.tile != g_lastTile || b.tile != a.tile ||
+           ageNow != g_lastAgeBits;
+}
+
 __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb, Kind kind) {
     const Constants k = Client();
     const int ki = (int)kind - 1;
@@ -339,8 +370,18 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
     const uint64_t t2 = SelfBench::Now();
     if (g_benchSlot >= 0) SelfBench::Pair(g_benchSlot, t1 - t0, t2 - t1);
 
-    char why[256];
+    char why[480];
     if (Differs(mine, theirs, priv, before, *vb, privBox, (const float*)(em + kOffBox), why, sizeof(why))) {
+        char detail[220];
+        if (EvaluatorMoved(em, particle, detail, sizeof(detail))) {
+            if (++g_unstable <= 5)
+                Log("[ParticleFillFast] a difference that is not this module's (flags %08X): %s%s. "
+                    "Not counted, not retired; the client's own output was used.",
+                    Rd<uint32_t>(em, kOffFlags), why, detail);
+            return theirs;
+        }
+        size_t n = strlen(why);
+        snprintf(why + n, sizeof(why) - n, "%s", detail);
         Retire(kind, Rd<uint32_t>(em, kOffFlags), why);
         return theirs;
     }
@@ -453,6 +494,10 @@ void LogStats() {
         g_calls, g_answered[0] + g_answered[1] + g_answered[2], g_answered[0], g_answered[1],
         g_answered[2], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
         g_declDevice, g_other);
+    if (g_unstable)
+        Log("[ParticleFillFast]   %u comparison(s) differed because the client's colour and tile "
+            "evaluator did not answer the same twice for one particle; those fills were left "
+            "to the client and not counted.", g_unstable);
     if (g_mismatches) {
         Log("[ParticleFillFast]   DISABLED after a difference from the client's own output; the "
             "line that says which is earlier in this log.");
