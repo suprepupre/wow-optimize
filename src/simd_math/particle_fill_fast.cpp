@@ -15,8 +15,16 @@
 // normal, colour and texture streams.
 //
 // What is replaced. The whole of the function for an emitter whose flags say
-// quad and no facing along the velocity (flag 0x4 set, 0x200000 clear), and which is
-// not a spin with the axes flag (0x4000). With flag 0x8 the client builds a second
+// quad (flag 0x4 set) that is not a spin with the axes flag (0x4000). A quad that faces along
+// the velocity (flag 0x200000, taken per particle when its speed is above an epsilon) is
+// built by BuildFacing, checked offline on its own against the client's instructions for
+// 0x97C039..0x97C27D (about 30 million cases in five input mixes, including the speed
+// at exactly the epsilon and the projected length at exactly the epsilon: 0 differences);
+// of fifteen wrong versions ten were caught (three of them only by the mixes that put the
+// speed or the projected length exactly at the epsilon). Five were not: two are the same
+// arithmetic (a commutative swap, a no-op) and three differ at the 1e-16 level before a float
+// is stored (the association of three terms, a product and a ratio in the other order, the
+// order of three squares); those were read against the assembly. With flag 0x8 the client builds a second
 // quad after the first, stretched along the particle's velocity; that is replaced too
 // (BuildTail in the model header) and learned separately from the same kind without it.
 // Its arithmetic was checked offline on its own against the client's instructions for
@@ -175,6 +183,7 @@ constexpr unsigned long kLearnCalls   = 10000;
 constexpr unsigned long kResampleMask = 4095;
 constexpr int           kMaxStride    = 256;
 constexpr uintptr_t     kTailEpsAddr  = 0x00AA2CEC;   // flt_AA2CEC: the second quad's length test
+constexpr uintptr_t     kFacingEpsAddr = 0x009EA27C;  // flt_9EA27C: below it a facing quad is an ordinary one
 
 typedef int   (__fastcall* FillFn)(char* em, void* edx, float* particle, Streams* vb);
 typedef void* (__fastcall* EvalFn)(char* em, void* edx, const float* particle, uint32_t* colour,
@@ -199,14 +208,14 @@ unsigned long long g_unsupported = 0;
 // square root of the second-quad path (flags bit 8) that this never takes, and 17.7% of calls in
 // that session were of a kind not done: whether that is the tail, the quad facing along the
 // velocity (0x200000) or a spin with axes decides what, if anything, to transcribe next.
-unsigned long long g_unsNotQuad = 0, g_unsFacing = 0, g_unsSpinAxes = 0;
+unsigned long long g_unsNotQuad = 0, g_unsSpinAxes = 0;
 unsigned long long g_other = 0;       // other threads, dead, or an A/B control half
 unsigned long long g_declined = 0;    // handed back, of which the three below
 unsigned long long g_declNaN = 0, g_declAngle = 0, g_declStride = 0, g_declDevice = 0;
 unsigned long long g_early = 0;
 // One slot per kind and per whether a second quad (flag 0x8) follows, so each is learned alone.
-unsigned long long g_answered[6] = {};
-unsigned long      g_verified[6] = {};
+unsigned long long g_answered[12] = {};
+unsigned long      g_verified[12] = {};
 unsigned           g_mismatches = 0;
 unsigned           g_unstable = 0;     // differences that the evaluator's own re-run explains
 
@@ -230,8 +239,16 @@ uint32_t g_lastColour = 0;
 int32_t  g_lastTile = 0;
 uint32_t g_lastAgeBits = 0;
 
-const char* const kKindName[6] = { "flat", "axes", "spin", "flat with a second quad", "axes with a second quad",
-                                    "spin with a second quad" };
+inline unsigned long long SumAnswered(int from, int to) {
+    unsigned long long n = 0;
+    for (int i = from; i < to; ++i) n += g_answered[i];
+    return n;
+}
+
+const char* const kKindName[12] = { "flat", "axes", "spin", "flat with a second quad", "axes with a second quad",
+                                     "spin with a second quad", "flat facing the velocity", "axes facing the velocity",
+                                     "spin facing the velocity", "flat facing the velocity with a second quad",
+                                     "axes facing the velocity with a second quad", "spin facing the velocity with a second quad" };
 
 // Private streams for the learning phase. Main thread only, which the detour checks.
 alignas(16) char g_scratch[4][8 * kMaxStride + 32];
@@ -252,6 +269,7 @@ Constants Client() {
     k.normal   = (const uint32_t*)kNormalAddr;
     k.matrix   = (const float*)kMatrixAddr;
     k.tailEps  = (const float*)kTailEpsAddr;
+    k.facingEps = (const float*)kFacingEpsAddr;
     return k;
 }
 
@@ -290,8 +308,11 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     g_lastTile = e.tile;
     g_lastAgeBits = *(const uint32_t*)particle;
 
+    // A quad that faces the velocity is built from the velocity alone: the spin values and the sine
+    // and cosine are not used for it, and both are pure, so they are not asked for.
+    const bool facing = (flags & kFlagFacing) != 0 && FacingActive(particle, k);
     float rot0 = 0.0f, rate = 0.0f;
-    if (kind == Kind::Spin) ((SpinFn)kSpinFn)(em, nullptr, particle, &rot0, &rate);
+    if (kind == Kind::Spin && !facing) ((SpinFn)kSpinFn)(em, nullptr, particle, &rot0, &rate);
 
     const char* device = *(const char* const*)kDevicePtr;
     if (!device) { ++g_declDevice; return kDecline; }
@@ -306,7 +327,9 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     const Cell cell = CellOrigin(em, e.tile);
 
     Quad q;
-    switch (kind) {
+    if (facing) {
+        BuildFacing(em, k, f, cell, particle, &q);
+    } else switch (kind) {
     case Kind::Flat: BuildFlat(em, k, f, cell, &q); break;
     case Kind::Axes: BuildAxes(em, k, f, cell, &q); break;
     default: {
@@ -475,10 +498,20 @@ __declspec(noinline) void CheckEvaluator(char* em, float* particle) {
     Verdict::Add(Verdict::Bad, "ParticleFillFast's track evaluator model differed from the client's sub_979E90 and retired itself for this session");
 }
 
+// Which of the twelve learned shapes this particle is: the kind, with or without a second quad,
+// facing the velocity or not (a property of the particle's speed as well as the emitter).
+inline int SlotOf(const char* em, const float* particle, Kind kind) {
+    const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
+    int slot = (int)kind - 1;
+    if (flags & kFlagOther) slot += 3;
+    if ((flags & kFlagFacing) && FacingActive(particle, Client())) slot += 6;
+    return slot;
+}
+
 __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb, Kind kind) {
     const Constants k = Client();
     const bool tail = (Rd<uint32_t>(em, kOffFlags) & kFlagOther) != 0;
-    const int ki = (int)kind - 1 + (tail ? 3 : 0);
+    const int ki = SlotOf(em, particle, kind);
     const int nv = tail ? 8 : 4;
 
     // A stride of zero is legal (a stream without normals writes every vertex to one dummy
@@ -542,7 +575,6 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
         {
             const uint32_t f = Rd<uint32_t>(em, kOffFlags);
             if (!(f & kFlagQuad)) ++g_unsNotQuad;
-            else if (f & kFlagFacing) ++g_unsFacing;
             else ++g_unsSpinAxes;
         }
         return g_orig(em, edx, particle, vb);
@@ -556,7 +588,7 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
         (g_evalChecked < kEvalLearn || ((unsigned long)g_calls & kResampleMask) == 0))
         CheckEvaluator(em, particle);
 
-    const int ki = (int)kind - 1 + ((Rd<uint32_t>(em, kOffFlags) & kFlagOther) ? 3 : 0);
+    const int ki = SlotOf(em, particle, kind);
     if (g_verified[ki] < kLearnCalls || ((unsigned long)g_calls & kResampleMask) == 0)
         return Learn(em, edx, particle, vb, kind);
 
@@ -666,13 +698,15 @@ void LogStats() {
         "handed back (%llu a NaN in the answer, %llu a NaN spin angle, %llu a stride the check "
         "cannot hold, %llu no device object), %llu from another thread, after a retirement or in "
         "the A/B control half. Plain counters, lower bounds.",
-        g_calls, g_answered[0] + g_answered[1] + g_answered[2] + g_answered[3] + g_answered[4] + g_answered[5],
-        g_answered[0] + g_answered[3], g_answered[1] + g_answered[4], g_answered[2] + g_answered[5],
-        g_answered[3] + g_answered[4] + g_answered[5], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
+        g_calls, SumAnswered(0, 12),
+        g_answered[0] + g_answered[3] + g_answered[6] + g_answered[9],
+        g_answered[1] + g_answered[4] + g_answered[7] + g_answered[10],
+        g_answered[2] + g_answered[5] + g_answered[8] + g_answered[11],
+        SumAnswered(3, 6) + SumAnswered(9, 12), g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
         g_declDevice, g_other);
     Log("[ParticleFillFast]   of the %llu handed back as a kind this does not do: "
-        "%llu facing along the velocity (0x200000), %llu a spin on axes, %llu not a quad at all. Plain counters, "
-        "lower bounds.", g_unsupported, g_unsFacing, g_unsSpinAxes, g_unsNotQuad);
+        "%llu a spin on axes, %llu not a quad at all. Plain counters, lower bounds.",
+        g_unsupported, g_unsSpinAxes, g_unsNotQuad);
     if (!g_evalReady)
         Log("[ParticleFillFast]   track evaluator model: not used (constants or table not read).");
     else if (g_evalDead)
@@ -691,7 +725,7 @@ void LogStats() {
             "line that says which is earlier in this log.");
         return;
     }
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 12; ++i) {
         if (g_verified[i] < kLearnCalls)
             Log("[ParticleFillFast]   %s: %lu of %lu fills compared with the client so far, none "
                 "differed; until then every fill of this kind is the client's own.",

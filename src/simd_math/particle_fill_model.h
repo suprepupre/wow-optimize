@@ -65,6 +65,7 @@ struct Constants {
     const uint32_t* normal;      // dword_B2D540: the three words written as every normal
     const float*    matrix;      // flt_B2D550: 4x4, row vectors, translation in [12..14]
     const float*    tailEps;     // flt_AA2CEC: below this squared length the tail is a plain quad
+    const float*    facingEps;   // flt_9EA27C: at or below this squared speed a facing quad is an ordinary one
 };
 
 // ---- the stretch 0x97BE96..0x97BF08: which table entry, and whether to skip ----
@@ -130,7 +131,7 @@ enum class Kind { Unsupported, Flat, Axes, Spin };
 // needs the sine and cosine of an angle; the rest are left to the client.
 inline Kind Classify(const char* em) {
     const uint32_t f = Rd<uint32_t>(em, kOffFlags);
-    if (!(f & kFlagQuad) || (f & kFlagFacing)) return Kind::Unsupported;
+    if (!(f & kFlagQuad)) return Kind::Unsupported;
     // `fldz / fcom [edi+0C8h] / test ah,44h / jp` then the same against 0CCh: both
     // must be exactly equal to zero, so NaN means spin.
     const bool still = (Rd<float>(em, kOffSpinRate) == 0.0f) && (Rd<float>(em, kOffSpinVary) == 0.0f);
@@ -357,6 +358,59 @@ inline void GrowBox(const Quad& q, float* box) {
     if (hi & 2) box[4] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(mx, mx));
     if (_mm_comilt_sd(zmn, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[2])))) box[2] = (float)_mm_cvtsd_f64(zmn);   // 0x220
     if (_mm_comigt_sd(zmx, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[5])))) box[5] = (float)_mm_cvtsd_f64(zmx);   // 0x22C
+}
+
+// ---- 0x97C039..0x97C27D: a quad turned to face along the velocity (emitter flag 0x200000) ----
+//
+// Taken only when the particle's squared speed is above flt_9EA27C (2^-22); at or below it, or
+// for a NaN, the client falls through to the ordinary kind. The negated velocity goes through
+// the upper 3x3 of the view matrix as sub_57C2E0 does it, ((m8*z + m4*y) + x*m0) and the two
+// like it, each stored as a float (Xt, Yt, Zt). The first two decide the direction on screen,
+// unit length when their squared length L1 is above the epsilon (and zero when it is not). If
+// that unit length is itself above the epsilon the width is scaled by the ratio of the
+// projected length to the full one, F((S2 / S1) * w) with S2 = 1/sqrt(F((Yt*Yt + Zt*Zt) +
+// Xt*Xt)), otherwise it stays w. Each corner is then the size rotated into that direction:
+//   x = ((cy*h) * (-uy) + (cx*W) * ux) + px      y = ((cx*W) * uy + (cy*h) * ux) + py
+// with ux, uy the unrounded doubles, and u, v built from the float texture origin like the second
+// quad's. Read off the disassembly by the symbolic walker, not traced by hand.
+inline bool FacingActive(const float* particle, const Constants& k) {
+    const double vx = particle[4], vy = particle[5], vz = particle[6];
+    return (vz * vz + (vy * vy + vx * vx)) > (double)*k.facingEps;           // fcomp, ah&41 clear
+}
+
+inline void BuildFacing(const char* em, const Constants& k, const Frame& f, const Cell& c,
+                        const float* particle, Quad* q) {
+    const double nx = -(double)particle[4], ny = -(double)particle[5], nz = -(double)particle[6];
+    const float* m = k.matrix;
+    const float Xt = (float)((((double)m[8]  * nz) + ((double)m[4] * ny)) + (nx * (double)m[0]));
+    const float Yt = (float)((((double)m[9]  * nz) + ((double)m[5] * ny)) + (nx * (double)m[1]));
+    const float Zt = (float)((((double)m[10] * nz) + ((double)m[6] * ny)) + (nx * (double)m[2]));
+    const double L1 = ((double)Yt * (double)Yt) + ((double)Xt * (double)Xt);
+    const float  M2 = (float)((((double)Yt * (double)Yt) + ((double)Zt * (double)Zt)) + ((double)Xt * (double)Xt));
+    const double eps = (double)*k.facingEps;
+    const double S1 = (eps < L1) ? 1.0 / sqrt(L1) : 0.0;
+    const double ux = (double)Xt * S1, uy = (double)Yt * S1;
+    float W = f.w;
+    if (eps < S1) {
+        const double S2 = 1.0 / sqrt((double)M2);
+        W = (float)((S2 / S1) * (double)f.w);
+    }
+    const double px = f.px, py = f.py;
+    const __m128d dudv = Pair(Rd<float>(em, kOffDu), Rd<float>(em, kOffDv));
+    const __m128d uv0  = Pair((double)c.u0f, (double)c.v0f);
+    for (int i = 0; i < 4; ++i) {
+        const double cxw = (double)k.corner[2 * i] * (double)W;
+        const double chh = (double)k.corner[2 * i + 1] * (double)f.h;
+        const double x = ((chh * (-uy)) + (cxw * ux)) + px;
+        const double y = ((cxw * uy) + (chh * ux)) + py;
+        q->xy[i]  = Pair(x, y);
+        q->pos[i] = _mm_cvtpd_ps(q->xy[i]);
+        q->zd[i]  = (double)f.pz;
+        q->zf[i]  = f.pz;
+        q->uv[i]  = _mm_cvtpd_ps(_mm_add_pd(_mm_mul_pd(WidenPair(k.uvCorner + 2 * i), dudv), uv0));
+    }
+    q->colour = f.colour;
+    q->zSame = true;
 }
 
 // ---- 0x97CC10..0x97D35A: the second quad, for an emitter with flag 0x8 ----
