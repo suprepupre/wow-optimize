@@ -1020,7 +1020,14 @@ static LONG WINAPI WowOpt_UnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
             GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                (LPCSTR)&WowOpt_UnhandledExceptionFilter, &hDll);
-            for (int i = 0; i < 64; i++) {
+            // Two kilobytes, not 256 bytes: a fault inside ntdll's heap code sits under
+            // hundreds of bytes of its own locals, and in three field crashes (2026-10-07,
+            // the same ntdll heap fault each time) the only words that named a caller were
+            // in the first 256, both inside ntdll, so the log never said who had called the
+            // allocator. Words in wow.exe and in this DLL are always printed; the rest of
+            // the modules stop after twelve lines so a deep stack does not flood the log.
+            int otherPrinted = 0;
+            for (int i = 0; i < 512; i++) {
                 DWORD val = stack[i]; // Safe inside __try
                 // Filter: only log values that look like code addresses
                 if (val < 0x00401000 || val > 0x7FFE0000) continue;
@@ -1029,9 +1036,12 @@ static LONG WINAPI WowOpt_UnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                        (LPCSTR)val, &hMod)) {
                     const char* label = "unknown";
-                    if (hMod == hWow) label = "WoW.exe";
-                    else if (hMod == hDll) label = "wow_optimize.dll";
+                    bool ours = false;
+                    if (hMod == hWow) { label = "WoW.exe"; ours = true; }
+                    else if (hMod == hDll) { label = "wow_optimize.dll"; ours = true; }
                     else {
+                        if (otherPrinted >= 12) continue;
+                        ++otherPrinted;
                         // For other modules, get the filename
                         static char stackModName[MAX_PATH];
                         if (GetModuleFileNameA(hMod, stackModName, MAX_PATH)) {
@@ -1040,9 +1050,32 @@ static LONG WINAPI WowOpt_UnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
                             label = lastSlash ? lastSlash + 1 : stackModName;
                         }
                     }
-                    Log("!!!   [ESP+0x%02X] = 0x%08X  (%s+0x%X)",
+                    (void)ours;
+                    Log("!!!   [ESP+0x%03X] = 0x%08X  (%s+0x%X)",
                         i * 4, val, label, (unsigned)(val - (uintptr_t)hMod));
                 }
+            }
+            // The frame-pointer chain as well, where the code above has kept one.
+            {
+                DWORD* fp = (DWORD*)ctx->Ebp;
+                int printed = 0;
+                for (int depth = 0; depth < 24 && fp; ++depth) {
+                    DWORD next = fp[0], ret = fp[1];
+                    if (ret >= 0x00401000 && ret <= 0x7FFE0000) {
+                        HMODULE hMod = NULL;
+                        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                               (LPCSTR)ret, &hMod)) {
+                            const char* label = (hMod == hWow) ? "WoW.exe" : (hMod == hDll) ? "wow_optimize.dll" : "other";
+                            Log("!!!   [EBP chain %d] return 0x%08X  (%s+0x%X)", depth, ret, label,
+                                (unsigned)(ret - (uintptr_t)hMod));
+                            ++printed;
+                        }
+                    }
+                    if (next <= (DWORD)(uintptr_t)fp || next - (DWORD)(uintptr_t)fp > 0x100000) break;
+                    fp = (DWORD*)(uintptr_t)next;
+                }
+                if (!printed) Log("!!!   [EBP chain] nothing readable from EBP=0x%08X", ctx->Ebp);
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             Log("!!! STACK WALK: (failed to read stack)");
