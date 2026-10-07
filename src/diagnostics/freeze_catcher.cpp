@@ -55,6 +55,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <tlhelp32.h>
 
 #include "freeze_catcher.h"
 #include "config.h"
@@ -115,6 +116,56 @@ unsigned long g_worstMs  = 0;
 unsigned long g_wakes    = 0;
 unsigned long g_thinned  = 0;    // times a stall outlasted the ring
 
+// ---- the client's other threads, sampled only while a loading screen is the long frame ----
+//
+// Drain's loading screens (2026-10-07, 17 s for 16768 reads and 490 MB) show the main thread in
+// NtDelayExecution for 63% of the samples taken inside them, every one through the client's own
+// Sleep(1) loop at sub_4BAE10 and sub_4B9DE0. The main thread is waiting for something, and a
+// main-thread sample cannot say what: the client's two worker threads (start address
+// wow.exe+0x36FF30, 8% and 7% of a core over a five-minute interval that held one load) are the
+// candidates, and whether they are decompressing, reading, or waiting on each other decides
+// whether a load can be made faster from here at all. The sampling profiler samples background
+// threads one in fifty and over a whole session, which drowns a load in idle time. This samples
+// one worker thread per main-thread sample, only inside a long frame that is a loading screen,
+// and prints what they were doing with that frame.
+constexpr int kMaxWorkers = 32;
+HANDLE g_wh[kMaxWorkers];
+int    g_wn = 0;
+int    g_wcursor = 0;
+long   g_wFrame = -1;          // the frame (by its start stamp) the thread list was taken for
+struct WorkerRow { uintptr_t eip, c0, c1, c2; unsigned n; };
+constexpr int kWorkerRows = 96;
+WorkerRow g_wrow[kWorkerRows];
+unsigned  g_wsamples = 0;
+unsigned  g_wlost = 0;
+
+void CloseWorkers() {
+    for (int i = 0; i < g_wn; ++i) if (g_wh[i]) CloseHandle(g_wh[i]);
+    g_wn = 0;
+    g_wcursor = 0;
+}
+
+void RefreshWorkers() {
+    CloseWorkers();
+    const DWORD self = GetCurrentProcessId();
+    const DWORD mainTid = g_main ? GetThreadId(g_main) : 0;
+    const DWORD ownTid = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != self) continue;
+            if (te.th32ThreadID == mainTid || te.th32ThreadID == ownTid) continue;
+            if (g_wn >= kMaxWorkers) break;
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            if (h) g_wh[g_wn++] = h;
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+}
+
 long NowMs() {
     LARGE_INTEGER n;
     QueryPerformanceCounter(&n);
@@ -152,6 +203,35 @@ void CaptureChain(const CONTEXT& ctx, uintptr_t* out) {
         if (next <= ebp) break;
         ebp = next;
     }
+}
+
+void SampleOneWorker() {
+    if (g_wn == 0) return;
+    HANDLE h = g_wh[g_wcursor];
+    g_wcursor = (g_wcursor + 1) % g_wn;
+    if (!h) return;
+    CONTEXT ctx;
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    if (SuspendThread(h) == (DWORD)-1) return;
+    uintptr_t eip = 0;
+    uintptr_t chain[kChain] = {};
+    if (GetThreadContext(h, &ctx)) {
+        eip = (uintptr_t)ctx.Eip;
+        CaptureChain(ctx, chain);
+    }
+    ResumeThread(h);
+    if (!eip) return;
+    ++g_wsamples;
+    // chain[0] is the word on top of the stack and the rest are return addresses up the frame
+    // chain; a thread inside a system call has no frame of its own, so the first return address
+    // is often the caller's.
+    uint32_t hsh = (uint32_t)((eip * 2654435761u) ^ (chain[1] * 40503u) ^ (chain[2] * 2246822519u)) % kWorkerRows;
+    for (int step = 0; step < kWorkerRows; ++step, hsh = (hsh + 1) % kWorkerRows) {
+        WorkerRow& r = g_wrow[hsh];
+        if (r.n == 0) { r.eip = eip; r.c0 = chain[0]; r.c1 = chain[1]; r.c2 = chain[2]; r.n = 1; return; }
+        if (r.eip == eip && r.c1 == chain[1] && r.c2 == chain[2]) { ++r.n; return; }
+    }
+    ++g_wlost;
 }
 
 // The exported name at or just before an address inside a module, for the
@@ -225,6 +305,29 @@ const char* StateText(LONG f, char* out, size_t cap) {
     if (f & kFlagLuaLoadMode) snprintf(out + strlen(out), cap - strlen(out), "%sLua loading mode", out[0] ? ", " : "");
     if (!out[0]) snprintf(out, cap, "none of those");
     return out;
+}
+
+void PrintWorkers() {
+    if (g_wsamples == 0) return;
+    Log("[FreezeCatcher]   the client's other threads over the same frame, %u sample(s) across %d thread(s)%s:",
+        g_wsamples, g_wn, g_wlost ? " (some rows lost)" : "");
+    bool taken[kWorkerRows];
+    memset(taken, 0, sizeof(taken));
+    for (int printed = 0; printed < 10; ++printed) {
+        int best = -1;
+        for (int i = 0; i < kWorkerRows; ++i)
+            if (!taken[i] && g_wrow[i].n && (best < 0 || g_wrow[i].n > g_wrow[best].n)) best = i;
+        if (best < 0) break;
+        taken[best] = true;
+        char a[140], b[140], c[140];
+        Describe(g_wrow[best].eip, a, sizeof(a));
+        Describe(g_wrow[best].c1, b, sizeof(b));
+        Describe(g_wrow[best].c2, c, sizeof(c));
+        Log("[FreezeCatcher]     %5u  %s  <-  %s  <-  %s", g_wrow[best].n, a, b, c);
+    }
+    memset(g_wrow, 0, sizeof(g_wrow));
+    g_wsamples = 0;
+    g_wlost = 0;
 }
 
 void PrintSamples(const char* what, long len, int take) {
@@ -334,6 +437,10 @@ DWORD WINAPI WatchdogProc(LPVOID) {
                 nextInterimMs *= 4;
             }
             NoteState();
+            if (g_flags & kFlagLoading) {
+                if (g_wFrame != start) { RefreshWorkers(); g_wFrame = start; }
+                SampleOneWorker();
+            }
             CONTEXT ctx;
             ctx.ContextFlags = CONTEXT_CONTROL;
             if (SuspendThread(g_main) != (DWORD)-1) {
@@ -418,6 +525,8 @@ void OnFrame() {
 
         NoteState();
         PrintSamples("a frame of", len, (int)(n < kRing ? n : kRing));
+        if (g_flags & kFlagLoading) PrintWorkers();
+        else { memset(g_wrow, 0, sizeof(g_wrow)); g_wsamples = 0; g_wlost = 0; }
     }
     InterlockedExchange(&g_flags, 0);
 }
@@ -471,6 +580,7 @@ void Shutdown() {
         CloseHandle(g_thread);
         g_thread = nullptr;
     }
+    CloseWorkers();
 }
 
 void LogStats() {

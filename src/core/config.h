@@ -39,6 +39,7 @@ namespace Config {
         int SessionLogsToKeep = 10;
         bool OptMemoryPressure = true;
         bool OptHeapOptimization = true;
+        bool OptAsyncPollSpin = false;
         bool OptHeapCompactor = true;
         bool OptDefragLf = false;
         bool OptVulkanDXVK = false;
