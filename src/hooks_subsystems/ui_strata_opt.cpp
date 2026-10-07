@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <xmmintrin.h>
 #include <MinHook.h>
 
 #include "ui_strata_opt.h"
@@ -85,6 +86,24 @@ int __fastcall Hook_SimpleFrame_OnUpdate(void* this_ptr, void* /*edx*/, float el
 
     ++g_framesEvaluated;
     const uintptr_t frame = (uintptr_t)this_ptr;
+
+    // The client's level loop (sub_494A10) reads the next frame's link at +0x298 and then
+    // its vtable the moment this call returns, and the profile puts a single-instruction
+    // peak on that first load: a pointer-chase miss, not arithmetic. Everything this
+    // routine reads from a frame lives in five cache lines (the vtable, the dirty and
+    // animation flags, the script handler, the child list, the sibling link), so they
+    // are requested now and have this call's own work to arrive in. A prefetch of an
+    // address that turns out to be unmapped is dropped without a fault. Not measured.
+    {
+        const uintptr_t next = *(const uintptr_t*)(frame + 0x298);
+        if (next && !(next & 1)) {
+            _mm_prefetch((const char*)next, _MM_HINT_T0);
+            _mm_prefetch((const char*)(next + 0x98), _MM_HINT_T0);
+            _mm_prefetch((const char*)(next + 0x144), _MM_HINT_T0);
+            _mm_prefetch((const char*)(next + 0x214), _MM_HINT_T0);
+            _mm_prefetch((const char*)(next + 0x298), _MM_HINT_T0);
+        }
+    }
 
     // 1. Lua script handler at [frame + 0x144]
     const uintptr_t scriptHandler = *(const uintptr_t*)(frame + 0x144);
