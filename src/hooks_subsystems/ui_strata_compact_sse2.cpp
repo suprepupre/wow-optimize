@@ -57,8 +57,15 @@ static bool g_dead = false;
 static bool g_abSubject = false;
 static int  g_benchId = -1;
 
-constexpr uint32_t kLearnCalls = 500;
-constexpr uint32_t kResampleMask = 0xFF;
+// Eight calls, not five hundred, and one in 1024 after. The client's routine rescans the whole
+// frame list for every empty level, 100 to 250 ms in a UI with a few thousand frames, and in a
+// ten hour session of the player who reported it only 106 calls were ever made: with a learning
+// phase of 500 the fast path was never reached and every call was the client's slow one (23 of
+// them showed up as frames of 165 ms on average). What the learning phase checked, that the
+// level count did not grow, was little. Every call the fast path answers is now checked after
+// the fact by CheckCompaction below, which states what compaction promises.
+constexpr uint32_t kLearnCalls = 8;
+constexpr uint32_t kResampleMask = 0x3FF;
 
 static uint64_t g_calls = 0;
 static uint64_t g_fastCompacts = 0;
@@ -66,6 +73,7 @@ static uint64_t g_earlySkips = 0;
 static uint32_t g_verified = 0;
 static uint32_t g_mismatches = 0;
 static uint64_t g_controlCalls = 0;
+static uint64_t g_checkedFast = 0;
 
 constexpr uint32_t kMaxLevels = 128;
 static int g_remapTable[kMaxLevels];
@@ -74,6 +82,69 @@ static void Retire(const char* reason) {
     g_dead = true;
     ++g_mismatches;
     Log("[UIStrataCompact] RETIRED: %s. All subsequent calls delegate to client.", reason);
+}
+
+// What compaction promises, stated so it can be checked on the real frames after every call the
+// fast path answers: no frame's level went up, frames that shared a level still share one, two
+// levels keep their order and stay distinct, no level is at or past the new count, and the count
+// did not grow. Any of these failing means the remap is wrong, and the module retires itself
+// (the damage is one call's worth of frame layering, which the client's next compaction redoes).
+constexpr uint32_t kMaxFrames = 8192;
+static uintptr_t g_snapFrame[kMaxFrames];
+static uint32_t  g_snapLevel[kMaxFrames];
+static uint32_t  g_snapCount = 0;
+static bool      g_snapValid = false;
+static uint32_t  g_snapLevelsBefore = 0;
+
+static void SnapshotFrames(void* thisPtr, unsigned int strataIdx) {
+    g_snapCount = 0;
+    g_snapValid = false;
+    if (strataIdx > 8) return;
+    const uintptr_t strata = *(uintptr_t*)((uintptr_t)thisPtr + (825 + strataIdx) * 4);
+    if (!strata) return;
+    g_snapLevelsBefore = *(uint32_t*)(strata + 8);
+    const uintptr_t frameListHead = *(uintptr_t*)((uintptr_t)thisPtr + 821 * 4);
+    const int nextOffset = *(int*)((uintptr_t)thisPtr + 819 * 4);
+    uintptr_t f = frameListHead;
+    if ((f & 1) != 0) f = 0;
+    while ((f & 1) == 0 && f) {
+        if (*(uint32_t*)(f + 208) == strataIdx) {
+            if (g_snapCount >= kMaxFrames) return;     // too many to hold: no check this call
+            g_snapFrame[g_snapCount] = f;
+            g_snapLevel[g_snapCount] = *(uint32_t*)(f + 212);
+            ++g_snapCount;
+        }
+        f = *(uintptr_t*)(f + nextOffset + 4);
+    }
+    g_snapValid = true;
+}
+
+// Returns null when the promise holds, or what it broke.
+static const char* CheckCompaction(void* thisPtr, unsigned int strataIdx) {
+    if (!g_snapValid) return nullptr;
+    const uintptr_t strata = *(uintptr_t*)((uintptr_t)thisPtr + (825 + strataIdx) * 4);
+    if (!strata) return nullptr;
+    const uint32_t levelsAfter = *(uint32_t*)(strata + 8);
+    if (levelsAfter > g_snapLevelsBefore) return "the level count grew";
+
+    int32_t mapped[kMaxLevels];
+    for (uint32_t i = 0; i < kMaxLevels; ++i) mapped[i] = -1;
+    for (uint32_t i = 0; i < g_snapCount; ++i) {
+        const uint32_t before = g_snapLevel[i];
+        const uint32_t after = *(uint32_t*)(g_snapFrame[i] + 212);
+        if (before >= kMaxLevels || before >= g_snapLevelsBefore) continue;   // not a level the compaction owns
+        if (after > before) return "a frame's level went up";
+        if (after >= levelsAfter && levelsAfter != 0) return "a frame sits at or past the new level count";
+        if (mapped[before] == -1) mapped[before] = (int32_t)after;
+        else if (mapped[before] != (int32_t)after) return "frames that shared a level were split";
+    }
+    int32_t prev = -1;
+    for (uint32_t l = 0; l < kMaxLevels; ++l) {
+        if (mapped[l] == -1) continue;
+        if (mapped[l] <= prev) return "two levels swapped or merged";
+        prev = mapped[l];
+    }
+    return nullptr;
 }
 
 static inline void CompactFast(void* thisPtr, unsigned int strataIdx) {
@@ -227,7 +298,13 @@ static void __fastcall Hook_CompactLevels(void* thisPtr, void* /*dummyEdx*/, uns
         return;
     }
 
+    SnapshotFrames(thisPtr, strataIdx);
     CompactFast(thisPtr, strataIdx);
+    if (const char* broke = CheckCompaction(thisPtr, strataIdx)) {
+        Retire(broke);
+        return;
+    }
+    ++g_checkedFast;
 }
 
 } // anonymous namespace
@@ -262,7 +339,7 @@ void Init() {
     g_benchId = SelfBench::Register("UIStrataCompact");
     SamplingProfiler::RegisterSelfSymbol("UIStrataCompact", (const void*)kTarget);
 
-    Log("[UIStrataCompact] ACTIVE on CFrameStrataManager::CompactLevels (sub_495060 @ 0x%08X, %u learn calls, 1/256 sampling)",
+    Log("[UIStrataCompact] ACTIVE on CFrameStrataManager::CompactLevels (sub_495060 @ 0x%08X, %u learn calls, 1/1024 sampling, every fast call checked afterwards)",
         (uintptr_t)kTarget, kLearnCalls);
 
     if (AbTest::IsSubject("UIStrataCompact", &g_abSubject)) {
@@ -275,8 +352,10 @@ void Shutdown() {
 
 void LogStats() {
     if (!Config::g_settings.OptUIStrataCompact) return;
-    Log("[UIStrataCompact] calls=%llu fast=%llu early_skips=%llu verified=%u mismatches=%u ctrl=%llu dead=%d",
-        g_calls, g_fastCompacts, g_earlySkips, g_verified, g_mismatches, g_controlCalls, g_dead ? 1 : 0);
+    Log("[UIStrataCompact] calls=%llu fast=%llu early_skips=%llu verified=%u mismatches=%u ctrl=%llu dead=%d, "
+        "%llu fast call(s) checked against the compaction promise afterwards",
+        g_calls, g_fastCompacts, g_earlySkips, g_verified, g_mismatches, g_controlCalls, g_dead ? 1 : 0,
+        g_checkedFast);
 }
 
 } // namespace UIStrataCompact
