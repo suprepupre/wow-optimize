@@ -58,6 +58,7 @@
 #include <tlhelp32.h>
 
 #include "freeze_catcher.h"
+#include "version.h"
 #include "config.h"
 #include "loading_state.h"
 #include "lua_optimize.h"
@@ -529,7 +530,8 @@ DWORD WINAPI WatchdogProc(LPVOID) {
                 nextInterimMs *= 4;
             }
             NoteState();
-            if (g_flags & kFlagLoading) {
+            // Other threads are suspended here, which a translation layer is not asked to do.
+            if ((g_flags & kFlagLoading) && !RunningUnderTranslation()) {
                 if (!g_wActive) { RefreshWorkers(); InterlockedExchange(&g_wActive, 1); }
                 SampleOneWorker();
             }
