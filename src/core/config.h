@@ -38,6 +38,7 @@ namespace Config {
         // startup, so the folder stops growing without anyone having to tidy it.
         int SessionLogsToKeep = 10;
         bool OptMemoryPressure = true;
+        bool OptHeapOptimization = true;
         bool OptHeapCompactor = true;
         bool OptDefragLf = false;
         bool OptVulkanDXVK = false;

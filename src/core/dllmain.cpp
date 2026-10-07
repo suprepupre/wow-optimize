@@ -8225,7 +8225,13 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("[TimerPrecision] GetTickCount/timeGetTime hooks: DISABLED");
 #endif
     Log("--- Heap Optimization ---");
-    bool heapOk = InstallHeapOptimization();
+    // This had no switch until now. A player whose session ends in an allocator crash inside ntdll
+    // (the same registers three times, at one cinematic) had no way to rule it out.
+    bool heapOk = false;
+    if (Config::g_settings.OptHeapOptimization)
+        heapOk = InstallHeapOptimization();
+    else
+        Log("[HeapOptimization] OFF (General/HeapOptimization=0): no heap is switched to the low-fragmentation front end by this DLL.");
 #if !TEST_DISABLE_HEAP_REDIRECT
     Log("--- Process Heap Redirect ---");
     bool heapRedirectOk = InstallHeapRedirectToMimalloc();
@@ -9876,7 +9882,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     Log("  [%s] GetTickCount (QPC)",           HookState(Config::g_settings.OptTimingFix, tickOk));
     Log("  [%s] timeGetTime (QPC sync)",       HookState(Config::g_settings.OptTimingFix, tgtOk));
 #endif
-    Log("  [%s] Heap optimization (LFH)",      heapOk      ? " OK " : "FAIL");
+    Log("  [%s] Heap optimization (LFH)",      HookState(Config::g_settings.OptHeapOptimization, heapOk));
     // InstallThreadIdCacheHook installs nothing and says so; a switch left on
     // used to turn this line into FAIL, which reads as a fault.
     Log("  [SKIP] ThreadId cache (never installed: the native call is already cheap)");
