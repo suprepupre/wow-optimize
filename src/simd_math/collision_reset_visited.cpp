@@ -45,7 +45,6 @@
 #include "config.h"
 #include "ab_test.h"
 #include "sampling_profiler.h"
-#include "self_bench.h"
 
 extern "C" void Log(const char* fmt, ...);
 MH_STATUS WineSafe_CreateHook(void* target, void* detour, void** original);
@@ -68,7 +67,6 @@ ResetFn g_orig = nullptr;
 bool g_installed = false;
 bool g_dead = false;
 bool g_abSubject = false;
-int  g_benchId = -1;
 
 constexpr uint32_t kLearnCalls = 500;
 constexpr uint32_t kResampleMask = 0xFF;
@@ -106,9 +104,7 @@ static __declspec(noinline) int VerifyWithClient(void* self, void* edx, uint32_t
         g_verifySamples[s].preByte = flagsBase[indices[s] * 2];
     }
 
-    const uint64_t t0 = SelfBench::Now();
     const int clientResult = g_orig(self, edx);
-    const uint64_t clientCycles = SelfBench::Now() - t0;
 
     const uint32_t postCount = *(volatile uint32_t*)0x00D2DBF8;
     const uint32_t postHit = *(volatile uint32_t*)0x00D2DBFC;
@@ -128,9 +124,6 @@ static __declspec(noinline) int VerifyWithClient(void* self, void* edx, uint32_t
     }
 
     ++g_verified;
-    if (g_benchId >= 0) {
-        SelfBench::Pair(g_benchId, clientCycles / 2, clientCycles);
-    }
     return clientResult;
 }
 
@@ -230,7 +223,6 @@ bool Init() {
 
     g_installed = true;
     g_abSubject = AbTest::IsSubject("CollisionResetVisited", &g_abSubject);
-    g_benchId = SelfBench::Register("CollisionResetVisited");
     SamplingProfiler::RegisterSelfSymbol("CollisionResetVisited", (const void*)&Hook_CollisionResetVisited);
 
     Log("[CollisionResetVisited] ACTIVE on sub_7C7610 (0x%08X), 2.72%% of executing "

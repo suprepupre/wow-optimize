@@ -4,7 +4,6 @@
 #include <emmintrin.h>
 #include "config.h"
 #include "ab_test.h"
-#include "self_bench.h"
 #include "MinHook.h"
 #include "version.h"
 #include "sampling_profiler.h"
@@ -29,7 +28,6 @@ static const uint8_t kExpectedPrologue[8] = {
 
 static bool g_dead = false;
 static bool g_abSubject = false;
-static int  g_benchId = -1;
 
 constexpr uint32_t kLearnCalls = 500;
 constexpr uint32_t kResampleMask = 0xFF;
@@ -74,9 +72,7 @@ static inline void* RemoveFast(void* thisPtr, void* frameToRemove) {
 }
 
 static __declspec(noinline) void* VerifyWithClient(void* thisPtr, void* frameToRemove) {
-    const uint64_t t0 = SelfBench::Now();
     void* const clientRet = g_orig(thisPtr, frameToRemove);
-    const uint64_t clientCycles = SelfBench::Now() - t0;
 
     if (clientRet != nullptr) {
         Retire("client returned non-null pointer");
@@ -84,9 +80,6 @@ static __declspec(noinline) void* VerifyWithClient(void* thisPtr, void* frameToR
     }
 
     ++g_verified;
-    if (g_benchId >= 0) {
-        SelfBench::Pair(g_benchId, clientCycles / 2, clientCycles);
-    }
     return clientRet;
 }
 
@@ -142,7 +135,6 @@ void Init() {
         return;
     }
 
-    g_benchId = SelfBench::Register("UIFrameRemove");
     SamplingProfiler::RegisterSelfSymbol("UIFrameRemove", (const void*)kTarget);
 
     Log("[UIFrameRemove] ACTIVE on frame strata unlinking (sub_491160 @ 0x%08X, %u learn calls, 1/256 sampling)",

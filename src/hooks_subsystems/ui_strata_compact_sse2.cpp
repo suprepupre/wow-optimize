@@ -30,7 +30,6 @@
 #include <cstring>
 #include "config.h"
 #include "ab_test.h"
-#include "self_bench.h"
 #include "MinHook.h"
 #include "version.h"
 #include "sampling_profiler.h"
@@ -55,7 +54,6 @@ static const uint8_t kExpectedPrologue[8] = {
 
 static bool g_dead = false;
 static bool g_abSubject = false;
-static int  g_benchId = -1;
 
 // Eight calls, not five hundred, and one in 1024 after. The client's routine rescans the whole
 // frame list for every empty level, 100 to 250 ms in a UI with a few thousand frames, and in a
@@ -258,9 +256,7 @@ static __declspec(noinline) void VerifyWithClient(void* thisPtr, unsigned int st
 
     const uint32_t preCount = *(uint32_t*)(strata + 8);
 
-    const uint64_t t0 = SelfBench::Now();
     g_orig(thisPtr, strataIdx);
-    const uint64_t clientCycles = SelfBench::Now() - t0;
 
     const uint32_t postCount = *(uint32_t*)(strata + 8);
 
@@ -270,9 +266,6 @@ static __declspec(noinline) void VerifyWithClient(void* thisPtr, unsigned int st
     }
 
     ++g_verified;
-    if (g_benchId >= 0) {
-        SelfBench::Pair(g_benchId, clientCycles / 2, clientCycles);
-    }
 }
 
 __declspec(safebuffers)
@@ -336,7 +329,6 @@ void Init() {
         return;
     }
 
-    g_benchId = SelfBench::Register("UIStrataCompact");
     SamplingProfiler::RegisterSelfSymbol("UIStrataCompact", (const void*)kTarget);
 
     Log("[UIStrataCompact] ACTIVE on CFrameStrataManager::CompactLevels (sub_495060 @ 0x%08X, %u learn calls, 1/1024 sampling, every fast call checked afterwards)",
