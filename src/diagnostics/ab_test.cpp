@@ -816,6 +816,15 @@ static void ReportSubject(int i, const char* name) {
                 "closest thing to a controlled figure this project can produce.",
                 d < 0 ? -d : d, d > 0 ? "faster" : "slower",
                 meanOff != 0.0 ? (-100.0 * d / meanOff) : 0.0);
+            // A census called from inside a subject's own hook runs in the ON half and not in the
+            // OFF half, where the hook stands aside before reaching it, so its cost is booked as
+            // the bundle's. prince's 2026-10-07 session had AnimTrackCensus on beside a bundle
+            // that read 0.82 ms slower (+6.1%); the profiler of the same session put the census
+            // at 2.64% of executing time, about 0.35 ms of a 13.4 ms frame.
+            if (Config::g_settings.OptAnimTrackCensus)
+                Log("[AbTest]     AnimTrackCensus is on, and it runs inside the animation subjects' hooks, so only in "
+                    "the ON half: its cost is counted against them. Read this figure as pessimistic, or switch it "
+                    "off for a clean run.");
             if (g_on[i].over || g_off[i].over) {
                 Log("[AbTest]     without the %u and %u frame(s) over 120 ms, that "
                     "becomes %.3f ms %s. Those frames are %.0f%% of the difference "
