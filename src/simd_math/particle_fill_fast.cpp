@@ -102,8 +102,11 @@
 // array. Offline against the client's own x87 code for the evaluator and its callees,
 // generated from the disassembly, over six million random emitters with the
 // integer, colour and alpha values taken before they are rounded as well as after:
-// no difference; fifteen wrong versions were each caught except those that are
-// the same arithmetic, which the report in the commit lists.
+// no difference. Of twenty-one wrong versions run through it, eleven were caught and ten
+// were not: six are the same arithmetic, one only changed what is declined, one differs
+// for a NaN operand, and two (the order of the two alpha scales, the order of the life
+// product) differ by about 1e-16 ahead of a float and a byte, which random input reaches
+// about once in a billion. For those two the transcription was read against the assembly.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -249,16 +252,17 @@ __declspec(noinline) bool EvalModel(const char* em, const float* particle, Evalu
 // Frame by the Build functions in particle_fill_model.h, which loop to four and write named
 // members; Frame.sinv and Frame.cosv by sub_6F7A60, two floats; Evaluated by sub_979D60 or
 // sub_979E90, which write the colour dword, two floats, and two ints through the five
-// pointers (both read, 979E90 in full: *a3, a3[3], a4[0..1], *a5, *a6); rot0 and rate by
-// sub_97A130, one float each.
-__declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float* box, Kind kind, const Constants& k) {
+// pointers (both read, 979E90 in full: *a3, a3[3], a4[0..1], *a5, *a6), or by EvalModel, five
+// stores of named members and only on success; rot0 and rate by sub_97A130, one float each.
+__declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float* box, Kind kind, const Constants& k,
+                                    bool modelMayAnswer) {
     unsigned idx;
     if (!Select(em, particle, (uintptr_t)particle, k.table, &idx)) return kEarly;
 
     const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
     Evaluated e;
     e.colour = 0; e.w = 0.0f; e.h = 0.0f; e.tile = 0; e.extra = 0;
-    if (!(g_evalArmed && !(flags & kFlagColourFn) && EvalModel(em, particle, &e)))
+    if (!(modelMayAnswer && g_evalArmed && !(flags & kFlagColourFn) && EvalModel(em, particle, &e)))
         ((EvalFn)((flags & kFlagColourFn) ? kEvalColour : kEvalPlain))(
             em, nullptr, particle, &e.colour, &e.w, &e.tile, &e.extra);
     g_lastColour = e.colour;
@@ -364,10 +368,12 @@ __declspec(noinline) void Retire(Kind kind, uint32_t flags, const char* why) {
 
 // A difference in the verification can be the evaluator's doing and not this module's: the colour
 // and tile come from a client routine that this side and the client's own fill each call once per
-// particle, and if that routine does not return the same thing twice for one particle (a particle
-// advanced in between, state it reads that something else changes) the two outputs differ
-// whatever this module computes. Asked after a difference, by calling the evaluator twice more.
-// True when the evaluator now answers differently from what Process was given, or from itself.
+// particle, and a routine that does not return the same thing twice in a row for one particle
+// makes the two outputs differ whatever this module computes. Asked after a difference, by calling
+// the evaluator twice more. True only when those two calls differ from each other. What ran between
+// Process's call and these is the client's own fill, so an answer that is steady but is not what
+// Process saw means the fill changed state this module does not reproduce: that is this module's
+// difference, and it is reported in the detail, not excused.
 __declspec(noinline) bool EvaluatorMoved(char* em, float* particle, char* detail, size_t cap) {
     const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
     Evaluated a, b;
@@ -379,8 +385,8 @@ __declspec(noinline) bool EvaluatorMoved(char* em, float* particle, char* detail
     snprintf(detail, cap, "; the evaluator now gives colour %08X then %08X against %08X when this was worked out, "
              "tile %d then %d against %d, particle age bits %08X now and %08X then",
              a.colour, b.colour, g_lastColour, a.tile, b.tile, g_lastTile, ageNow, g_lastAgeBits);
-    return a.colour != g_lastColour || b.colour != a.colour || a.tile != g_lastTile || b.tile != a.tile ||
-           ageNow != g_lastAgeBits;
+    return a.colour != b.colour || a.tile != b.tile || memcmp(&a.w, &b.w, 4) != 0 || memcmp(&a.h, &b.h, 4) != 0 ||
+           a.extra != b.extra;
 }
 
 // The client's evaluator and the model on one particle, outputs compared. Pure on both sides, so
@@ -427,7 +433,6 @@ __declspec(noinline) void CheckEvaluator(char* em, float* particle) {
                 "%08X, %08X); that comparison is dropped.", c.colour, c2.colour, c3.colour);
         return;
     }
-    ++g_mismatches;
     ++g_evalMismatch;
     g_evalDead = true;
     g_evalArmed = false;
@@ -458,7 +463,9 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
     memcpy(privBox, em + kOffBox, sizeof(privBox));
 
     const uint64_t t0 = SelfBench::Now();
-    const int mine = Process(em, particle, &priv, privBox, kind, k);
+    // The client's evaluator here, always: this comparison is about the fill, and CheckEvaluator alone
+    // judges the evaluator model. It also makes g_lastColour the client's own answer for the probe below.
+    const int mine = Process(em, particle, &priv, privBox, kind, k, false);
     const uint64_t t1 = SelfBench::Now();
     if (mine == kDecline) {
         ++g_declined;
@@ -475,7 +482,7 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
         char detail[220];
         if (EvaluatorMoved(em, particle, detail, sizeof(detail))) {
             if (++g_unstable <= 5)
-                Log("[ParticleFillFast] a difference that is not this module's (flags %08X): %s%s. "
+                Log("[ParticleFillFast] the client's evaluator did not repeat itself after a difference (flags %08X): %s%s. "
                     "Not counted, not retired; the client's own output was used.",
                     Rd<uint32_t>(em, kOffFlags), why, detail);
             return theirs;
@@ -513,7 +520,7 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
     if (g_verified[ki] < kLearnCalls || ((unsigned long)g_calls & kResampleMask) == 0)
         return Learn(em, edx, particle, vb, kind);
 
-    const int r = Process(em, particle, vb, (float*)(em + kOffBox), kind, Client());
+    const int r = Process(em, particle, vb, (float*)(em + kOffBox), kind, Client(), true);
     if (r == kDecline) {
         ++g_declined;
         return g_orig(em, edx, particle, vb);
@@ -635,7 +642,7 @@ void LogStats() {
         Log("[ParticleFillFast]   %u comparison(s) differed because the client's colour and tile "
             "evaluator did not answer the same twice for one particle; those fills were left "
             "to the client and not counted.", g_unstable);
-    if (g_mismatches) {
+    if (g_dead) {
         Log("[ParticleFillFast]   DISABLED after a difference from the client's own output; the "
             "line that says which is earlier in this log.");
         return;

@@ -32,7 +32,12 @@
 // list, run this version over the same heap and compare the list node for node
 // (owner, total, order). Any difference restores the client's list by running
 // its version again and retires this module. After that one call in 64 is
-// checked the same way.
+// checked the same way. What the in-game check cannot reach is the allocation of a
+// node: the client's run goes first and creates every node, so this version only ever
+// finds them. The order in which new owners are inserted is covered by the offline
+// harness alone, and by the code being the client's own allocation call and head
+// insertion. SelfBench cannot time this (a call is about 3e8 cycles, over its cap);
+// the module reports its own cycles.
 // ============================================================================
 
 #include "addon_memory_walk.h"

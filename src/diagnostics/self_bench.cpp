@@ -45,6 +45,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <intrin.h>
 
 #include "self_bench.h"
@@ -55,7 +56,10 @@ namespace SelfBench {
 
 namespace {
 
-constexpr int kMaxSlots = 24;
+// Twenty-six modules register and the first version held twenty-four, so two of them were
+// silently missing from every report. Register now counts what it refused.
+constexpr int kMaxSlots = 64;
+int g_refused = 0;
 
 struct Slot {
     const char* name;
@@ -90,7 +94,7 @@ constexpr uint64_t kAdaptiveFloor = 20000;
 }  // namespace
 
 int Register(const char* name) {
-    if (g_count >= kMaxSlots) return -1;
+    if (g_count >= kMaxSlots) { ++g_refused; return -1; }
     const int id = g_count++;
     g_slot[id].name = name;
     return id;
@@ -137,6 +141,8 @@ void LogStats() {
         "saving: it says whether a replacement is faster and by how much, not "
         "how much of a frame it is worth.");
 
+    if (g_refused)
+        Log("[SelfBench] %d module(s) asked for a slot and none was left, so they are not reported here.", g_refused);
     for (int i = 0; i < g_count; ++i) {
         const Slot& s = g_slot[i];
         if (!s.pairs) {
@@ -151,11 +157,15 @@ void LogStats() {
                 s.name, (unsigned long long)s.pairs);
             continue;
         }
+        char dropped[64];
+        dropped[0] = 0;
+        if (s.discarded)
+            snprintf(dropped, sizeof(dropped), " (%llu more pair(s) dropped as interruptions)",
+                     (unsigned long long)s.discarded);
         Log("[SelfBench]   %-20s %7.1f cycles against %7.1f, %.2fx, over %llu "
             "pairs%s",
             s.name, ours, theirs, theirs / ours,
-            (unsigned long long)s.pairs,
-            s.discarded ? " (some pairs dropped as outliers)" : "");
+            (unsigned long long)s.pairs, dropped);
         // The first pairs of a session are the first calls into code that is not in
         // the cache yet, and read as slower than the client for that reason: the
         // same four modules were flagged in every log on disk at a few hundred pairs
