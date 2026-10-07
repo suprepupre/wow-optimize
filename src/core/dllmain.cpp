@@ -117,6 +117,7 @@
 #include "../hooks_subsystems/addon_memory_walk.h"
 #include "../hooks_subsystems/async_poll_spin.h"
 #include "../runtime_vm/lua_collect_skip.h"
+#include "../diagnostics/sleep_census.h"
 #include "parallel_particles.h"
 #include "shader_const_dedup_sse2.h"
 #include "batch_colour_convert.h"
@@ -2378,10 +2379,34 @@ extern "C" void WowOpt_MainThreadPump() {
 }
 
 
+// Times the sleep this hook is about to make and files it under whoever asked. Constructed only
+// on the main thread, after the pump, so the time is the sleep and not the per-frame work.
+struct SleepTimer {
+    uintptr_t caller;
+    DWORD ms;
+    LARGE_INTEGER t0;
+    SleepTimer(uintptr_t c, DWORD m) : caller(c), ms(m) { QueryPerformanceCounter(&t0); }
+    ~SleepTimer() {
+        LARGE_INTEGER t1;
+        QueryPerformanceCounter(&t1);
+        if (g_sleepFreq > 0.0) {
+            const double us = (double)(t1.QuadPart - t0.QuadPart) / g_sleepFreq * 1000.0;
+            SleepCensus::Note(caller, ms, us < 0.0 ? 0u : (uint32_t)us, LoadingState::IsLoading());
+        }
+    }
+};
+
 static void WINAPI hooked_Sleep(DWORD ms) {
     if (WOWOPT_FOREIGN_CALLER()) { orig_Sleep(ms); return; }
     if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
         MainThreadPump();
+
+        // The client's own wrapper (sub_86B280) is the one Sleep caller that matters and it says
+        // nothing about who called it: its caller's return address sits three words above the
+        // hook's own (return into the wrapper, the argument, the wrapper's saved EBP, then it).
+        uintptr_t asker = (uintptr_t)_ReturnAddress();
+        if (asker == 0x0086B28D) asker = ((const uintptr_t*)_AddressOfReturnAddress())[3];
+        SleepTimer sleepTimer(asker, ms);
 
         if (ms == 0) {
             orig_Sleep(0);
@@ -5972,6 +5997,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("D3D9StateManager_LogStats", D3D9StateManager_LogStats());
     STAT_TIME("GxRT::LogStats", GxRT::LogStats());
     STAT_TIME("ThreadCpu::Report", ThreadCpu::Report());
+    STAT_TIME("SleepCensus::LogStats", SleepCensus::LogStats());
     STAT_TIME("SimdHooks_LogStats", SimdHooks_LogStats());
     STAT_TIME("DeviceCallbackGuard::LogStats", DeviceCallbackGuard::LogStats());
     STAT_TIME("LayoutRelinkFast::LogStats", LayoutRelinkFast::LogStats());
