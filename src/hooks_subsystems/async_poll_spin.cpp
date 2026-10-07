@@ -76,6 +76,14 @@ constexpr uintptr_t kRetPump       = 0x004BAEB6;   // sub_4BAE10, the loading sc
 constexpr uintptr_t kRetItemWait   = 0x004B9E1B;   // sub_4B9DE0, the wait on one item
 constexpr uintptr_t kRetWorkerIdle = 0x004BA8BD;   // sub_4BA680, the worker with both lists empty
 constexpr uintptr_t kFileWaiting   = 0x00B4A26C;   // s_waiting: the main thread is in AsyncFileReadWait
+// What moves when the reader makes progress, so that a budget spent on one wait is not held against
+// the next one. dword_B4A1F8 is the remaining count the loading pump turns into its progress bar:
+// sub_4B9B20 decrements it once per completion callback. dword_B4A204 is the request
+// AsyncFileReadWait is waiting for. off_AC3470 is the tail of the completed list, which the reader
+// rewrites each time it moves a finished request onto it.
+constexpr uintptr_t kRemaining     = 0x00B4A1F8;
+constexpr uintptr_t kAwaited       = 0x00B4A204;
+constexpr uintptr_t kDoneTail      = 0x00AC3470;
 
 constexpr double kSliceUs   = 80.0;      // one spin, then the caller looks again
 constexpr double kBudgetUs  = 1500.0;    // consecutive spinning per episode before the real sleep
@@ -92,6 +100,7 @@ const char* const kSiteName[kSites] = { "AsyncFileReadWait", "loading pump", "it
 
 struct Episode {
     uint64_t lastTick;
+    uint32_t lastToken;
     double   spunUs;
 };
 // Per thread: two reader threads would otherwise share one budget.
@@ -103,6 +112,32 @@ unsigned long g_slices[kSites];
 unsigned long g_realSleeps[kSites];
 unsigned long g_declinedIdle = 0;
 double        g_spunUsTotal[kSites];
+
+inline uint32_t Token(int site) {
+    const uint32_t remaining = *(volatile const uint32_t*)kRemaining;
+    switch (site) {
+    case kSiteFileWait: return *(volatile const uint32_t*)kAwaited ^ (remaining * 2654435761u);
+    case kSiteWorker:   return *(volatile const uint32_t*)kDoneTail;
+    default:            return remaining;
+    }
+}
+
+// Calls of the wrapper with 1 from main-thread return addresses that are not one of the four, while
+// a loading screen is up. If these dominate, the four are the wrong ones.
+struct Stray { uintptr_t ret; unsigned long n; };
+constexpr int kStrays = 16;
+Stray g_stray[kStrays];
+unsigned long g_strayLost = 0;
+unsigned long g_strayTotal = 0;
+
+void NoteStray(uintptr_t ret) {
+    ++g_strayTotal;
+    for (int i = 0; i < kStrays; ++i) {
+        if (g_stray[i].ret == ret) { ++g_stray[i].n; return; }
+        if (g_stray[i].ret == 0) { g_stray[i].ret = ret; g_stray[i].n = 1; return; }
+    }
+    ++g_strayLost;
+}
 
 inline uint64_t Now() {
     LARGE_INTEGER t;
@@ -127,7 +162,10 @@ void __cdecl Hooked_OsSleep(DWORD ms) {
     case kRetPump:       site = kSitePump; break;
     case kRetItemWait:   site = kSiteItemWait; break;
     case kRetWorkerIdle: site = kSiteWorker; break;
-    default: g_orig(ms); return;
+    default:
+        if (GetCurrentThreadId() == g_mainThreadId && LoadingState::IsLoading()) NoteStray(ret);
+        g_orig(ms);
+        return;
     }
     if (g_abSubject && AbTest::StandAside()) { g_orig(ms); return; }
 
@@ -146,7 +184,9 @@ void __cdecl Hooked_OsSleep(DWORD ms) {
 
     Episode& e = g_ep[site];
     const uint64_t now = Now();
-    if (e.lastTick == 0 || (double)(now - e.lastTick) / g_freq > kGapUs) e.spunUs = 0.0;
+    const uint32_t token = Token(site);
+    if (e.lastTick == 0 || (double)(now - e.lastTick) / g_freq > kGapUs || token != e.lastToken) e.spunUs = 0.0;
+    e.lastToken = token;
     if (e.spunUs >= kBudgetUs) {
         // A wait that has outlasted the budget is waited out asleep.
         ++g_realSleeps[site];
@@ -211,6 +251,21 @@ void LogStats() {
             kSiteName[i], g_slices[i], g_spunUsTotal[i] / 1000.0, g_realSleeps[i]);
     Log("[AsyncPollSpin]   reader idle left asleep because no load or main-thread wait was on: %lu. Plain counters, lower bounds. "
         "Whether loads got shorter is in the \"Load took\" lines.", g_declinedIdle);
+    if (g_strayTotal == 0) {
+        Log("[AsyncPollSpin]   no main-thread Sleep(1) from any other return address during a loading screen.");
+    } else {
+        Log("[AsyncPollSpin]   %lu main-thread Sleep(1) call(s) during loading screens came from return addresses that are not "
+            "one of the four (%lu not tabulated); the most frequent:", g_strayTotal, g_strayLost);
+        bool taken[kStrays] = {};
+        for (int shown = 0; shown < 5; ++shown) {
+            int best = -1;
+            for (int i = 0; i < kStrays; ++i)
+                if (!taken[i] && g_stray[i].ret && (best < 0 || g_stray[i].n > g_stray[best].n)) best = i;
+            if (best < 0) break;
+            taken[best] = true;
+            Log("[AsyncPollSpin]     wow!0x%08X  %lu", (unsigned)g_stray[best].ret, g_stray[best].n);
+        }
+    }
 }
 
 } // namespace AsyncPollSpin

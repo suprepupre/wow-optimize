@@ -116,35 +116,66 @@ unsigned long g_worstMs  = 0;
 unsigned long g_wakes    = 0;
 unsigned long g_thinned  = 0;    // times a stall outlasted the ring
 
-// ---- the client's other threads, sampled only while a loading screen is the long frame ----
+// ---- the client's own worker threads, over a whole loading screen ----
 //
 // Drain's loading screens (2026-10-07, 17 s for 16768 reads and 490 MB) show the main thread in
 // NtDelayExecution for 63% of the samples taken inside them, every one through the client's own
-// Sleep(1) loop at sub_4BAE10 and sub_4B9DE0. The main thread is waiting for something, and a
-// main-thread sample cannot say what: the client's two worker threads (start address
-// wow.exe+0x36FF30, 8% and 7% of a core over a five-minute interval that held one load) are the
-// candidates, and whether they are decompressing, reading, or waiting on each other decides
-// whether a load can be made faster from here at all. The sampling profiler samples background
-// threads one in fifty and over a whole session, which drowns a load in idle time. This samples
-// one worker thread per main-thread sample, only inside a long frame that is a loading screen,
-// and prints what they were doing with that frame.
-constexpr int kMaxWorkers = 32;
-HANDLE g_wh[kMaxWorkers];
-int    g_wn = 0;
-int    g_wcursor = 0;
-long   g_wFrame = -1;          // the frame (by its start stamp) the thread list was taken for
-struct WorkerRow { uintptr_t eip, c0, c1, c2; unsigned n; };
-constexpr int kWorkerRows = 96;
-WorkerRow g_wrow[kWorkerRows];
-unsigned  g_wsamples = 0;
-unsigned  g_wlost = 0;
+// Sleep(1) wrapper. The main thread is waiting for something and a main-thread sample cannot say
+// what. The client's reader threads (start address wow.exe+0x36FF30, the Storm thread wrapper) are
+// the candidates, and whether they are executing, or asleep in their own polling loop, decides
+// whether a load can be made faster by changing how they wait or only by making what they do
+// cheaper. Two measurements, over the whole load and printed once when the loading flag drops:
+// each such thread's CPU time (read at the start of the load and at the end, which needs no
+// suspension at all) and, from one sample per main-thread sample, how often it was inside a system
+// call against executing the client's code, with the addresses it executed.
+constexpr int kMaxWorkers = 12;
+constexpr int kTop = 6;
+struct WorkerTop { uintptr_t at, via; unsigned n; };
+struct WorkerThread {
+    HANDLE    h;
+    DWORD     tid;
+    uintptr_t start;
+    ULONGLONG cpuStart100ns;
+    unsigned  samples, inSystem;
+    WorkerTop top[kTop];
+    unsigned  topLost;
+};
+WorkerThread g_w[kMaxWorkers];
+int           g_wn = 0;
+int           g_wcursor = 0;
+volatile LONG g_wActive = 0;     // a loading screen's thread list is held
+volatile LONG g_wLock = 0;       // the rows, between the watchdog and the main thread's print
+ULONGLONG     g_wStartTick = 0;
+
+typedef LONG (NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+uintptr_t StartAddressOf(HANDLE h) {
+    static NtQueryInformationThread_t fn =
+        (NtQueryInformationThread_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    if (!fn) return 0;
+    PVOID addr = nullptr;
+    if (fn(h, 9 /* ThreadQuerySetWin32StartAddress */, &addr, sizeof(addr), nullptr) != 0) return 0;
+    return (uintptr_t)addr;
+}
+
+ULONGLONG CpuOf(HANDLE h) {
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(h, &c, &e, &k, &u)) return 0;
+    ULARGE_INTEGER a, b;
+    a.LowPart = k.dwLowDateTime; a.HighPart = k.dwHighDateTime;
+    b.LowPart = u.dwLowDateTime; b.HighPart = u.dwHighDateTime;
+    return a.QuadPart + b.QuadPart;
+}
 
 void CloseWorkers() {
-    for (int i = 0; i < g_wn; ++i) if (g_wh[i]) CloseHandle(g_wh[i]);
+    for (int i = 0; i < g_wn; ++i) if (g_w[i].h) CloseHandle(g_w[i].h);
     g_wn = 0;
     g_wcursor = 0;
 }
 
+// The threads the client itself started: those whose start routine is inside wow.exe. The DXVK,
+// driver, sound and this DLL's own threads are not what a load waits on and, sampled evenly,
+// would bury the ones that are in idle rows.
 void RefreshWorkers() {
     CloseWorkers();
     const DWORD self = GetCurrentProcessId();
@@ -159,11 +190,21 @@ void RefreshWorkers() {
             if (te.th32OwnerProcessID != self) continue;
             if (te.th32ThreadID == mainTid || te.th32ThreadID == ownTid) continue;
             if (g_wn >= kMaxWorkers) break;
-            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
-            if (h) g_wh[g_wn++] = h;
+            HANDLE h = OpenThread(THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
+                                  FALSE, te.th32ThreadID);
+            if (!h) continue;
+            const uintptr_t start = StartAddressOf(h);
+            if (start < 0x00400000u || start > 0x00BFFFFFu) { CloseHandle(h); continue; }
+            WorkerThread& w = g_w[g_wn++];
+            memset(&w, 0, sizeof(w));
+            w.h = h;
+            w.tid = te.th32ThreadID;
+            w.start = start;
+            w.cpuStart100ns = CpuOf(h);
         } while (Thread32Next(snap, &te));
     }
     CloseHandle(snap);
+    g_wStartTick = GetTickCount64();
 }
 
 long NowMs() {
@@ -205,33 +246,61 @@ void CaptureChain(const CONTEXT& ctx, uintptr_t* out) {
     }
 }
 
+// One sample of one worker: in a system call (the address is in neither wow.exe nor this DLL) or
+// executing, and for the second, where, with the caller one frame up.
+bool InClientOrOurs(uintptr_t a) {
+    if (a >= 0x00400000u && a <= 0x00BFFFFFu) return true;
+    HMODULE self = nullptr;
+    static uintptr_t lo = 0, hi = 0;
+    if (!lo) {
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)&InClientOrOurs, &self) && self) {
+            const uint8_t* b = (const uint8_t*)self;
+            const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
+            lo = (uintptr_t)b;
+            hi = lo + nt->OptionalHeader.SizeOfImage;
+        }
+    }
+    return lo && a >= lo && a < hi;
+}
+
 void SampleOneWorker() {
     if (g_wn == 0) return;
-    HANDLE h = g_wh[g_wcursor];
+    WorkerThread& w = g_w[g_wcursor];
     g_wcursor = (g_wcursor + 1) % g_wn;
-    if (!h) return;
+    if (!w.h) return;
     CONTEXT ctx;
     ctx.ContextFlags = CONTEXT_CONTROL;
-    if (SuspendThread(h) == (DWORD)-1) return;
+    if (SuspendThread(w.h) == (DWORD)-1) return;
     uintptr_t eip = 0;
     uintptr_t chain[kChain] = {};
-    if (GetThreadContext(h, &ctx)) {
+    if (GetThreadContext(w.h, &ctx)) {
         eip = (uintptr_t)ctx.Eip;
         CaptureChain(ctx, chain);
     }
-    ResumeThread(h);
+    ResumeThread(w.h);
     if (!eip) return;
-    ++g_wsamples;
-    // chain[0] is the word on top of the stack and the rest are return addresses up the frame
-    // chain; a thread inside a system call has no frame of its own, so the first return address
-    // is often the caller's.
-    uint32_t hsh = (uint32_t)((eip * 2654435761u) ^ (chain[1] * 40503u) ^ (chain[2] * 2246822519u)) % kWorkerRows;
-    for (int step = 0; step < kWorkerRows; ++step, hsh = (hsh + 1) % kWorkerRows) {
-        WorkerRow& r = g_wrow[hsh];
-        if (r.n == 0) { r.eip = eip; r.c0 = chain[0]; r.c1 = chain[1]; r.c2 = chain[2]; r.n = 1; return; }
-        if (r.eip == eip && r.c1 == chain[1] && r.c2 == chain[2]) { ++r.n; return; }
+    // Resumed before the lock: this thread never waits for it while another is stopped.
+    if (InterlockedCompareExchange(&g_wLock, 1, 0) != 0) return;
+    ++w.samples;
+    uintptr_t at, via = 0;
+    if (InClientOrOurs(eip)) {
+        at = eip;
+        via = chain[1];
+    } else {
+        ++w.inSystem;
+        // Asleep in a system call: say which client address called it.
+        at = 0;
+        for (int k = 0; k < kChain; ++k)
+            if (chain[k] >= 0x00400000u && chain[k] <= 0x00BFFFFFu) { via = chain[k]; break; }
     }
-    ++g_wlost;
+    bool placed = false;
+    for (int i = 0; i < kTop && !placed; ++i) {
+        if (w.top[i].n && w.top[i].at == at && w.top[i].via == via) { ++w.top[i].n; placed = true; }
+        else if (!w.top[i].n) { w.top[i].at = at; w.top[i].via = via; w.top[i].n = 1; placed = true; }
+    }
+    if (!placed) ++w.topLost;
+    InterlockedExchange(&g_wLock, 0);
 }
 
 // The exported name at or just before an address inside a module, for the
@@ -307,27 +376,44 @@ const char* StateText(LONG f, char* out, size_t cap) {
     return out;
 }
 
+// Once per loading screen, when the flag drops.
 void PrintWorkers() {
-    if (g_wsamples == 0) return;
-    Log("[FreezeCatcher]   the client's other threads over the same frame, %u sample(s) across %d thread(s)%s:",
-        g_wsamples, g_wn, g_wlost ? " (some rows lost)" : "");
-    bool taken[kWorkerRows];
-    memset(taken, 0, sizeof(taken));
-    for (int printed = 0; printed < 10; ++printed) {
-        int best = -1;
-        for (int i = 0; i < kWorkerRows; ++i)
-            if (!taken[i] && g_wrow[i].n && (best < 0 || g_wrow[i].n > g_wrow[best].n)) best = i;
-        if (best < 0) break;
-        taken[best] = true;
-        char a[140], b[140], c[140];
-        Describe(g_wrow[best].eip, a, sizeof(a));
-        Describe(g_wrow[best].c1, b, sizeof(b));
-        Describe(g_wrow[best].c2, c, sizeof(c));
-        Log("[FreezeCatcher]     %5u  %s  <-  %s  <-  %s", g_wrow[best].n, a, b, c);
+    while (InterlockedCompareExchange(&g_wLock, 1, 0) != 0) Sleep(0);
+    const ULONGLONG wallMs = GetTickCount64() - g_wStartTick;
+    Log("[FreezeCatcher] the client's own threads (start routine inside wow.exe) over the loading screen just ended, %llu ms "
+        "of it from the first long frame; CPU time read at both ends, samples one per main-thread sample:",
+        (unsigned long long)wallMs);
+    if (g_wn == 0) Log("[FreezeCatcher]   none found.");
+    for (int i = 0; i < g_wn; ++i) {
+        WorkerThread& w = g_w[i];
+        const ULONGLONG cpu = CpuOf(w.h);
+        const double cpuMs = (double)(cpu >= w.cpuStart100ns ? cpu - w.cpuStart100ns : 0) / 1e4;
+        char start[120];
+        Describe(w.start, start, sizeof(start));
+        Log("[FreezeCatcher]   thread %lu, started at %s: %.0f ms of CPU (%.0f%% of a core); %u sample(s), %.0f%% inside system calls",
+            (unsigned long)w.tid, start, cpuMs, wallMs ? 100.0 * cpuMs / (double)wallMs : 0.0, w.samples,
+            w.samples ? 100.0 * (double)w.inSystem / (double)w.samples : 0.0);
+        bool taken[kTop] = {};
+        for (int shown = 0; shown < kTop; ++shown) {
+            int best = -1;
+            for (int k = 0; k < kTop; ++k)
+                if (!taken[k] && w.top[k].n && (best < 0 || w.top[k].n > w.top[best].n)) best = k;
+            if (best < 0) break;
+            taken[best] = true;
+            char a[140], b[140];
+            Describe(w.top[best].via, b, sizeof(b));
+            if (w.top[best].at) {
+                Describe(w.top[best].at, a, sizeof(a));
+                Log("[FreezeCatcher]       %5u executing %s  <-  %s", w.top[best].n, a, b);
+            } else {
+                Log("[FreezeCatcher]       %5u in a system call from %s", w.top[best].n, b);
+            }
+        }
+        if (w.topLost) Log("[FreezeCatcher]       (%u more sample(s) at addresses that did not fit)", w.topLost);
     }
-    memset(g_wrow, 0, sizeof(g_wrow));
-    g_wsamples = 0;
-    g_wlost = 0;
+    CloseWorkers();
+    InterlockedExchange(&g_wActive, 0);
+    InterlockedExchange(&g_wLock, 0);
 }
 
 void PrintSamples(const char* what, long len, int take) {
@@ -438,7 +524,7 @@ DWORD WINAPI WatchdogProc(LPVOID) {
             }
             NoteState();
             if (g_flags & kFlagLoading) {
-                if (g_wFrame != start) { RefreshWorkers(); g_wFrame = start; }
+                if (!g_wActive) { RefreshWorkers(); InterlockedExchange(&g_wActive, 1); }
                 SampleOneWorker();
             }
             CONTEXT ctx;
@@ -525,10 +611,9 @@ void OnFrame() {
 
         NoteState();
         PrintSamples("a frame of", len, (int)(n < kRing ? n : kRing));
-        if (g_flags & kFlagLoading) PrintWorkers();
-        else { memset(g_wrow, 0, sizeof(g_wrow)); g_wsamples = 0; g_wlost = 0; }
     }
     InterlockedExchange(&g_flags, 0);
+    if (g_wActive && !LoadingState::IsLoading()) PrintWorkers();
 }
 
 bool Init(HANDLE mainThread) {
