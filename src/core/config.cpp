@@ -156,6 +156,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "VaCensus", &Settings::OptVaCensus },
     { "General", "HighPlacementModules", &Settings::OptHighPlacementModules },
     { "General", "HighPlacementClient", &Settings::OptHighPlacementClient },
+    { "General", "HighPlacementHeapGrowth", &Settings::OptHighPlacementHeapGrowth },
     { "General", "ClientWriteBatch", &Settings::OptClientWriteBatch },
     { "Graphics_Sound", "AabbOverlap", &Settings::OptAabbOverlap },
     { "Graphics_Sound", "AabbTransform", &Settings::OptAabbTransform },
@@ -777,6 +778,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptVaCensus             = GetPrivateProfileIntA("General", "VaCensus", 0, iniPath.c_str()) != 0;
         g_settings.OptHighPlacementModules = GetPrivateProfileIntA("General", "HighPlacementModules", 0, iniPath.c_str()) != 0;
         g_settings.OptHighPlacementClient  = GetPrivateProfileIntA("General", "HighPlacementClient", 0, iniPath.c_str()) != 0;
+        g_settings.OptHighPlacementHeapGrowth = GetPrivateProfileIntA("General", "HighPlacementHeapGrowth", 0, iniPath.c_str()) != 0;
         g_settings.HighPlacementMinKB      = GetPrivateProfileIntA("General", "HighPlacementMinKB", 1024, iniPath.c_str());
         if (g_settings.HighPlacementMinKB < 64)    g_settings.HighPlacementMinKB = 64;
         if (g_settings.HighPlacementMinKB > 65536) g_settings.HighPlacementMinKB = 65536;

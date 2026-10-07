@@ -457,6 +457,9 @@ namespace Config {
         // either moves.
         bool OptHighPlacementModules = false;
         bool OptHighPlacementClient = false;
+        // Whether the heap manager's own segment reservations (ntdll asking for more room for a
+        // heap) are placed above 2GB too. Off: see high_placement.cpp, Decide().
+        bool OptHighPlacementHeapGrowth = false;
         int  HighPlacementMinKB = 1024;
         // The box-overlap predicate (sub_78F370) that seventeen culling and
         // pick functions call once per scene node per pass. Six x87 compares,

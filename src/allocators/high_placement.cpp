@@ -157,6 +157,8 @@ const char* g_exState = "not looked for";
 ULONG g_reserveCalls = 0, g_reserveCallsEx = 0;
 ULONG g_attribWalk = 0, g_attribScan = 0, g_attribNone = 0;
 ULONG g_topDownAdded = 0, g_topDownHigh = 0, g_topDownLow = 0, g_topDownRetried = 0;
+ULONG g_heapGrowthLeft = 0;                   // reservations made by ntdll itself that were not moved
+uintptr_t g_ntdllLo = 0, g_ntdllSize = 0;
 ULONG g_liveOverwrites = 0;
 ULONG g_lastReportReserves = 0, g_lastReportTopDown = 0;
 
@@ -318,11 +320,29 @@ Decision Decide(PVOID* baseAddress, SIZE_T asked, ULONG allocationType, bool may
     const bool placeClient  = Config::g_settings.OptHighPlacementClient;
     const bool placeModules = Config::g_settings.OptHighPlacementModules;
     const SIZE_T minBytes   = (SIZE_T)Config::g_settings.HighPlacementMinKB * 1024;
+    // A reservation that ntdll itself makes - the heap manager growing a heap by a segment, which
+    // is what the return address inside ntdll means - is left where Windows puts it unless the
+    // switch says otherwise. Eight dumps from two players on two realms (2026-10-06/07, build
+    // 783ab7af, HighPlacementClient and Modules on) end the same way: DivxDecoder.dll, playing the
+    // Lich King kill movie, calls HeapAlloc(heap, 0, 0x2820) on a heap of one 60 KB segment, and
+    // ntdll faults reading [esi+14h] with ESI zero, in the same state every time (ECX 3B, EDX 3C,
+    // EAX inside a zero-filled table in the first 12 KB of the heap). The request is the first
+    // one the segment cannot satisfy, so the heap manager reserves a second segment, 2 MB from
+    // SegmentReserve, which is over HighPlacementMinKB, is attributed through the stack to the
+    // module that asked, and is moved above 2GB. That a segment of a heap lies above 2GB is the
+    // one thing these dumps could share and nothing in them shows: the second segment is not in
+    // them. A heap segment is also not placement-neutral the way a model buffer is, since every
+    // later caller of the heap is handed memory from it.
+    const bool fromHeapManager = (retAddr - g_ntdllLo) < g_ntdllSize;
+    const bool heapGrowthLeft  = fromHeapManager && !Config::g_settings.OptHighPlacementHeapGrowth;
     const bool candidate    = mayPlace && (placeClient || placeModules) &&
                               *baseAddress == nullptr &&
                               (allocationType & (MEM_TOP_DOWN | MEM_PHYSICAL |
                                                  MEM_LARGE_PAGES)) == 0 &&
-                              asked >= minBytes;
+                              asked >= minBytes && !heapGrowthLeft;
+    if (heapGrowthLeft && mayPlace && (placeClient || placeModules) && *baseAddress == nullptr &&
+        asked >= minBytes)
+        ++g_heapGrowthLeft;
 
     const ModuleTable* table = g_currentTable;
     if (table && (g_live != nullptr || candidate)) {
@@ -578,6 +598,15 @@ bool Init() {
             "The census still runs if it is on.", (unsigned)top);
     }
 
+    {
+        HMODULE nt = GetModuleHandleA("ntdll.dll");
+        if (nt) {
+            const uint8_t* b = (const uint8_t*)nt;
+            const IMAGE_NT_HEADERS* h = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
+            g_ntdllLo = (uintptr_t)b;
+            g_ntdllSize = h->OptionalHeader.SizeOfImage;
+        }
+    }
     g_client = GetModuleHandleA(NULL);
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1259,6 +1288,12 @@ void LogStats() {
             "had no room, %lu failed that way and succeeded when retried as asked.",
             added, added - g_lastReportTopDown,
             g_topDownHigh, g_topDownLow, g_topDownRetried);
+        if (Config::g_settings.OptHighPlacementHeapGrowth)
+            Log("[HighPlacement] heap growth is placed too (HighPlacementHeapGrowth=1).");
+        else
+            Log("[HighPlacement] %lu reservation(s) of the minimum size or more were made by the heap manager "
+                "itself (a heap growing by a segment) and were left where Windows put them; "
+                "HighPlacementHeapGrowth=1 places them as well.", g_heapGrowthLeft);
     } else {
         Log("[HighPlacement] placement is off; this session only records who "
             "reserves what.");
