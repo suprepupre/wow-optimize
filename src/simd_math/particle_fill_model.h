@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <emmintrin.h>
 
 namespace ParticleFillModel {
@@ -36,10 +37,12 @@ constexpr unsigned kOffCullBelow = 0x140;   // float
 constexpr unsigned kOffTableBias = 0x144;   // float
 constexpr unsigned kOffTableMul  = 0x148;   // float
 constexpr unsigned kOffSizeMul   = 0x1EC;   // float, used when kFlagSizeMul is set
+constexpr unsigned kOffTailAge   = 0x0AC;   // float: the cap on the age that scales a tail's direction
 constexpr unsigned kOffBox       = 0x218;   // six floats: min x, min y, min z, max x, max y, max z
 
 constexpr uint32_t kFlagQuad     = 0x000004;   // this emitter writes a quad
-constexpr uint32_t kFlagOther    = 0x000008;   // a second kind of geometry follows the quad
+constexpr uint32_t kFlagOther    = 0x000008;   // a second quad follows the first: the tail, built along the velocity
+constexpr uint32_t kFlagTailCap  = 0x020000;   // the tail's direction is scaled by min(kOffTailAge, age)
 constexpr uint32_t kFlagSizeMul  = 0x000400;
 constexpr uint32_t kFlagAxes     = 0x004000;   // corners are placed along two axes, not one point
 constexpr uint32_t kFlagSpinSign = 0x010000;   // the spin direction depends on the particle's address
@@ -61,6 +64,7 @@ struct Constants {
     const float*    axes;        // flt_B2D590..B2D5A4: six floats
     const uint32_t* normal;      // dword_B2D540: the three words written as every normal
     const float*    matrix;      // flt_B2D550: 4x4, row vectors, translation in [12..14]
+    const float*    tailEps;     // flt_AA2CEC: below this squared length the tail is a plain quad
 };
 
 // ---- the stretch 0x97BE96..0x97BF08: which table entry, and whether to skip ----
@@ -126,7 +130,7 @@ enum class Kind { Unsupported, Flat, Axes, Spin };
 // needs the sine and cosine of an angle; the rest are left to the client.
 inline Kind Classify(const char* em) {
     const uint32_t f = Rd<uint32_t>(em, kOffFlags);
-    if (!(f & kFlagQuad) || (f & kFlagOther) || (f & kFlagFacing)) return Kind::Unsupported;
+    if (!(f & kFlagQuad) || (f & kFlagFacing)) return Kind::Unsupported;
     // `fldz / fcom [edi+0C8h] / test ah,44h / jp` then the same against 0CCh: both
     // must be exactly equal to zero, so NaN means spin.
     const bool still = (Rd<float>(em, kOffSpinRate) == 0.0f) && (Rd<float>(em, kOffSpinVary) == 0.0f);
@@ -353,6 +357,77 @@ inline void GrowBox(const Quad& q, float* box) {
     if (hi & 2) box[4] = (float)_mm_cvtsd_f64(_mm_unpackhi_pd(mx, mx));
     if (_mm_comilt_sd(zmn, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[2])))) box[2] = (float)_mm_cvtsd_f64(zmn);   // 0x220
     if (_mm_comigt_sd(zmx, _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(box[5])))) box[5] = (float)_mm_cvtsd_f64(zmx);   // 0x22C
+}
+
+// ---- 0x97CC10..0x97D35A: the second quad, for an emitter with flag 0x8 ----
+//
+// After the ordinary quad the client builds four more vertices along the particle's velocity.
+// The velocity, negated, goes through the upper 3x3 of the view matrix and is scaled by E, which
+// is the emitter's float at +0xAC, or the particle's age when flag 0x20000 is set and that is
+// smaller. The first two components decide the direction on screen. If their squared length is
+// not below the client's epsilon (and a NaN is not), the four vertices are an ordinary flat
+// quad with the tile's own texture origin; otherwise the quad is stretched along that
+// direction by the size, from the point and from the point moved by the scaled vector.
+//
+// Every expression names its address in the comments of the harness that generated the
+// reference (gen_tail.py); the order of operands in a sum is the client's. A product of two
+// floats is exact in a double, so only the sums and the divisions round.
+//
+//   vx' = F(((b*m4 + c*m8) + a*m0) * E)   a, b, c the negated velocity, m the matrix floats
+//   vy' = F(((b*m5 + c*m9) + a*m1) * E)
+//   vz' = F(E * ((b*m6 + c*m10) + a*m2))
+//   L2  = vy'*vy' + vx'*vx'          r = 1 / sqrt(L2)
+//   A   = vx' * (w * r)              B = vy' * (r * h)      (doubles; Af, Bf their floats)
+//   P0x = F(vx' + px)                P0y = F(vy' + py)      Q = vz' + pz
+//   corner 0 (px - B,   py + A,   pz)    corner 1 (Bf + px, py - Af, pz)
+//   corner 2 (P0x - Bf, Af + P0y, Q)     corner 3 (P0x + Bf, P0y - Af, Q)
+//   u = F(du * cu + u0f), v = F(dv * cv + v0f), with u0f and v0f the floats of the texture origin
+//   of the evaluator's second number (not the first, which the ordinary quad uses).
+inline void BuildTail(const char* em, const Constants& k, const Frame& f, int32_t extra,
+                      const float* particle, Quad* q) {
+    const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
+    double E = (double)Rd<float>(em, kOffTailAge);
+    const double age = (double)particle[0];
+    if ((flags & kFlagTailCap) && E > age) E = age;                          // fcom, ah&41 clear
+
+    const double a = -(double)particle[4], b = -(double)particle[5], c = -(double)particle[6];
+    const float* m = k.matrix;
+    const float vx = (float)((((b * (double)m[4]) + (c * (double)m[8])) + (a * (double)m[0])) * E);
+    const float vy = (float)((((b * (double)m[5]) + (c * (double)m[9])) + (a * (double)m[1])) * E);
+    const float vz = (float)(E * (((b * (double)m[6]) + (c * (double)m[10])) + (a * (double)m[2])));
+
+    // The tile's origin from the second number, as floats (fstp [var_50], [var_4C]).
+    const Cell tc = CellOrigin(em, extra);
+    const double L2 = ((double)vy * (double)vy) + ((double)vx * (double)vx);
+    const double eps = (double)*k.tailEps;
+    if (!(eps <= L2)) {                                                      // fcomp, jp: below, or NaN
+        Cell fc;
+        fc.u0d = (double)tc.u0f; fc.v0d = (double)tc.v0f; fc.u0f = tc.u0f; fc.v0f = tc.v0f;
+        BuildFlat(em, k, f, fc, q);
+        return;
+    }
+    const double r = 1.0 / sqrt(L2);
+    const double A = (double)vx * ((double)f.w * r);
+    const double B = (double)vy * (r * (double)f.h);
+    const float Af = (float)A, Bf = (float)B;
+    const double px = f.px, py = f.py, pz = f.pz;
+    const float P0x = (float)((double)vx + px);
+    const float P0y = (float)((double)vy + py);
+    const double Qz = (double)vz + pz;
+    const double x[4] = { px - B, (double)Bf + px, (double)P0x - (double)Bf, (double)P0x + (double)Bf };
+    const double y[4] = { py + A, py - (double)Af, (double)Af + (double)P0y, (double)P0y - (double)Af };
+    const double z[4] = { pz, pz, Qz, Qz };
+    const __m128d dudv = Pair(Rd<float>(em, kOffDu), Rd<float>(em, kOffDv));
+    const __m128d uv0  = Pair((double)tc.u0f, (double)tc.v0f);
+    for (int i = 0; i < 4; ++i) {
+        q->xy[i]  = Pair(x[i], y[i]);
+        q->pos[i] = _mm_cvtpd_ps(q->xy[i]);
+        q->zd[i]  = z[i];
+        q->zf[i]  = (float)z[i];
+        q->uv[i]  = _mm_cvtpd_ps(_mm_add_pd(_mm_mul_pd(WidenPair(k.uvCorner + 2 * i), dudv), uv0));
+    }
+    q->colour = f.colour;
+    q->zSame = false;
 }
 
 inline void Commit(const Quad& q, const Constants& k, float* box, Streams* s) {

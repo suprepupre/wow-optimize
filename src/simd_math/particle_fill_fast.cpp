@@ -15,8 +15,19 @@
 // normal, colour and texture streams.
 //
 // What is replaced. The whole of the function for an emitter whose flags say
-// quad, no second geometry, and no facing along the velocity (flags 0x4 set, 0x8
-// and 0x200000 clear), and which is not a spin with the axes flag (0x4000). What
+// quad and no facing along the velocity (flag 0x4 set, 0x200000 clear), and which is
+// not a spin with the axes flag (0x4000). With flag 0x8 the client builds a second
+// quad after the first, stretched along the particle's velocity; that is replaced too
+// (BuildTail in the model header) and learned separately from the same kind without it.
+// Its arithmetic was checked offline on its own against the client's instructions for
+// 0x97CC10..0x97D367 (about 18 million cases in four input modes, including the length
+// test at exactly its epsilon, 0 differences; the client's 204 cycles against 107 here).
+// Sixteen wrong versions of it: nine caught, seven not. Three of the seven are the same
+// arithmetic (a commutative sum written the other way, in two places, and an equality
+// that gives the same value); four differ at the 1e-16 level before a float is stored
+// (the order of two products in the stretch, a sum made in float, a rounding of the
+// vertical offset), which random input reaches about once in a billion: the
+// transcription was read against the assembly for those. What
 // stays the client's: the track evaluator (sub_979D60 or sub_979E90, ours when
 // ParticleTrackEval is on), the sine and cosine (sub_6F7A60, ours when
 // FastSinCos is on), and, for a spun quad, the spin values sub_97A130.
@@ -163,6 +174,7 @@ const unsigned char kPrologue[16] = {
 constexpr unsigned long kLearnCalls   = 10000;
 constexpr unsigned long kResampleMask = 4095;
 constexpr int           kMaxStride    = 256;
+constexpr uintptr_t     kTailEpsAddr  = 0x00AA2CEC;   // flt_AA2CEC: the second quad's length test
 
 typedef int   (__fastcall* FillFn)(char* em, void* edx, float* particle, Streams* vb);
 typedef void* (__fastcall* EvalFn)(char* em, void* edx, const float* particle, uint32_t* colour,
@@ -187,13 +199,14 @@ unsigned long long g_unsupported = 0;
 // square root of the second-quad path (flags bit 8) that this never takes, and 17.7% of calls in
 // that session were of a kind not done: whether that is the tail, the quad facing along the
 // velocity (0x200000) or a spin with axes decides what, if anything, to transcribe next.
-unsigned long long g_unsNotQuad = 0, g_unsTail = 0, g_unsFacing = 0, g_unsSpinAxes = 0;
+unsigned long long g_unsNotQuad = 0, g_unsFacing = 0, g_unsSpinAxes = 0;
 unsigned long long g_other = 0;       // other threads, dead, or an A/B control half
 unsigned long long g_declined = 0;    // handed back, of which the three below
 unsigned long long g_declNaN = 0, g_declAngle = 0, g_declStride = 0, g_declDevice = 0;
 unsigned long long g_early = 0;
-unsigned long long g_answered[3] = {};
-unsigned long      g_verified[3] = {};
+// One slot per kind and per whether a second quad (flag 0x8) follows, so each is learned alone.
+unsigned long long g_answered[6] = {};
+unsigned long      g_verified[6] = {};
 unsigned           g_mismatches = 0;
 unsigned           g_unstable = 0;     // differences that the evaluator's own re-run explains
 
@@ -217,10 +230,11 @@ uint32_t g_lastColour = 0;
 int32_t  g_lastTile = 0;
 uint32_t g_lastAgeBits = 0;
 
-const char* const kKindName[3] = { "flat", "axes", "spin" };
+const char* const kKindName[6] = { "flat", "axes", "spin", "flat with a second quad", "axes with a second quad",
+                                    "spin with a second quad" };
 
 // Private streams for the learning phase. Main thread only, which the detour checks.
-alignas(16) char g_scratch[4][4 * kMaxStride + 32];
+alignas(16) char g_scratch[4][8 * kMaxStride + 32];
 
 struct Evaluated {
     uint32_t colour;
@@ -237,6 +251,7 @@ Constants Client() {
     k.axes     = (const float*)kAxesAddr;
     k.normal   = (const uint32_t*)kNormalAddr;
     k.matrix   = (const float*)kMatrixAddr;
+    k.tailEps  = (const float*)kTailEpsAddr;
     return k;
 }
 
@@ -254,7 +269,7 @@ __declspec(noinline) bool EvalModel(const char* em, const float* particle, Evalu
 // One particle. Writes nothing until the answer is complete and has no NaN in it.
 //
 // No stack cookie: this runs once per particle and the cookie is a load, an xor and a store
-// on entry and a check on the way out. The writers of its locals, all of them: Quad and
+// on entry and a check on the way out. The writers of its locals, all of them: Quad (and the second one, tq) and
 // Frame by the Build functions in particle_fill_model.h, which loop to four and write named
 // members; Frame.sinv and Frame.cosv by sub_6F7A60, two floats; Evaluated by sub_979D60 or
 // sub_979E90, which write the colour dword, two floats, and two ints through the five
@@ -306,6 +321,17 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
     }
     if (!AllFinite(q)) { ++g_declNaN; return kDecline; }
 
+    // The second quad is built from the same frame before anything is written, so a NaN in either
+    // hands the whole particle to the client.
+    if (flags & kFlagOther) {
+        Quad tq;
+        BuildTail(em, k, f, e.extra, particle, &tq);
+        if (!AllFinite(tq)) { ++g_declNaN; return kDecline; }
+        Commit(q, k, box, s);
+        Commit(tq, k, box, s);
+        return kEmitted;
+    }
+
     Commit(q, k, box, s);
     return kEmitted;
 }
@@ -313,7 +339,7 @@ __declspec(safebuffers) int Process(char* em, float* particle, Streams* s, float
 // First difference between the answer worked out here and the client's, or false.
 __declspec(noinline) bool Differs(int mine, int theirs, const Streams& priv, const Streams& before,
                                   const Streams& real, const float* privBox, const float* realBox,
-                                  char* why, size_t cap) {
+                                  char* why, size_t cap, int nv) {
     __try {
         if (mine != theirs) {
             snprintf(why, cap, "the client returned %d where this worked out %d", theirs, mine);
@@ -336,12 +362,12 @@ __declspec(noinline) bool Differs(int mine, int theirs, const Streams& priv, con
             return false;
         }
         for (int i = 0; i < 4; ++i) {
-            if (real.ptr[i] != before.ptr[i] + 4 * before.stride[i]) {
+            if (real.ptr[i] != before.ptr[i] + nv * before.stride[i]) {
                 snprintf(why, cap, "stream %d pointer advanced by %d, expected %d", i,
-                         (int)(real.ptr[i] - before.ptr[i]), 4 * before.stride[i]);
+                         (int)(real.ptr[i] - before.ptr[i]), nv * before.stride[i]);
                 return true;
             }
-            for (int v = 0; v < 4; ++v) {
+            for (int v = 0; v < nv; ++v) {
                 const char* a = before.ptr[i] + v * before.stride[i];
                 const char* b = g_scratch[i] + v * before.stride[i];
                 if (memcmp(a, b, kElemBytes[i]) == 0) continue;
@@ -352,8 +378,8 @@ __declspec(noinline) bool Differs(int mine, int theirs, const Streams& priv, con
                 return true;
             }
         }
-        if (real.count != before.count + 4) {
-            snprintf(why, cap, "vertex count moved by %d, expected 4", real.count - before.count);
+        if (real.count != before.count + nv) {
+            snprintf(why, cap, "vertex count moved by %d, expected %d", real.count - before.count, nv);
             return true;
         }
         return false;
@@ -363,11 +389,11 @@ __declspec(noinline) bool Differs(int mine, int theirs, const Streams& priv, con
     }
 }
 
-__declspec(noinline) void Retire(Kind kind, uint32_t flags, const char* why) {
+__declspec(noinline) void Retire(int slot, uint32_t flags, const char* why) {
     ++g_mismatches;
     g_dead = true;
     Log("[ParticleFillFast] RETIRED on a %s emitter (flags %08X): %s. Every fill from here "
-        "on is the client's own.", kKindName[(int)kind - 1], flags, why);
+        "on is the client's own.", kKindName[slot], flags, why);
     Verdict::Add(Verdict::Bad, "ParticleFillFast filled a particle's vertices differently from the "
                  "client and retired itself for this session");
 }
@@ -451,7 +477,9 @@ __declspec(noinline) void CheckEvaluator(char* em, float* particle) {
 
 __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb, Kind kind) {
     const Constants k = Client();
-    const int ki = (int)kind - 1;
+    const bool tail = (Rd<uint32_t>(em, kOffFlags) & kFlagOther) != 0;
+    const int ki = (int)kind - 1 + (tail ? 3 : 0);
+    const int nv = tail ? 8 : 4;
 
     // A stride of zero is legal (a stream without normals writes every vertex to one dummy
     // location, and both sides write the same bytes there in the same order); a negative one
@@ -484,7 +512,7 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
     if (g_benchSlot >= 0) SelfBench::Pair(g_benchSlot, t1 - t0, t2 - t1);
 
     char why[480];
-    if (Differs(mine, theirs, priv, before, *vb, privBox, (const float*)(em + kOffBox), why, sizeof(why))) {
+    if (Differs(mine, theirs, priv, before, *vb, privBox, (const float*)(em + kOffBox), why, sizeof(why), nv)) {
         char detail[220];
         if (EvaluatorMoved(em, particle, detail, sizeof(detail))) {
             if (++g_unstable <= 5)
@@ -495,7 +523,7 @@ __declspec(noinline) int Learn(char* em, void* edx, float* particle, Streams* vb
         }
         size_t n = strlen(why);
         snprintf(why + n, sizeof(why) - n, "%s", detail);
-        Retire(kind, Rd<uint32_t>(em, kOffFlags), why);
+        Retire(ki, Rd<uint32_t>(em, kOffFlags), why);
         return theirs;
     }
     ++g_verified[ki];
@@ -514,7 +542,6 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
         {
             const uint32_t f = Rd<uint32_t>(em, kOffFlags);
             if (!(f & kFlagQuad)) ++g_unsNotQuad;
-            else if (f & kFlagOther) ++g_unsTail;
             else if (f & kFlagFacing) ++g_unsFacing;
             else ++g_unsSpinAxes;
         }
@@ -529,7 +556,7 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
         (g_evalChecked < kEvalLearn || ((unsigned long)g_calls & kResampleMask) == 0))
         CheckEvaluator(em, particle);
 
-    const int ki = (int)kind - 1;
+    const int ki = (int)kind - 1 + ((Rd<uint32_t>(em, kOffFlags) & kFlagOther) ? 3 : 0);
     if (g_verified[ki] < kLearnCalls || ((unsigned long)g_calls & kResampleMask) == 0)
         return Learn(em, edx, particle, vb, kind);
 
@@ -634,17 +661,18 @@ void LogStats() {
             "no emitter has run since it went in.");
         return;
     }
-    Log("[ParticleFillFast] %llu call(s): %llu answered here (%llu flat, %llu axes, %llu spin), "
+    Log("[ParticleFillFast] %llu call(s): %llu answered here (%llu flat, %llu axes, %llu spin, %llu of them with a second quad), "
         "%llu skipped by the client's own test, %llu of an emitter kind this does not do, %llu "
         "handed back (%llu a NaN in the answer, %llu a NaN spin angle, %llu a stride the check "
         "cannot hold, %llu no device object), %llu from another thread, after a retirement or in "
         "the A/B control half. Plain counters, lower bounds.",
-        g_calls, g_answered[0] + g_answered[1] + g_answered[2], g_answered[0], g_answered[1],
-        g_answered[2], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
+        g_calls, g_answered[0] + g_answered[1] + g_answered[2] + g_answered[3] + g_answered[4] + g_answered[5],
+        g_answered[0] + g_answered[3], g_answered[1] + g_answered[4], g_answered[2] + g_answered[5],
+        g_answered[3] + g_answered[4] + g_answered[5], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
         g_declDevice, g_other);
-    Log("[ParticleFillFast]   of the %llu handed back as a kind this does not do: %llu with a second quad (flag 0x8), "
+    Log("[ParticleFillFast]   of the %llu handed back as a kind this does not do: "
         "%llu facing along the velocity (0x200000), %llu a spin on axes, %llu not a quad at all. Plain counters, "
-        "lower bounds.", g_unsupported, g_unsTail, g_unsFacing, g_unsSpinAxes, g_unsNotQuad);
+        "lower bounds.", g_unsupported, g_unsFacing, g_unsSpinAxes, g_unsNotQuad);
     if (!g_evalReady)
         Log("[ParticleFillFast]   track evaluator model: not used (constants or table not read).");
     else if (g_evalDead)
@@ -663,7 +691,7 @@ void LogStats() {
             "line that says which is earlier in this log.");
         return;
     }
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (g_verified[i] < kLearnCalls)
             Log("[ParticleFillFast]   %s: %lu of %lu fills compared with the client so far, none "
                 "differed; until then every fill of this kind is the client's own.",
