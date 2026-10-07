@@ -70,6 +70,9 @@ struct Slot {
     uint64_t theirs;
     uint64_t pairs;
     uint64_t discarded;   // a pair straddling something that made it useless
+    // The totals at the previous report, so a verdict can rest on the interval since then and not
+    // on a lifetime mean that the cold start of a session still dominates.
+    uint64_t prevOurs, prevTheirs, prevPairs;
 };
 
 Slot g_slot[kMaxSlots];
@@ -144,7 +147,7 @@ void LogStats() {
     if (g_refused)
         Log("[SelfBench] %d module(s) asked for a slot and none was left, so they are not reported here.", g_refused);
     for (int i = 0; i < g_count; ++i) {
-        const Slot& s = g_slot[i];
+        Slot& s = g_slot[i];
         if (!s.pairs) {
             Log("[SelfBench]   %-20s no pairs yet", s.name);
             continue;
@@ -171,18 +174,38 @@ void LogStats() {
         // same four modules were flagged in every log on disk at a few hundred pairs
         // and came out two to four times faster by the end. A verdict needs enough
         // pairs for the cold ones not to decide it.
+        //
+        // A lifetime mean was not enough either. prince's 2026-10-07 session printed
+        // FrustumAabb, SegmentAabb, TerrainPointOutcode, FloorSplit and ParticleFillFast as
+        // slower than the client in the early reports, at 2470 to 20077 pairs, and
+        // 2.3, 3.5, 1.4, 15 and 2.3 times faster in the last one, over 140 thousand to six
+        // million. So the verdict is taken on the pairs since the previous report, from the
+        // second report on, and only if there are enough of them.
         constexpr unsigned long long kMinPairsToJudge = 1000;
-        if (theirs < ours) {
-            if (s.pairs < kMinPairsToJudge)
-                Log("[SelfBench]   %s reads slower than the code it replaces after only "
-                    "%llu pairs, too few to say: the first calls run cold.",
-                    s.name, (unsigned long long)s.pairs);
-            else
-                Log("[Wrong] [SelfBench]   %s is SLOWER than the code it replaces, "
-                    "by %.2fx on the same input over %llu pairs. That is the whole "
-                    "reason to replace it, so this one needs looking at.",
-                    s.name, ours / theirs, (unsigned long long)s.pairs);
+        const unsigned long long ip = s.pairs - s.prevPairs;
+        const bool haveInterval = s.prevPairs != 0 && ip >= kMinPairsToJudge;
+        double iOurs = 0.0, iTheirs = 0.0;
+        if (haveInterval) {
+            iOurs = (double)(s.ours - s.prevOurs) / (double)ip;
+            iTheirs = (double)(s.theirs - s.prevTheirs) / (double)ip;
+            Log("[SelfBench]   %-20s since the last report: %7.1f cycles against %7.1f, %.2fx, over %llu pairs",
+                s.name, iOurs, iTheirs, iOurs > 0.0 ? iTheirs / iOurs : 0.0, ip);
         }
+        if (theirs < ours) {
+            if (!haveInterval)
+                Log("[SelfBench]   %s reads slower than the code it replaces over %llu pairs since the "
+                    "session began; no verdict until a report has an interval of its own with enough "
+                    "pairs, because the first calls run cold.",
+                    s.name, (unsigned long long)s.pairs);
+            else if (iTheirs < iOurs)
+                Log("[Wrong] [SelfBench]   %s is SLOWER than the code it replaces, "
+                    "by %.2fx on the same input over the last %llu pairs (%.2fx over the session). "
+                    "That is the whole reason to replace it, so this one needs looking at.",
+                    s.name, iOurs / iTheirs, ip, ours / theirs);
+        }
+        s.prevOurs = s.ours;
+        s.prevTheirs = s.theirs;
+        s.prevPairs = s.pairs;
     }
 }
 
