@@ -182,6 +182,12 @@ enum Result { kEarly = 0, kEmitted = 1, kDecline = 2 };
 // Plain counters on the main thread; lower bounds by construction.
 unsigned long long g_calls = 0;
 unsigned long long g_unsupported = 0;
+// Why a particle was handed back as an emitter kind this does not do, by the first test it fails.
+// The profile of 2026-10-07 has this function's hottest instruction at 0x97CD41, the reciprocal
+// square root of the second-quad path (flags bit 8) that this never takes, and 17.7% of calls in
+// that session were of a kind not done: whether that is the tail, the quad facing along the
+// velocity (0x200000) or a spin with axes decides what, if anything, to transcribe next.
+unsigned long long g_unsNotQuad = 0, g_unsTail = 0, g_unsFacing = 0, g_unsSpinAxes = 0;
 unsigned long long g_other = 0;       // other threads, dead, or an A/B control half
 unsigned long long g_declined = 0;    // handed back, of which the three below
 unsigned long long g_declNaN = 0, g_declAngle = 0, g_declStride = 0, g_declDevice = 0;
@@ -505,6 +511,13 @@ int __fastcall Detour(char* em, void* edx, float* particle, Streams* vb) {
     const Kind kind = Classify(em);
     if (kind == Kind::Unsupported) {
         ++g_unsupported;
+        {
+            const uint32_t f = Rd<uint32_t>(em, kOffFlags);
+            if (!(f & kFlagQuad)) ++g_unsNotQuad;
+            else if (f & kFlagOther) ++g_unsTail;
+            else if (f & kFlagFacing) ++g_unsFacing;
+            else ++g_unsSpinAxes;
+        }
         return g_orig(em, edx, particle, vb);
     }
     if (g_abSubject && AbTest::StandAside()) {
@@ -629,6 +642,9 @@ void LogStats() {
         g_calls, g_answered[0] + g_answered[1] + g_answered[2], g_answered[0], g_answered[1],
         g_answered[2], g_early, g_unsupported, g_declined, g_declNaN, g_declAngle, g_declStride,
         g_declDevice, g_other);
+    Log("[ParticleFillFast]   of the %llu handed back as a kind this does not do: %llu with a second quad (flag 0x8), "
+        "%llu facing along the velocity (0x200000), %llu a spin on axes, %llu not a quad at all. Plain counters, "
+        "lower bounds.", g_unsupported, g_unsTail, g_unsFacing, g_unsSpinAxes, g_unsNotQuad);
     if (!g_evalReady)
         Log("[ParticleFillFast]   track evaluator model: not used (constants or table not read).");
     else if (g_evalDead)
