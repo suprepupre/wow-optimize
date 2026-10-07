@@ -81,12 +81,12 @@ struct Taps {
     bool  haveColour, haveTile, haveExtra;
 };
 
-template <class T> inline T Rd(const void* base, unsigned off) {
+template <class T> __forceinline T Rd(const void* base, unsigned off) {
     T v;
     memcpy(&v, (const char*)base + off, sizeof(T));
     return v;
 }
-inline const void* Ptr(const void* base, unsigned off) { return Rd<const void*>(base, off); }
+__forceinline const void* Ptr(const void* base, unsigned off) { return Rd<const void*>(base, off); }
 
 // A track: [0] key count, [4] pointer to int16 times, [8] value count, [0xC] pointer to values.
 struct Track {
@@ -95,7 +95,7 @@ struct Track {
     uint32_t       vals;
     const void*    values;
 };
-inline Track ReadTrack(const void* t) {
+__forceinline Track ReadTrack(const void* t) {
     Track k;
     k.keys = Rd<uint32_t>(t, 0);
     k.times = (const int16_t*)Ptr(t, 4);
@@ -104,11 +104,11 @@ inline Track ReadTrack(const void* t) {
     return k;
 }
 
-inline bool Finite(double d) { return d - d == 0.0; }
+__forceinline bool Finite(double d) { return d - d == 0.0; }
 
 // ---- sub_9793B0 with sub_979330 (0x979330..0x9793AF): the two keys either side of t and the
 // fraction between them, which the client leaves in st(0) as a double. ----
-inline bool Keys(const Track& k, float t, uint32_t* i0, uint32_t* i1, double* f) {
+__forceinline bool Keys(const Track& k, float t, uint32_t* i0, uint32_t* i1, double* f) {
     const double td = (double)t;
     const double c = (double)kC;
     if (k.keys == 2) {                                   // 0x979460: t itself
@@ -158,10 +158,10 @@ inline bool Keys(const Track& k, float t, uint32_t* i0, uint32_t* i1, double* f)
     return Finite(*f);
 }
 
-inline uint8_t LowByte(float v) { return (uint8_t)_mm_cvtss_si32(_mm_set_ss(v)); }   // fistp, nearest even
+__forceinline uint8_t LowByte(float v) { return (uint8_t)_mm_cvtss_si32(_mm_set_ss(v)); }   // fistp, nearest even
 
 // ---- sub_9795D0: the colour ----
-inline bool Colour(const char* em, float t, uint32_t* colour, Taps* tap) {
+__forceinline bool Colour(const char* em, float t, uint32_t* colour, Taps* tap) {
     const void* tp = Ptr(em, kOffColourTrk);
     if (!tp) return false;
     const Track k = ReadTrack(tp);
@@ -193,7 +193,7 @@ inline bool Colour(const char* em, float t, uint32_t* colour, Taps* tap) {
 }
 
 // ---- sub_9794F0: the alpha before the emitter's scale, a double in st(0) ----
-inline bool Alpha(const char* em, float t, double* a) {
+__forceinline bool Alpha(const char* em, float t, double* a) {
     const void* tp = Ptr(em, kOffAlphaTrk);
     if (!tp) return false;
     const Track k = ReadTrack(tp);
@@ -213,7 +213,7 @@ inline bool Alpha(const char* em, float t, double* a) {
 }
 
 // ---- sub_979480: the size pair ----
-inline bool Size(const char* em, float t, float* w, float* h) {
+__forceinline bool Size(const char* em, float t, float* w, float* h) {
     const void* tp = Ptr(em, kOffSizeTrk);
     if (!tp) return false;
     const Track k = ReadTrack(tp);
@@ -234,7 +234,7 @@ inline bool Size(const char* em, float t, float* w, float* h) {
 }
 
 // ---- sub_979560: an integer-valued track ----
-inline bool IntTrack(const void* tp, float t, int32_t* out, float* tapped, bool* have) {
+__forceinline bool IntTrack(const void* tp, float t, int32_t* out, float* tapped, bool* have) {
     const Track k = ReadTrack(tp);
     if (!k.values) return false;
     const uint16_t* v = (const uint16_t*)k.values;
@@ -255,7 +255,7 @@ struct Rng {
     uint32_t s0, s1;
 };
 
-inline Rng RngSeed(uint32_t seed) {                       // sub_4C1510
+__forceinline Rng RngSeed(uint32_t seed) {                       // sub_4C1510
     auto hi = [](uint32_t m, uint32_t x) { return (uint32_t)(((uint64_t)m * x) >> 32); };
     uint32_t edx = hi(0x22B63CBFu, seed) >> 3;
     edx *= 0x3B;
@@ -288,10 +288,10 @@ inline Rng RngSeed(uint32_t seed) {                       // sub_4C1510
     return r;
 }
 
-inline uint32_t Rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+__forceinline uint32_t Rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
 
 // The table at 0x009F1700; indexed by byte offset, read as unaligned dwords.
-inline uint32_t RngStep(Rng* r, const uint8_t* tbl) {      // sub_464580
+__forceinline uint32_t RngStep(Rng* r, const uint8_t* tbl) {      // sub_464580
     const uint32_t s1 = r->s1;
     int32_t ebx = (int32_t)((s1 >> 8) & 0xFF);
     int32_t edx = (int32_t)((s1 >> 16) & 0xFF);
@@ -317,7 +317,7 @@ inline uint32_t RngStep(Rng* r, const uint8_t* tbl) {      // sub_464580
 
 // The variation factor both tail paths build from one draw: a float in [1, 2) from the low 23
 // bits, then 2 - x for a negative draw and x - 2 otherwise (0x979FE7.. and 0x97A0B7..).
-inline double Spread(uint32_t draw) {
+__forceinline double Spread(uint32_t draw) {
     const uint32_t bits = (draw & 0x7FFFFFu) | 0x3F800000u;
     float x;
     memcpy(&x, &bits, 4);
@@ -326,7 +326,7 @@ inline double Spread(uint32_t draw) {
 
 // ---- sub_979E90 ----
 // Writes nothing the client would not and nothing at all when it declines.
-inline bool Eval(const char* em, const float* particle, const uint8_t* rngTable, Out* out, Taps* tap = nullptr) {
+__forceinline bool Eval(const char* em, const float* particle, const uint8_t* rngTable, Out* out, Taps* tap = nullptr) {
     const uint32_t flags = Rd<uint32_t>(em, kOffFlags);
 
     // 0x979E9C..0x979ED9: the particle's age as a fraction of its life.
