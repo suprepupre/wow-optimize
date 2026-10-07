@@ -321,8 +321,11 @@ Decision Decide(PVOID* baseAddress, SIZE_T asked, ULONG allocationType, bool may
     const bool placeModules = Config::g_settings.OptHighPlacementModules;
     const SIZE_T minBytes   = (SIZE_T)Config::g_settings.HighPlacementMinKB * 1024;
     // A reservation that ntdll itself makes - the heap manager growing a heap by a segment, which
-    // is what the return address inside ntdll means - is left where Windows puts it unless the
-    // switch says otherwise. Eight dumps from two players on two realms (2026-10-06/07, build
+    // is what the return address inside ntdll means - is left where Windows puts it when
+    // HighPlacementHeapGrowth is 0. The switch is on by default: the return address cannot tell a
+    // heap growing by a segment from a heap handing out a large block, and the client's large
+    // allocations come through the second, so leaving all of them would have taken most of the
+    // client's placement away from every player who had it on. Eight dumps from two players on two realms (2026-10-06/07, build
     // 783ab7af, HighPlacementClient and Modules on) end the same way: DivxDecoder.dll, playing the
     // Lich King kill movie, calls HeapAlloc(heap, 0, 0x2820) on a heap of one 60 KB segment, and
     // ntdll faults reading [esi+14h] with ESI zero, in the same state every time (ECX 3B, EDX 3C,
@@ -1289,11 +1292,11 @@ void LogStats() {
             added, added - g_lastReportTopDown,
             g_topDownHigh, g_topDownLow, g_topDownRetried);
         if (Config::g_settings.OptHighPlacementHeapGrowth)
-            Log("[HighPlacement] heap growth is placed too (HighPlacementHeapGrowth=1).");
+            Log("[HighPlacement] reservations the heap manager makes are placed too (HighPlacementHeapGrowth=1, the default).");
         else
             Log("[HighPlacement] %lu reservation(s) of the minimum size or more were made by the heap manager "
-                "itself (a heap growing by a segment) and were left where Windows put them; "
-                "HighPlacementHeapGrowth=1 places them as well.", g_heapGrowthLeft);
+                "itself (a heap growing by a segment, or a large block) and were left where Windows put "
+                "them because HighPlacementHeapGrowth is 0; 1 places them as well.", g_heapGrowthLeft);
     } else {
         Log("[HighPlacement] placement is off; this session only records who "
             "reserves what.");
