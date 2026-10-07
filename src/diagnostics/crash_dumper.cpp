@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <ctime>
 #include <cstring>
+#include <cstdint>
 #include "MinHook.h"
 #include "version.h"
 #include "crash_dumper.h"
@@ -729,6 +730,71 @@ static void WINAPI Hooked_ExitProcess(UINT uExitCode) {
 // Forward declaration
 static LONG WINAPI WowOpt_UnhandledExceptionFilter(EXCEPTION_POINTERS* ep);
 
+// A fault inside ntdll with a register holding a heap: say which heap, and where all of its
+// segments are. Six crashes at one cinematic (2026-10-06/07) all faulted in ntdll's allocator
+// with EDI the heap and ESI zero; the minidump holds the heap's first 0x3C0 bytes and nothing of
+// its second segment, so whether that segment sat above 2GB could not be read from it. A heap is
+// a register value that GetProcessHeaps lists. HeapWalk reports one PROCESS_HEAP_REGION entry per
+// segment (checked on a private heap: three regions, 4 KB aligned); the walk is bounded and the
+// whole is under SEH. The header words are Windows 10 x86 offsets and are printed raw.
+static void LogHeapNearFault(const CONTEXT* ctx, uintptr_t crashAddr) {
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    if (!nt) return;
+    const uint8_t* b = (const uint8_t*)nt;
+    const IMAGE_NT_HEADERS* h = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
+    if (crashAddr - (uintptr_t)b >= h->OptionalHeader.SizeOfImage) return;
+
+    const uintptr_t regs[6] = { ctx->Edi, ctx->Esi, ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Eax };
+    const char* const names[6] = { "EDI", "ESI", "EBX", "ECX", "EDX", "EAX" };
+    HANDLE heaps[256];
+    const DWORD nHeaps = GetProcessHeaps(256, heaps);
+    for (int r = 0; r < 6; ++r) {
+        const uintptr_t v = regs[r];
+        if (v < 0x10000 || (v & 0xFFFF) != 0) continue;
+        int index = -1;
+        for (DWORD i = 0; i < nHeaps && i < 256; ++i) if ((uintptr_t)heaps[i] == v) index = (int)i;
+        if (index < 0) continue;
+        uint32_t flags = 0, force = 0;
+        __try { flags = *(const uint32_t*)(v + 0x40); force = *(const uint32_t*)(v + 0x44); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        Log("!!! HEAP in %s: 0x%08X, Flags 0x%X, ForceFlags 0x%X, %s (of %lu heaps)", names[r], (unsigned)v, flags, force,
+            index == 0 ? "the process heap" : "a private heap", (unsigned long)nHeaps);
+        __try {
+            char line[200];
+            for (int row = 0; row < 0x120; row += 32) {
+                int n = 0;
+                n += _snprintf_s(line, sizeof(line), _TRUNCATE, "!!!   +%03X:", row);
+                for (int k = 0; k < 8; ++k)
+                    n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, " %08X", *(const uint32_t*)(v + row + 4 * k));
+                Log("%s", line);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        // The segments. HeapWalk walks every block; only the region entries are kept.
+        unsigned regions = 0, high = 0, blocks = 0;
+        __try {
+            PROCESS_HEAP_ENTRY e;
+            e.lpData = nullptr;
+            while (HeapWalk((HANDLE)v, &e) && blocks < 400000) {
+                ++blocks;
+                if (e.wFlags & PROCESS_HEAP_REGION) {
+                    ++regions;
+                    const uintptr_t first = (uintptr_t)e.Region.lpFirstBlock;
+                    if (first >= 0x80000000u) ++high;
+                    if (regions <= 12)
+                        Log("!!!   segment %u: blocks 0x%08X..0x%08X, %lu bytes committed, %lu uncommitted%s", regions,
+                            (unsigned)first, (unsigned)(uintptr_t)e.Region.lpLastBlock,
+                            (unsigned long)e.Region.dwCommittedSize, (unsigned long)e.Region.dwUnCommittedSize,
+                            first >= 0x80000000u ? "  (above 2GB)" : "");
+                }
+            }
+            Log("!!!   walked %u block(s), %u segment(s), %u of them above 2GB%s", blocks, regions, high,
+                blocks >= 400000 ? " (walk stopped at the cap)" : "");
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log("!!!   the heap walk faulted after %u block(s), %u segment(s) seen, %u above 2GB", blocks, regions, high);
+        }
+        break;
+    }
+}
+
 // SetUnhandledExceptionFilter Hook (prevents overriding our handler)
 typedef LPTOP_LEVEL_EXCEPTION_FILTER (WINAPI *SetUnhandledExceptionFilter_fn)(LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter);
 static SetUnhandledExceptionFilter_fn orig_SetUnhandledExceptionFilter = nullptr;
@@ -1008,6 +1074,8 @@ static LONG WINAPI WowOpt_UnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             Log("!!! INSTRUCTIONS (EIP): (inaccessible)");
         }
+
+        LogHeapNearFault(ctx, crashAddr);
 
         // Stack walk: dump return addresses from the stack to identify the call chain
         // This is critical for EIP=0x00000000 crashes (NULL function pointer calls)
