@@ -64,6 +64,7 @@
 #include <emmintrin.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 #include "lua_hget_dispatch.h"
 #include "MinHook.h"
@@ -94,6 +95,100 @@ constexpr unsigned kTV_tag = 8;
 constexpr uint32_t kTagNil    = 0;
 constexpr uint32_t kTagNumber = 3;
 constexpr uint32_t kTagString = 4;
+
+// ---- the chain census (off by default) ----
+//
+// FreezeCatcher on a player with a great many WeakAuras (2026-10-06): in the frames over 100 ms the
+// main thread was most often inside luaH_getstr's chain walk at 0x0085C45C (990 of 5094 stall
+// events in one 110 minute session, 968 of the samples reached from this hook). A lookup of a
+// string key goes to the node its hash selects and follows the chain of nodes that collided
+// there, comparing the key's address; a chain of a few nodes costs nothing and a very long one,
+// or a short one in memory that is never cached, costs a miss a node. Lua 5.1 hashes a string
+// longer than 32 bytes by looking at only every (length>>5)+1th byte, so names that differ only
+// in the bytes it skips share one hash and one chain, for ever. Nothing says whether that is
+// what is happening. This walks the chain itself, in the client's order, which returns the
+// same node, and counts the steps.
+constexpr int kChainBuckets = 8;     // 1, 2, 3-4, 5-8, 9-16, 17-64, 65-256, 257+
+struct LongTable {
+    uintptr_t t;
+    unsigned long walks;
+    unsigned long steps;
+    unsigned long missing;
+    unsigned long maxSteps;
+    unsigned nodes;
+    char      sample[48];
+};
+constexpr int kLongTables = 8;
+bool          g_chainCensus = false;
+unsigned long g_chainHist[2][kChainBuckets];       // [0] found, [1] not found
+unsigned long g_longWalks = 0, g_longSteps = 0;
+LongTable     g_long[kLongTables];
+
+inline int BucketOf(unsigned n) {
+    if (n <= 1) return 0;
+    if (n == 2) return 1;
+    if (n <= 4) return 2;
+    if (n <= 8) return 3;
+    if (n <= 16) return 4;
+    if (n <= 64) return 5;
+    if (n <= 256) return 6;
+    return 7;
+}
+
+__declspec(noinline) void NoteLongWalk(void* t, void* s, unsigned steps, bool found) {
+    ++g_longWalks;
+    g_longSteps += steps;
+    LongTable* slot = nullptr;
+    for (int i = 0; i < kLongTables; ++i) {
+        if (g_long[i].t == (uintptr_t)t) { slot = &g_long[i]; break; }
+        if (!slot && g_long[i].t == 0) slot = &g_long[i];
+    }
+    if (!slot) {                       // the table with the fewest steps so far gives way
+        slot = &g_long[0];
+        for (int i = 1; i < kLongTables; ++i) if (g_long[i].steps < slot->steps) slot = &g_long[i];
+        if (slot->steps >= steps) return;
+        memset(slot, 0, sizeof(*slot));
+    }
+    if (slot->t == 0) {
+        slot->t = (uintptr_t)t;
+        slot->nodes = 1u << *(const uint8_t*)((const uint8_t*)t + 11);
+    }
+    ++slot->walks;
+    slot->steps += steps;
+    if (!found) ++slot->missing;
+    if (steps > slot->maxSteps) {
+        slot->maxSteps = steps;
+        // The key's name, as far as it fits: length at +16, bytes from +20.
+        const uint8_t* str = (const uint8_t*)s;
+        unsigned len = *(const uint32_t*)(str + 16);
+        if (len > 47) len = 47;
+        for (unsigned i = 0; i < len; ++i) {
+            const char c = (char)str[20 + i];
+            slot->sample[i] = (c >= 32 && c < 127) ? c : '?';
+        }
+        slot->sample[len] = 0;
+    }
+}
+
+// sub_85C430 as the client has it: the node the hash picks, then the chain, comparing type and
+// address, and the shared nil object when the chain runs out.
+inline void* CountedGetStr(void* t, void* s) {
+    const uint8_t* tb = (const uint8_t*)t;
+    const uint32_t nodeBase = *(const uint32_t*)(tb + 20);
+    const uint32_t mask = (1u << tb[11]) - 1u;
+    const uint32_t hash = *(const uint32_t*)((const uint8_t*)s + 12);
+    uint32_t* n = (uint32_t*)(uintptr_t)(nodeBase + 40u * (hash & mask));
+    unsigned steps = 1;
+    bool found = true;
+    while (n[6] != 4 || n[4] != (uint32_t)(uintptr_t)s) {
+        n = (uint32_t*)(uintptr_t)n[8];
+        if (!n) { n = (uint32_t*)(uintptr_t)kNilObj; found = false; break; }
+        ++steps;
+    }
+    ++g_chainHist[found ? 0 : 1][BucketOf(steps)];
+    if (steps > 16) NoteLongWalk(t, s, steps, found);
+    return n;
+}
 
 typedef void* (__cdecl* hget_fn)(void* t, const void* key);
 typedef void* (__cdecl* getstr_fn)(void* t, void* str);
@@ -129,6 +224,7 @@ inline void* Evaluate(void* t, const void* key) {
         void* s;
         memcpy(&s, k, sizeof(s));
         g_string++;
+        if (g_chainCensus) return CountedGetStr(t, s);
         return ((getstr_fn)kGetStr)(t, s);
     }
 
@@ -252,6 +348,10 @@ bool Init() {
         return false;
     }
 
+    g_chainCensus = Config::g_settings.OptLuaChainCensus;
+    if (g_chainCensus)
+        Log("[LuaHGet] chain census ON: string lookups walk their chain here, in the client's order, and "
+            "count the nodes visited. Costs a little on every table read; a measurement for a session.");
     g_abSubject = AbTest::IsSubject("LuaHGetDispatch", &g_abSubject);
     if (g_abSubject) {
         Log("[LuaHGet] under A/B test: it alternates on and off in stints "
@@ -275,6 +375,8 @@ bool Init() {
     return true;
 }
 
+static void LogChains();
+
 void LogStats() {
     if (!Config::g_settings.OptLuaHGetDispatch) return;
     if (!g_installed) { Log("[LuaHGet] not installed - nothing measured"); return; }
@@ -284,6 +386,7 @@ void LogStats() {
                   : (g_caught ? "guarded, because the guard has caught something"
                               : "without an exception frame"));
 
+    LogChains();
     Log("[LuaHGet] %lu lookups%s: %lu integer keys, %lu string keys, %lu left to "
         "the client's general path, %lu verified against it. Counts are lower "
         "bounds.",
@@ -291,6 +394,28 @@ void LogStats() {
         g_dead ? " - RETIRED on a disagreement"
                : (g_armed ? "" : " - still verifying, the client still answers every one"),
         g_number, g_string, g_general, g_verified);
+}
+
+static void LogChains() {
+    if (!g_chainCensus) return;
+    static const char* const name[kChainBuckets] = { "1", "2", "3-4", "5-8", "9-16", "17-64", "65-256", "257+" };
+    unsigned long long total = 0;
+    for (int f = 0; f < 2; ++f) for (int b = 0; b < kChainBuckets; ++b) total += g_chainHist[f][b];
+    if (!total) { Log("[LuaHGet] chain census: no string lookup seen yet."); return; }
+    char line[400]; int n = 0;
+    for (int b = 0; b < kChainBuckets; ++b)
+        n += snprintf(line + n, sizeof(line) - n, " %s:%lu/%lu", name[b], g_chainHist[0][b], g_chainHist[1][b]);
+    Log("[LuaHGet] chain census, %llu string lookups, nodes visited as found/missing:%s. Plain counters.",
+        total, line);
+    Log("[LuaHGet]   %lu lookup(s) walked more than 16 nodes, %lu nodes in all (%.2f%% of lookups).",
+        g_longWalks, g_longSteps, 100.0 * (double)g_longWalks / (double)total);
+    for (int i = 0; i < kLongTables; ++i) {
+        const LongTable& L = g_long[i];
+        if (!L.t) continue;
+        Log("[LuaHGet]   table 0x%08X, %u nodes: %lu long walk(s), %lu nodes in them, longest %lu, %lu of the "
+            "walks found nothing; the longest was for \"%s\"",
+            (unsigned)L.t, L.nodes, L.walks, L.steps, L.maxSteps, L.missing, L.sample);
+    }
 }
 
 void Shutdown() {

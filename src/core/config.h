@@ -546,6 +546,7 @@ namespace Config {
         // three memory round-trips and an fnstsw there. Opt-in; read-only, so
         // both answers are simply compared.
         bool OptLuaHGetDispatch = true;
+        bool OptLuaChainCensus = false;
         // Holds the shadow cascade centre still for longer. Measured cause of
         // the flicker two testers report below extShadowQuality 5: cascade 0
         // recentres every two yards and each recentre leaves two thirds of the

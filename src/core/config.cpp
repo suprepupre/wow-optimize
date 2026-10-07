@@ -174,6 +174,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "FrustumAabb", &Settings::OptFrustumAabb },
     { "Graphics_Sound", "SegmentAabb", &Settings::OptSegmentAabb },
     { "UI_Lua", "LuaHGetDispatch", &Settings::OptLuaHGetDispatch },
+    { "UI_Lua", "LuaChainCensus", &Settings::OptLuaChainCensus },
     { "Graphics_Sound", "ShadowCascadeHold", &Settings::OptShadowCascadeHold },
     { "Graphics_Sound", "MatrixVectorSse2", &Settings::OptMatrixVectorSse2 },
     { "Graphics_Sound", "WorldStateCoalesce", &Settings::OptWorldStateCoalesce },
@@ -792,6 +793,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptFrustumAabb     = GetPrivateProfileIntA("Graphics_Sound", "FrustumAabb", 1, iniPath.c_str()) != 0;
         g_settings.OptSegmentAabb     = GetPrivateProfileIntA("Graphics_Sound", "SegmentAabb", 1, iniPath.c_str()) != 0;
         g_settings.OptLuaHGetDispatch = GetPrivateProfileIntA("UI_Lua", "LuaHGetDispatch", 1, iniPath.c_str()) != 0;
+        g_settings.OptLuaChainCensus = GetPrivateProfileIntA("UI_Lua", "LuaChainCensus", 0, iniPath.c_str()) != 0;
         g_settings.OptShadowCascadeHold = GetPrivateProfileIntA("Graphics_Sound", "ShadowCascadeHold", 0, iniPath.c_str()) != 0;
         g_settings.OptMatrixVectorSse2  = GetPrivateProfileIntA("Graphics_Sound", "MatrixVectorSse2", 0, iniPath.c_str()) != 0;
         g_settings.OptWorldStateCoalesce  = GetPrivateProfileIntA("Graphics_Sound", "WorldStateCoalesce", 0, iniPath.c_str()) != 0;
