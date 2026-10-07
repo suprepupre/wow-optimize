@@ -177,12 +177,15 @@ void CloseWorkers() {
 // driver, sound and this DLL's own threads are not what a load waits on and, sampled evenly,
 // would bury the ones that are in idle rows.
 void RefreshWorkers() {
+    // The main thread prints and closes these handles when a load ends; the watchdog may still be
+    // in the last frame of that load, so the list is only touched under the lock.
+    while (InterlockedCompareExchange(&g_wLock, 1, 0) != 0) Sleep(0);
     CloseWorkers();
     const DWORD self = GetCurrentProcessId();
     const DWORD mainTid = g_main ? GetThreadId(g_main) : 0;
     const DWORD ownTid = GetCurrentThreadId();
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
+    if (snap == INVALID_HANDLE_VALUE) { InterlockedExchange(&g_wLock, 0); return; }
     THREADENTRY32 te;
     te.dwSize = sizeof(te);
     if (Thread32First(snap, &te)) {
@@ -205,6 +208,7 @@ void RefreshWorkers() {
     }
     CloseHandle(snap);
     g_wStartTick = GetTickCount64();
+    InterlockedExchange(&g_wLock, 0);
 }
 
 long NowMs() {
@@ -265,13 +269,17 @@ bool InClientOrOurs(uintptr_t a) {
 }
 
 void SampleOneWorker() {
-    if (g_wn == 0) return;
+    // The whole sample is under the lock, handle included: the main thread closes the handles
+    // when the load ends and must not do it under a suspend. The sampled thread is never the
+    // main thread, so nothing here waits for the thread the lock's other holder is.
+    if (InterlockedCompareExchange(&g_wLock, 1, 0) != 0) return;
+    if (g_wn == 0) { InterlockedExchange(&g_wLock, 0); return; }
     WorkerThread& w = g_w[g_wcursor];
     g_wcursor = (g_wcursor + 1) % g_wn;
-    if (!w.h) return;
+    if (!w.h) { InterlockedExchange(&g_wLock, 0); return; }
     CONTEXT ctx;
     ctx.ContextFlags = CONTEXT_CONTROL;
-    if (SuspendThread(w.h) == (DWORD)-1) return;
+    if (SuspendThread(w.h) == (DWORD)-1) { InterlockedExchange(&g_wLock, 0); return; }
     uintptr_t eip = 0;
     uintptr_t chain[kChain] = {};
     if (GetThreadContext(w.h, &ctx)) {
@@ -279,9 +287,7 @@ void SampleOneWorker() {
         CaptureChain(ctx, chain);
     }
     ResumeThread(w.h);
-    if (!eip) return;
-    // Resumed before the lock: this thread never waits for it while another is stopped.
-    if (InterlockedCompareExchange(&g_wLock, 1, 0) != 0) return;
+    if (!eip) { InterlockedExchange(&g_wLock, 0); return; }
     ++w.samples;
     uintptr_t at, via = 0;
     if (InClientOrOurs(eip)) {
