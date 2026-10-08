@@ -72,6 +72,7 @@ static uint32_t g_verified = 0;
 static uint32_t g_mismatches = 0;
 static uint64_t g_controlCalls = 0;
 static uint64_t g_checkedFast = 0;
+static uint64_t g_tooManyLevels = 0;
 
 constexpr uint32_t kMaxLevels = 128;
 static int g_remapTable[kMaxLevels];
@@ -145,6 +146,15 @@ static const char* CheckCompaction(void* thisPtr, unsigned int strataIdx) {
     return nullptr;
 }
 
+// The fast path remaps levels through a table of kMaxLevels entries and leaves frames above that
+// to nobody, so a strata with more levels than that is the client's to compact.
+static bool HasTooManyLevels(void* thisPtr, unsigned int strataIdx) {
+    if (strataIdx > 8) return false;
+    const uintptr_t strata = *(uintptr_t*)((uintptr_t)thisPtr + (825 + strataIdx) * 4);
+    if (!strata) return false;
+    return *(uint32_t*)(strata + 8) > kMaxLevels;
+}
+
 static inline void CompactFast(void* thisPtr, unsigned int strataIdx) {
     if (strataIdx > 8) return;
 
@@ -214,8 +224,11 @@ static inline void CompactFast(void* thisPtr, unsigned int strataIdx) {
 
         const uint32_t v7 = (uint32_t)(v3 - v4);
         if (v3 < levelCount) {
-            // Build linear remap table for all levels in [v3, levelCount)
-            for (uint32_t lvl = 0; lvl < levelCount; ++lvl) {
+            // Build linear remap table for all levels in [v3, levelCount). The table holds
+            // kMaxLevels entries and levelCount is the client's, so the store is bounded here as
+            // well as by the caller's check; the loop used to run to levelCount and wrote past
+            // the table once a strata had more than kMaxLevels levels.
+            for (uint32_t lvl = 0; lvl < levelCount && lvl < kMaxLevels; ++lvl) {
                 g_remapTable[lvl] = (lvl >= v3 && lvl < kMaxLevels) ? (int)(lvl - v7) : (int)lvl;
             }
 
@@ -291,6 +304,12 @@ static void __fastcall Hook_CompactLevels(void* thisPtr, void* /*dummyEdx*/, uns
         return;
     }
 
+    if (HasTooManyLevels(thisPtr, strataIdx)) {
+        ++g_tooManyLevels;
+        g_orig(thisPtr, strataIdx);
+        return;
+    }
+
     SnapshotFrames(thisPtr, strataIdx);
     CompactFast(thisPtr, strataIdx);
     if (const char* broke = CheckCompaction(thisPtr, strataIdx)) {
@@ -345,9 +364,10 @@ void Shutdown() {
 void LogStats() {
     if (!Config::g_settings.OptUIStrataCompact) return;
     Log("[UIStrataCompact] calls=%llu fast=%llu early_skips=%llu verified=%u mismatches=%u ctrl=%llu dead=%d, "
-        "%llu fast call(s) checked against the compaction promise afterwards",
+        "%llu fast call(s) checked against the compaction promise afterwards, %llu left to the client "
+        "because the strata had more than %u levels. Plain counters, lower bounds.",
         g_calls, g_fastCompacts, g_earlySkips, g_verified, g_mismatches, g_controlCalls, g_dead ? 1 : 0,
-        g_checkedFast);
+        g_checkedFast, g_tooManyLevels, (unsigned)kMaxLevels);
 }
 
 } // namespace UIStrataCompact
