@@ -24,8 +24,7 @@ The current public build is focused on real frametime stability, long-session sm
 ---
 
 ## Table of Contents
-* [What's New in v3.21.1](#whats-new-in-v3211)
-* [What's New in v3.21.0](#whats-new-in-v3210)
+* [What's New in v3.22.0](#whats-new-in-v3220)
 * [Send me your log](#send-me-your-log)
   * [Measuring rather than reporting](#if-you-want-to-measure-something-rather-than-report-a-bug)
 * [Reviews & Acknowledgments](#reviews)
@@ -40,95 +39,64 @@ The current public build is focused on real frametime stability, long-session sm
 
 ---
 
-## What's New in v3.21.1
+## What's New in v3.22.0
 
 ### Fixed
 
-* **Skada, DBM and WeakAuras in fights.** Lookups of units and name-cache
-  entries now always return what the game's own lookup returns. That fixes
-  fights Skada did not record, DBM timers without their sound alerts, WeakAuras
-  triggers that stopped firing, and a crash in `UnitName`. Reported by prince
-  and a tester on EZ WoW.
-* **MAX PERFORMANCE** turns on the proven speed-ups. Replacements not yet proven
-  in a game keep their defaults, and TRY THE UNPROVEN ONES turns them on for a
-  test session.
-* **UI frame update.** The frame-level replacement (off by default) reads its
-  list of levels on every pass, as the game does.
-* **Lua Interpreter (experimental)** is off by default and sits on the NOT
-  PROVEN tab.
+* **A crash when an addon set builds a lot of UI layers.** The *UI Strata List
+  Compaction (SSE2)* replacement (on by default) wrote past the end of a 128-entry table
+  once one layer had more than 128 levels, which large addon sets reach. The
+  crash showed when an addon was enabled in AddonControlPanel and when an ICC
+  satchel was opened. A layer with more levels than the table holds is now
+  compacted by the game's own routine. Reported by Drain.
+* **The Lich King movie crash.** In several sessions the game ended inside the
+  Windows heap manager at the Fall of the Lich King movie. The cause is not
+  settled. The first run with *Large Reservations Above 2GB: Heap Growth* off
+  played the movie without it, and the switch exists so that run can be
+  repeated. It is on by default, as before. The report now sorts the reservations
+  Windows makes for itself by what they ask for, so the next log can tell heap
+  segments from large blocks. Reported by Drain and prince.
+* **Reports that overstated.** Three replacements printed a speed-up of exactly
+  2.00x that was the game's own time halved, and one verdict warned about faults
+  that this tool's own addon sampler raises on purpose. Both are corrected.
+* **Thread sampling stays off under Wine and Rosetta.** The watchdog samples the
+  game's worker threads during a loading screen by suspending them one at a
+  time. Under a translation layer it samples the main thread only.
 
-### After updating
+### New (experimental, off by default)
 
-Press DEFAULT in the launcher once. A profile saved on 3.21.0 keeps the values
-it was saved with. Press MAX PERFORMANCE after that if you use it.
-
----
-
-## What's New in v3.21.0
-
-### Fixed
-
-* **The camera no longer zooms into the character.** The *Collision Pick-Ray
-  Outcode Rejection* replacement read the game's ray-triangle answer from a whole
-  register, where the game reports it in the low byte only. On a miss the rest of
-  the register held leftover data, which read as a hit at distance zero, and the
-  camera pulled in to a tenth of a yard. It was rare and only happened with that
-  switch on. Found from a tester log in which the same camera trace returned 0.0
-  once and 0.19 a moment later with nothing changed. Reported by prince.
-* **The D3D9 render thread stays off Windows' own Direct3D 9.** On that runtime
-  it blanked the screen at its device restart and then left the login screen
-  frozen. Reported by Cris. On DXVK it works as before.
-* **Several replacements that are off by default were corrected** after tester
-  sessions: the string replacements read 16 bytes past the end of a string into
-  an unmapped page, one UI replacement unbalanced the stack, two crashed on
-  alignment or on registers the client sets up, and the collision tree walks now
-  leave in the client's order when their stack fills.
-* **Reports say what happened.** The startup summary, four feature reports and
-  the launcher descriptions had lines the logs contradicted. They were corrected,
-  and the replacements that did nothing in measured sessions moved to DIDN'T HELP.
-
-### Replacements on by default
-
-* **The replacements that agreed with the game's own answers in tester sessions
-  are on now.** They cover vector maths, animation tracks, collision tests,
-  culling tests, Lua table lookups, the UI batch fill and particle geometry.
-  Each one checks its answers against the game's before it answers, and switches
-  itself off at the first difference. Installs that never wrote the key get the
-  new defaults. Saving in the launcher writes every key, so a saved profile keeps
-  what it had.
-* **Parallel Particle Fill** builds particle geometry on worker threads for
-  emitters of 32 particles or more. It stays off under Wine and Rosetta.
-* Replacements measured slower than the game's own routine, or that switched
-  themselves off in every session, are off and listed under DIDN'T HELP.
-
-### New
-
-* **Arden WoW** is supported. The launcher and loader start `Arden.exe` and
-  `ArdenWoW.exe`. Its `Extensions.dll` patches a few of the same functions, so
-  the matching replacements stand aside and the log lists them.
-* **D3D9 Render Thread** *(experimental, off by default)* runs the game's
-  Direct3D calls on a thread of its own. It has been run on DXVK.
-* **A/B Test bundle mode** switches every replacement you have on together,
-  20 seconds on and 20 seconds off, so one session measures them as a set.
-  Frames recorded while the game window is in the background are left out.
-* **Camera watch.** When the camera is pulled in, the log says by how much,
-  whether the replacements were on or off, and for a pull-in to the character it
-  re-runs the trace with each replacement standing aside to name the one
-  responsible.
-
-### Launcher
-
-* **TRY THE UNPROVEN ONES** is the single button for a testing session, and the
-  three preset buttons each follow one rule and say what they did.
-* **Search shows matches on other tabs,** so a switch on a tab that is not open is
-  no longer reported as missing.
+* **Faster Loading Screens (File Reader Polling).** The game's file reader
+  polls with a one millisecond sleep on both sides of every request, and in
+  logged loading screens most of the main thread's time is that sleep. This
+  waits a few tens of microseconds by spinning instead, for those loops only.
+* **Skip Addon Garbage Collection During Loading.** An addon's
+  `collectgarbage("collect")` during a loading screen returns at once while the
+  scripting heap is under 600 MB. The game's normal incremental collection keeps
+  running. The log counts every explicit collection and names the addon.
+* **Addon Memory Figures Walk.** The per-addon memory totals the game rebuilds
+  by walking a list are found from a cache.
+* **Particle Quad Fill** now covers emitters with a second quad and the quad that
+  faces along the particle's velocity, and checks the track evaluator against the
+  game's own on every particle it answers. The two new quad paths were compared
+  with the game's instructions over 1.4 billion generated cases and have not been
+  run in a game.
+* **Low-Fragmentation Heap** has a switch (on, as before) so that an allocator
+  crash can be ruled in or out.
 
 ### Reports
 
-* **The profile is summed by game subsystem** next to the per-function list.
-* **A frame that has not ended is reported while it runs,** with where the main
-  thread is inside it.
-* **The low 2 GB census names who is fragmenting it.**
+* **Who puts the main thread to sleep.** The log counts the game's Sleep calls
+  per caller and per loading screen.
+* **A crash inside the Windows heap names the heap and lists its segments.**
+* **The A/B report gives a standard error** from neighbouring stints paired, and
+  says when the censuses that were switched on bias the bundle.
+* **First-chance faults are split** into those raised inside this DLL and those
+  raised elsewhere.
+
+### After updating
+
+Nothing to do. Press DEFAULT in the launcher once if you want the new defaults
+written into your profile.
 
 ---
 
@@ -229,7 +197,7 @@ See what other players say: [Reviews and Testimonials](https://github.com/suprep
 This project wouldn't exist without the community. Every crash report, every bisection test, every "hey this broke my addon" message directly shaped the release. 
 
 Special thanks to:
-Morbent, Darkmoore, Ethodeus, Billy Hoyle, tuan, NoGoodLife, feh_dois, David (`_oldq`), Keoo, UNOB, DarkRockDemon, Raymond, Vandal, Mantork, Falcon, Muus, szopachink17, Shandrax, pathetic-lynx, txtsd, Signalborn Soulweaver, Sicsoo, kojekude, Houmbro, Feles Noctis
+Morbent, Darkmoore, Ethodeus, Billy Hoyle, tuan, NoGoodLife, feh_dois, David (`_oldq`), Keoo, UNOB, DarkRockDemon, Raymond, Vandal, Mantork, Falcon, Muus, szopachink17, Shandrax, pathetic-lynx, txtsd, Signalborn Soulweaver, Sicsoo, kojekude, Houmbro, Feles Noctis, kromvel85
 
 ### Code contributions
 
@@ -255,6 +223,9 @@ Every measured item in these notes came out of a log somebody sent in.
 - **[txtsd](https://github.com/txtsd)** — raids on ChromieCraft; the memory growth
   and freeze reports, and the request for per-addon profiling that turned into the
   addon CPU profiler and the Lua compile census.
+- **kromvel85** (Roman) — WoW Circle with No Client Patches on: hour-long sessions
+  in Dalaran with no crash, the first log from a server that removes players for
+  patching the client, and the report that one core sat near full load there.
 - **Signalborn Soulweaver**, **Morbent**, **Sicsoo** — early 3.18 logs.
 - **Doc.James** — the zone-change stall, with three sessions that made it
   reproducible.
