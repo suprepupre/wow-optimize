@@ -158,6 +158,11 @@ ULONG g_reserveCalls = 0, g_reserveCallsEx = 0;
 ULONG g_attribWalk = 0, g_attribScan = 0, g_attribNone = 0;
 ULONG g_topDownAdded = 0, g_topDownHigh = 0, g_topDownLow = 0, g_topDownRetried = 0;
 ULONG g_heapGrowthLeft = 0;                   // reservations made by ntdll itself that were not moved
+// Every reservation of the minimum size made from inside ntdll, moved or not, by what it asked for
+// (reserve alone, commit alone, both) and by size (under 2 MB, 2 to under 16 MB, 16 MB and over).
+// A heap growing by a segment and a heap handing out a large block would show up as different
+// rows if they ask differently, which is what would let the two be told apart.
+ULONG g_hmByAsk[3][3] = {};
 uintptr_t g_ntdllLo = 0, g_ntdllSize = 0;
 ULONG g_liveOverwrites = 0;
 ULONG g_lastReportReserves = 0, g_lastReportTopDown = 0;
@@ -343,9 +348,13 @@ Decision Decide(PVOID* baseAddress, SIZE_T asked, ULONG allocationType, bool may
                               (allocationType & (MEM_TOP_DOWN | MEM_PHYSICAL |
                                                  MEM_LARGE_PAGES)) == 0 &&
                               asked >= minBytes && !heapGrowthLeft;
-    if (heapGrowthLeft && mayPlace && (placeClient || placeModules) && *baseAddress == nullptr &&
-        asked >= minBytes)
-        ++g_heapGrowthLeft;
+    if (fromHeapManager && mayPlace && (placeClient || placeModules) && *baseAddress == nullptr &&
+        asked >= minBytes) {
+        const int ask = ((allocationType & MEM_RESERVE) ? ((allocationType & MEM_COMMIT) ? 2 : 0) : 1);
+        const int band = asked < (2u << 20) ? 0 : (asked < (16u << 20) ? 1 : 2);
+        ++g_hmByAsk[ask][band];
+        if (heapGrowthLeft) ++g_heapGrowthLeft;
+    }
 
     const ModuleTable* table = g_currentTable;
     if (table && (g_live != nullptr || candidate)) {
@@ -1291,6 +1300,13 @@ void LogStats() {
             "had no room, %lu failed that way and succeeded when retried as asked.",
             added, added - g_lastReportTopDown,
             g_topDownHigh, g_topDownLow, g_topDownRetried);
+        {
+            static const char* const kAsk[3] = { "reserve only", "commit only", "reserve and commit" };
+            for (int a = 0; a < 3; ++a)
+                Log("[HighPlacement]   made from inside ntdll, %-18s: %lu under 2 MB, %lu from 2 to under 16 MB, %lu of 16 MB or more "
+                    "(minimum size or more, with a null base; lower bounds)",
+                    kAsk[a], g_hmByAsk[a][0], g_hmByAsk[a][1], g_hmByAsk[a][2]);
+        }
         if (Config::g_settings.OptHighPlacementHeapGrowth)
             Log("[HighPlacement] reservations the heap manager makes are placed too (HighPlacementHeapGrowth=1, the default).");
         else
