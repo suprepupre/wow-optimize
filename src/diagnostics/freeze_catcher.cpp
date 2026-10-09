@@ -95,7 +95,10 @@ LARGE_INTEGER g_base = {};
 // word on top of the stack and the return addresses up the frame-pointer chain.
 // An address inside ntdll says the main thread was waiting; only the callers say
 // what it was waiting for.
-constexpr int kChain = 4;
+// Eight, from four: a wait inside the Direct3D layer (DXVK's) is three or four of its own frames deep,
+// and the stacks of 2026-10-08 ended inside it with no client frame in them, so the 1000-odd samples
+// of the main thread waiting there could not be attributed to a call the client made.
+constexpr int kChain = 8;
 // What the client was doing while a frame ran long, so a log can be sorted without
 // a script that guesses from the lines around it: a loading screen and a Lua
 // state being set up or replaced are expected to be long, and everything else is
@@ -472,7 +475,7 @@ void PrintSamples(const char* what, long len, int take) {
             Describe(g_eip[best], d, sizeof(d));
             Log("[FreezeCatcher]     in %s", d);
         }
-        char line[640];
+        char line[1280];
         int len = snprintf(line, sizeof(line), "[FreezeCatcher]     stack:");
         for (int k = 0; k < kChain && len > 0 && len < (int)sizeof(line) - 170; ++k) {
             if (!g_chain[rep][k]) continue;
