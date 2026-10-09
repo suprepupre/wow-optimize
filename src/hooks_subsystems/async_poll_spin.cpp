@@ -305,8 +305,11 @@ void __cdecl Hooked_OsSleep(DWORD ms) {
     }
     if (g_abSubject && AbTest::StandAside()) { g_orig(ms); return; }
 
+    if (site == kSitePump && GetCurrentThreadId() == g_mainThreadId) {
+        g_lastPump = Now();
+        LoadingState::NoteLoadingPump();
+    }
     if (g_state == kRetired) { g_orig(ms); return; }
-    if (site == kSitePump && GetCurrentThreadId() == g_mainThreadId) g_lastPump = Now();
 
     if (site == kSiteWorker) {
         // The worker only spins while somebody is waiting on it: a loading screen, or the main

@@ -100,6 +100,11 @@ EventKind ClassifyEvent(int eventId) {
 // ---- where a loading screen's time goes -------------------------------------
 static LARGE_INTEGER g_qpcFreq      = {};
 static LARGE_INTEGER g_loadStartQpc = {};
+// Reads by any thread whether or not a load is up, and the first call of the loading
+// pump with no load running (the first world entry has no start event).
+static volatile unsigned long g_readsAny = 0;
+static LARGE_INTEGER g_pumpFirstQpc = {};
+static unsigned long g_pumpFirstReads = 0;
 // Lua compiled inside this loading screen, split the way the census splits it.
 static double        g_compileMsThisLoad      = 0.0;
 static double        g_compileMsFirstThisLoad = 0.0;
@@ -129,6 +134,7 @@ static void LoadTimerBegin() {
     MpqOpenCensus::OnLoadBegin();
     if (g_qpcFreq.QuadPart == 0) QueryPerformanceFrequency(&g_qpcFreq);
     QueryPerformanceCounter(&g_loadStartQpc);
+    g_pumpFirstQpc.QuadPart = 0;
     g_ioMsThisLoad = 0.0;
     g_ioBytesThisLoad = 0;
     g_ioReadsThisLoad = 0;
@@ -143,6 +149,18 @@ static void LoadTimerEnd() {
         // The initial entry into the world has no PLAYER_LEAVING_WORLD before it,
         // so there was no start to time. Said out loud, because this is the
         // longest load of the session and silence here reads as "it was free".
+        if (g_pumpFirstQpc.QuadPart != 0 && g_qpcFreq.QuadPart != 0) {
+            LARGE_INTEGER nowQ;
+            QueryPerformanceCounter(&nowQ);
+            const double firstMs = (double)(nowQ.QuadPart - g_pumpFirstQpc.QuadPart) * 1000.0
+                                 / (double)g_qpcFreq.QuadPart;
+            const unsigned long firstReads = g_readsAny - g_pumpFirstReads;
+            g_pumpFirstQpc.QuadPart = 0;
+            Log("[LoadingState] Initial world entry took at least %.0f ms from the loading pump's first call, %lu reads "
+                "(%.2f ms a read). It has no start event, so this starts a little after the load does.",
+                firstMs, firstReads, firstReads ? firstMs / (double)firstReads : 0.0);
+            return;
+        }
         Log("[LoadingState] Initial world entry finished - not timed, it has no "
             "start event to measure from");
         return;
@@ -443,7 +461,6 @@ unsigned long ReadsThisLoad() {
     return (unsigned long)g_ioReadsThisLoad;
 }
 
-static volatile unsigned long g_readsAny = 0;
 
 void CountRead() {
     g_readsAny = g_readsAny + 1;
@@ -451,6 +468,12 @@ void CountRead() {
 
 unsigned long ReadsAny() {
     return g_readsAny;
+}
+
+void NoteLoadingPump() {
+    if (g_loadStartQpc.QuadPart != 0 || g_pumpFirstQpc.QuadPart != 0) return;
+    QueryPerformanceCounter(&g_pumpFirstQpc);
+    g_pumpFirstReads = g_readsAny;
 }
 
 void ReportLoadTimes() {

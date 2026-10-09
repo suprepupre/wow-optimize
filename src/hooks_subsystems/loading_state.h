@@ -53,6 +53,13 @@ ClientWriteBatch::WriteFn GetClientWriter();
     void CountRead();
     unsigned long ReadsAny();
 
+    // Called from the loading pump's wait. The first world entry of a session has
+    // no start event, so it was never timed: "Initial world entry finished - not
+    // timed". The first call of the pump with no load running stands in for the
+    // start, and the entry's end event then reports the time and the reads since.
+    // It starts a little after the load does, so the figure is a lower bound.
+    void NoteLoadingPump();
+
     // The write side of the same question. A tester's 139-second loading screen
     // spent 1% of itself in ReadFile, and the freeze watchdog caught its main
     // thread blocked 13 seconds inside the client's own write wrapper - the one
