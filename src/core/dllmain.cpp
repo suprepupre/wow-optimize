@@ -5166,6 +5166,19 @@ static void ConfigureMimalloc() {
     // Commits entire arena at once instead of page-by-page
     mi_option_set(mi_option_arena_eager_commit, 0);
 
+    // How much address space one arena reserves. mimalloc's own default for a 32-bit
+    // build is 128 MB, and the reservation is placed bottom-up, in the half the client
+    // allocates from. The pre-warm below touches 32 MB and the subsystems that use this
+    // allocator (read-ahead and prefetch buffers, asynchronous read buffers, the graphics
+    // buffer shadows) hold a few megabytes more, so most of those 128 MB is held without
+    // ever being used. kromvel85's session of 2026-10-08 lists one such block, 128 MB at
+    // 0x2E190000 asked by this DLL, among 136 MB of this tool's reservations below 2GB.
+    // 48 MB holds the pre-warm and what the subsystems keep; anything beyond that gets
+    // another arena of the same size when it is needed. With MimallocHighArena on, the
+    // arenas come from above 2GB and this does not apply.
+    if (!Config::g_settings.OptMimallocHighArena)
+        mi_option_set(mi_option_arena_reserve, 48 * 1024);
+
     // Purge delay = how long mimalloc keeps a freed page mapped before decommitting
     // it back to the OS. Now that mimalloc backs WoW's ENTIRE high-churn heap, a too-
     // short delay is actively harmful: WoW frees and re-allocates constantly, so the
@@ -5224,7 +5237,7 @@ static void ConfigureMimalloc() {
     // keep their address space, which on a 32-bit client is the scarce half.
     Log("mimalloc v%d.%d.%d configured (arena eager commit OFF, purge by "
         "MEM_RESET after %dms, large OS pages %s, pre-warmed 32MB + 23 size "
-        "classes). Reset purge returns physical pages and keeps the address "
+        "classes, arena reserve %u MB). Reset purge returns physical pages and keeps the address "
         "space, which is deliberate - MEM_DECOMMIT unmapped buffers a GL driver "
         "was still reading on its own thread - but it means freed memory does "
         "not raise the largest free block below 2GB. Only a collect does.",
@@ -5233,7 +5246,8 @@ static void ConfigureMimalloc() {
         // every log this project has ever produced.
         mi_version() / 10000, (mi_version() / 100) % 100, mi_version() % 100,
         (int)mi_option_get(mi_option_purge_delay),
-        TEST_ENABLE_LARGE_PAGES ? "allowed" : "off");
+        TEST_ENABLE_LARGE_PAGES ? "allowed" : "off",
+        (unsigned)(mi_option_get_size(mi_option_arena_reserve) / (1024 * 1024)));
 }
 
 static void AdjustMimallocForMultiClient() {
