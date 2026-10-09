@@ -1544,6 +1544,13 @@ namespace WowOptimizeLauncher {
                 return;
             }
 
+            // Opening the tab that holds a match moves the keyboard focus onto the tab
+            // control, so the next letter typed went nowhere. The search box gets the
+            // focus and its caret back at the end of this method.
+            bool searchHadFocus = searchBox != null && searchBox.Focused;
+            int searchSelStart = searchBox != null ? searchBox.SelectionStart : 0;
+            int searchSelLength = searchBox != null ? searchBox.SelectionLength : 0;
+
             query = (query ?? "").Trim().ToLower();
             bool hasSearch = !string.IsNullOrEmpty(query);
 
@@ -1568,18 +1575,29 @@ namespace WowOptimizeLauncher {
                 for (int h = 0; h < headings.Count; h++) headings[h].Dispose();
             }
 
-            // A switch is found by the name on its row or by its ini key, with or
-            // without spaces: "parallel particle", "ParallelParticles" and
-            // "parallelparticle" all find Parallel Particle Fill.
+            // A switch is found by the name on its row or by its ini key, compared as
+            // letters and digits only: "parallel particle", "ParallelParticles" and
+            // "parallelparticle" all find Parallel Particle Fill. A name pasted from
+            // Discord or a web page carries things that are not in the row's text -
+            // a non-breaking space, a zero-width character, bold or code marks,
+            // quotes - and those are not letters, so they are left out of both sides.
+            // A query with no letter or digit in it (a lone bracket) falls back to a
+            // plain substring match on the name.
             string squeezed = query.Replace(" ", "");
+            string key = SearchKey(query);
             foreach (KeyValuePair<string, SettingItem> pair in settingsMap) {
                 if (pair.Value.Ctrl == null) continue;
                 string name = pair.Key.ToLower();
                 string ini = (pair.Value.Key ?? "").ToLower();
-                pair.Value.Ctrl.Visible = !hasSearch ||
+                bool match = !hasSearch ||
                     name.Contains(query) ||
                     name.Replace(" ", "").Contains(squeezed) ||
                     ini.Contains(squeezed);
+                if (!match && key.Length > 0) {
+                    match = SearchKey(pair.Key).Contains(key) ||
+                            SearchKey(pair.Value.Key).Contains(key);
+                }
+                pair.Value.Ctrl.Visible = match;
             }
 
             // Headings stay while searching. They used to be dropped and each
@@ -1634,6 +1652,22 @@ namespace WowOptimizeLauncher {
                     }
                 }
             }
+
+            if (searchHadFocus && searchBox != null && !searchBox.Focused) {
+                searchBox.Focus();
+                searchBox.SelectionStart = searchSelStart;
+                searchBox.SelectionLength = searchSelLength;
+            }
+        }
+
+        // Letters and digits of a string, lower case, in order.
+        private static string SearchKey(string s) {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++) {
+                if (char.IsLetterOrDigit(s[i])) sb.Append(char.ToLowerInvariant(s[i]));
+            }
+            return sb.ToString();
         }
 
         private static FlowLayoutPanel TabFlow(TabPage tp) {
