@@ -3116,6 +3116,7 @@ static BOOL WINAPI hooked_ReadFile_Inner(HANDLE hFile, LPVOID lpBuffer,
 static BOOL WINAPI hooked_ReadFile(HANDLE hFile, LPVOID lpBuffer,
     DWORD nBytesToRead, LPDWORD lpBytesRead, LPOVERLAPPED lpOverlapped)
 {
+    LoadingState::CountRead();
     if (!LoadingState::IsLoading())
         return hooked_ReadFile_Inner(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 
@@ -3311,6 +3312,7 @@ static BOOL WINAPI hooked_ReadFile_TimingOnly(HANDLE hFile, LPVOID lpBuffer,
     // one test of a length when nothing is buffered, which is almost always.
     ClientWriteBatch::FlushHandle(hFile, true);
 
+    LoadingState::CountRead();
     if (!LoadingState::IsLoading())
         return orig_ReadFile(hFile, lpBuffer, nBytesToRead, lpBytesRead, lpOverlapped);
 

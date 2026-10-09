@@ -46,6 +46,13 @@ ClientWriteBatch::WriteFn GetClientWriter();
     // torn or stale value costs one sample and nothing else.
     unsigned long ReadsThisLoad();
 
+    // Reads of any file by any thread since the process started, counted whether or
+    // not a loading screen is up, as a plain 32-bit counter. For a caller that needs
+    // a rate of reads during a wait the client's loading code makes where
+    // PLAYER_LEAVING_WORLD never arrived: the first world entry of a session.
+    void CountRead();
+    unsigned long ReadsAny();
+
     // The write side of the same question. A tester's 139-second loading screen
     // spent 1% of itself in ReadFile, and the freeze watchdog caught its main
     // thread blocked 13 seconds inside the client's own write wrapper - the one

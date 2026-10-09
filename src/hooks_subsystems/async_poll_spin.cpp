@@ -52,8 +52,9 @@
 // that says "faster" would be a claim. While a loading screen is up the hook
 // alternates between two modes in windows of about sixty milliseconds: the
 // client's own sleep, and the spin. Each window counts the reads the client
-// completes in it (the counter LoadingState keeps for the load), and a mode's
-// rate is reads per millisecond over all its windows. Both modes see the same
+// completes in it (a counter in the ReadFile hook that runs whether or not
+// LoadingState thinks a load is up), and a mode's rate is reads per millisecond
+// over all its windows. Both modes see the same
 // load, minutes of it interleaved, so a load that is read-heavy at the start and
 // Lua-heavy at the end affects both the same way.
 //
@@ -68,11 +69,12 @@
 //              0.95 of the sleep's rate over everything measured, it is dropped.
 //   retired    the client's sleep, always.
 //
-// Outside a loading screen nothing is measured: the hook spins when armed and
-// otherwise leaves the client's sleep alone. The first world entry of a session
-// has no PLAYER_LEAVING_WORLD before it, so it is never inside a loading screen
-// as far as LoadingState can tell, and it runs on the client's sleeps until a
-// later load has armed the spin.
+// A loading screen is when LoadingState says one is up, or when the loading
+// screen's own pump (the sub_4BAE10 site) has called the hook in the last 200 ms.
+// The second covers the first world entry of a session, which has no
+// PLAYER_LEAVING_WORLD before it and is the longest load a player sits through.
+// Outside both, nothing is measured: the hook spins when armed and otherwise
+// leaves the client's sleep alone.
 // ============================================================================
 
 #include "async_poll_spin.h"
@@ -136,6 +138,8 @@ constexpr unsigned kArmedSleepEvery = 8;      // one window in this many is the 
 
 volatile LONG g_state = kLearning;
 volatile LONG g_mode  = kModeSleep;           // what the hook does while a load is up
+volatile LONG g_loadCtx = 0;                  // a loading screen is up, by either signal; set on the main thread
+uint64_t g_lastPump = 0;                      // main thread only
 struct Windows { double ms; unsigned long reads; unsigned long count; };
 Windows  g_win[2];                            // main thread only
 uint64_t g_winStart = 0;
@@ -216,18 +220,21 @@ void Retire(const char* why, double ratio) {
 }
 
 // Called on the main thread from the three main-thread sites. Keeps the window
-// bookkeeping while a loading screen is up and sets g_mode, which the worker
-// site reads.
+// bookkeeping while a loading screen is up and sets g_mode and g_loadCtx, which
+// the worker site reads.
 void UpdateMode() {
     const LONG state = g_state;
-    if (state == kRetired) { g_mode = kModeSleep; return; }
-    if (!LoadingState::IsLoading()) {
+    if (state == kRetired) { g_mode = kModeSleep; g_loadCtx = 0; return; }
+    const uint64_t now = Now();
+    const bool loading = LoadingState::IsLoading() ||
+                         (g_lastPump != 0 && (double)(now - g_lastPump) / g_freq < 200000.0);
+    g_loadCtx = loading ? 1 : 0;
+    if (!loading) {
         g_winOpen = false;
         g_mode = (state == kArmed) ? kModeSpin : kModeSleep;
         return;
     }
-    const uint64_t now = Now();
-    const unsigned long reads = LoadingState::ReadsThisLoad();
+    const unsigned long reads = LoadingState::ReadsAny();
     if (g_winOpen) {
         const double ms = (double)(now - g_winStart) / g_freq / 1000.0;
         if (ms < kWindowMs) return;
@@ -299,13 +306,14 @@ void __cdecl Hooked_OsSleep(DWORD ms) {
     if (g_abSubject && AbTest::StandAside()) { g_orig(ms); return; }
 
     if (g_state == kRetired) { g_orig(ms); return; }
+    if (site == kSitePump && GetCurrentThreadId() == g_mainThreadId) g_lastPump = Now();
 
     if (site == kSiteWorker) {
         // The worker only spins while somebody is waiting on it: a loading screen, or the main
         // thread inside AsyncFileReadWait. In ordinary play it sleeps as the client wrote it.
         // It follows the mode the main thread has set: the client's sleep in a sleep window,
         // and before the spin has been armed anywhere outside a loading screen.
-        if ((!LoadingState::IsLoading() && *(volatile int*)kFileWaiting == 0) || g_mode != kModeSpin) {
+        if ((!g_loadCtx && *(volatile int*)kFileWaiting == 0) || g_mode != kModeSpin) {
             ++g_declinedIdle;
             g_orig(ms);
             return;
@@ -407,8 +415,8 @@ void LogStats() {
                 ? (RateOf(sp) / RateOf(sl) >= 1.0 ? ", spin ahead" : ", spin behind") : ", no ratio yet",
             g_winDiscarded, g_flips);
         if (RateOf(sl) > 0.0 && sp.ms > 0.0)
-            Log("[AsyncPollSpin]   ratio of spin to sleep: %.2f. Plain counters on the main thread; the reads are the ones "
-                "LoadingState counts inside a loading screen.", RateOf(sp) / RateOf(sl));
+            Log("[AsyncPollSpin]   ratio of spin to sleep: %.2f. Plain counters on the main thread; the reads are every ReadFile call "
+                "in the process, counted while a loading screen was up.", RateOf(sp) / RateOf(sl));
     }
     if (g_strayTotal == 0) {
         Log("[AsyncPollSpin]   no main-thread Sleep(1) from any other return address during a loading screen.");

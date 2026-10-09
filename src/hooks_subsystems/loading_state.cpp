@@ -443,6 +443,16 @@ unsigned long ReadsThisLoad() {
     return (unsigned long)g_ioReadsThisLoad;
 }
 
+static volatile unsigned long g_readsAny = 0;
+
+void CountRead() {
+    g_readsAny = g_readsAny + 1;
+}
+
+unsigned long ReadsAny() {
+    return g_readsAny;
+}
+
 void ReportLoadTimes() {
     if (g_loadCount == 0) {
         Log("[LoadingState] No loading screens completed this session");
