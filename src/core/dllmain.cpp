@@ -2471,6 +2471,11 @@ static void WINAPI hooked_Sleep(DWORD ms) {
             PreciseSleep((double)ms);
             return;
         }
+        // The sleep has to be made while sleepTimer is alive. It used to follow the closing brace of
+        // this block, so every sleep that did not take one of the returns above (all of them longer
+        // than 3 ms) was timed after the timer was gone and filed as 0.00 ms.
+        orig_Sleep(ms);
+        return;
     } else {
         if (ms == 0) {
             orig_Sleep(0);
