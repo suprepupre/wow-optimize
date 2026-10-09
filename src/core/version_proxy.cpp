@@ -224,6 +224,78 @@ static bool HostIsOneOfOurs() {
     return false;
 }
 
+// The client's startup clock check (sub_86AB30, called from the TimeManager constructor) busy-waits
+// 250 ms with the process at realtime priority, comparing QueryPerformanceCounter against
+// GetTickCount, before the main window can appear. The wait is `cmp edx, 0FAh` at 0x0086AC9B and
+// the comparison is edge-aligned on tick changes, so a shorter span makes the same test. It runs
+// in the first moments of the process, long before wow_optimize.dll loads (the loader thread
+// sleeps three seconds), so the patch is made here, from DllMain.
+//
+// Off unless FastTimerCalibration=1 in the ini, and skipped under NoClientPatches. The ini is
+// looked up the way Config::ResolveIniPath does, without creating or moving anything.
+static const unsigned kTimerCmpSite  = 0x0086AC9B;
+static const unsigned char kTimerCmpOld[6] = { 0x81, 0xFA, 0xFA, 0x00, 0x00, 0x00 };
+static const unsigned char kTimerWaitMs = 16;    // two tick edges, about 31 ms
+
+static bool FileThere(const char* path) {
+    DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool ProxyFindIni(char* out, size_t cap) {
+    char env[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("WOW_OPT_CONFIG", env, MAX_PATH);
+    if (n > 0 && n < MAX_PATH && FileThere(env)) { strcpy_s(out, cap, env); return true; }
+
+    char root[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, root, MAX_PATH)) return false;
+    char* slash = strrchr(root, '\\');
+    if (!slash) return false;
+    *(slash + 1) = '\0';
+
+    char path[MAX_PATH];
+    strcpy_s(path, sizeof(path), root);
+    strcat_s(path, sizeof(path), "WTF\\wow_opt.ini");
+    if (FileThere(path)) { strcpy_s(out, cap, path); return true; }
+    strcpy_s(path, sizeof(path), root);
+    strcat_s(path, sizeof(path), "wow_opt.ini");
+    if (FileThere(path)) { strcpy_s(out, cap, path); return true; }
+    return false;
+}
+
+static void ApplyFastTimerCalibration(HMODULE hSelf) {
+    char ini[MAX_PATH];
+    if (!ProxyFindIni(ini, sizeof(ini))) return;
+    if (GetPrivateProfileIntA("General", "FastTimerCalibration", 0, ini) == 0) return;
+
+    if (GetPrivateProfileIntA("General", "NoClientPatches", 0, ini) != 0) {
+        ProxyLog(hSelf, "FastTimerCalibration: skipped, NoClientPatches is on\r\n", false);
+        return;
+    }
+    if ((uintptr_t)GetModuleHandleA(NULL) != 0x00400000) {
+        ProxyLog(hSelf, "FastTimerCalibration: skipped, the client is not at 0x00400000\r\n", false);
+        return;
+    }
+
+    unsigned char* site = (unsigned char*)(uintptr_t)kTimerCmpSite;
+    unsigned char* imm = site + 2;
+    DWORD oldProt = 0;
+    if (!VirtualProtect(site, sizeof(kTimerCmpOld), PAGE_EXECUTE_READWRITE, &oldProt)) {
+        ProxyLog(hSelf, "FastTimerCalibration: skipped, the client's code could not be made writable\r\n", false);
+        return;
+    }
+    bool matches = memcmp(site, kTimerCmpOld, sizeof(kTimerCmpOld)) == 0;
+    if (matches) *imm = kTimerWaitMs;
+    DWORD ignored;
+    VirtualProtect(site, sizeof(kTimerCmpOld), oldProt, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kTimerCmpOld));
+
+    ProxyLog(hSelf, matches
+        ? "FastTimerCalibration: the client's 250 ms clock check now waits 16 ms (0x0086AC9D)\r\n"
+        : "FastTimerCalibration: skipped, the bytes at 0x0086AC9B are not the ones this was written against\r\n",
+        false);
+}
+
 static DWORD WINAPI LoaderThread(LPVOID param) {
     Sleep(3000);
 
@@ -291,6 +363,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                     ProxyLog(hModule, "ERROR: the system version.dll could not be loaded\r\n", false);
                 return FALSE;
             }
+            if (!HostIsOneOfOurs()) ApplyFastTimerCalibration(hModule);
             CloseHandle(CreateThread(NULL, 0, LoaderThread, (LPVOID)hModule, 0, NULL));
             break;
 

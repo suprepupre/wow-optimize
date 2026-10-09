@@ -39,6 +39,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "HeapOptimization", &Settings::OptHeapOptimization },
     { "General", "AsyncPollSpin", &Settings::OptAsyncPollSpin },
     { "General", "FastExit", &Settings::OptFastExit },
+    { "General", "FastTimerCalibration", &Settings::OptFastTimerCalibration },
     { "General", "NoWebProxy", &Settings::OptNoWebProxy },
     { "General", "ClientCodeAudit", &Settings::OptClientCodeAudit },
     { "General", "FileAttrCensus", &Settings::OptFileAttrCensus },
@@ -606,6 +607,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptHeapOptimization    = GetPrivateProfileIntA("General", "HeapOptimization", 1, iniPath.c_str()) != 0;
         g_settings.OptAsyncPollSpin       = GetPrivateProfileIntA("General", "AsyncPollSpin", 0, iniPath.c_str()) != 0;
         g_settings.OptFastExit            = GetPrivateProfileIntA("General", "FastExit", 0, iniPath.c_str()) != 0;
+        g_settings.OptFastTimerCalibration = GetPrivateProfileIntA("General", "FastTimerCalibration", 0, iniPath.c_str()) != 0;
         g_settings.OptNoWebProxy          = GetPrivateProfileIntA("General", "NoWebProxy", 0, iniPath.c_str()) != 0;
         g_settings.OptClientCodeAudit     = GetPrivateProfileIntA("General", "ClientCodeAudit", 1, iniPath.c_str()) != 0;
         g_settings.OptFileAttrCensus      = GetPrivateProfileIntA("General", "FileAttrCensus", 1, iniPath.c_str()) != 0;
