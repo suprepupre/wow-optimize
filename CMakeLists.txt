@@ -567,6 +567,8 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/async_poll_spin.h
     src/diagnostics/client_code_audit.cpp
     src/diagnostics/client_code_audit.h
+    src/diagnostics/file_attr_census.cpp
+    src/diagnostics/file_attr_census.h
     src/hooks_subsystems/fast_exit.cpp
     src/hooks_subsystems/fast_exit.h
     src/runtime_vm/lua_collect_skip.cpp

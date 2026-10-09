@@ -119,6 +119,7 @@
 #include "../runtime_vm/lua_collect_skip.h"
 #include "../hooks_subsystems/fast_exit.h"
 #include "../diagnostics/client_code_audit.h"
+#include "../diagnostics/file_attr_census.h"
 #include "../diagnostics/sleep_census.h"
 #include "parallel_particles.h"
 #include "shader_const_dedup_sse2.h"
@@ -5961,6 +5962,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("LuaCollectSkip::LogStats", LuaCollectSkip::LogStats());
     STAT_TIME("FastExit::LogStats", FastExit::LogStats());
     STAT_TIME("ClientCodeAudit::LogStats", ClientCodeAudit::LogStats());
+    STAT_TIME("FileAttrCensus::LogStats", FileAttrCensus::LogStats());
     STAT_TIME("FloorSplit::LogStats", FloorSplit::LogStats());
     STAT_TIME("SkyCloudTexels::LogStats", SkyCloudTexels::LogStats());
     STAT_TIME("FrustumAabb::LogStats", FrustumAabb::LogStats());
@@ -8715,6 +8717,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     LuaCollectSkip::Init();
     FastExit::Init();
     ClientCodeAudit::Init();
+    FileAttrCensus::Init();
 
     Log("--- UnitAura Fast Path ---");
 #if !TEST_DISABLE_UNIT_AURA_FAST

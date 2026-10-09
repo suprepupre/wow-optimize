@@ -43,6 +43,7 @@ namespace Config {
         bool OptFastExit = false;
         bool OptNoWebProxy = false;
         bool OptClientCodeAudit = true;
+        bool OptFileAttrCensus = true;
         bool OptLoadingCollectSkip = false;
         bool OptHeapCompactor = true;
         bool OptDefragLf = false;
