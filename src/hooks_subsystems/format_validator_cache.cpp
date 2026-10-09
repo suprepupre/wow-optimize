@@ -1,6 +1,7 @@
 #include "format_validator_cache.h"
 #include <windows.h>
 #include <MinHook.h>
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 
 extern "C" void Log(const char* fmt, ...);
 

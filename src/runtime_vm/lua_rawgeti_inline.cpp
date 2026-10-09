@@ -7,6 +7,7 @@
 #include <intrin.h>
 #include <emmintrin.h>
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 // ---------------------------------------------------------------------------
 // The index that mattered was the one being skipped
 //

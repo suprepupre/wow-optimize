@@ -8,6 +8,7 @@
 #include <emmintrin.h>
 #include <cmath>
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "crash_dumper.h"
 #include "lua_vm_engine.h"
 #include "lua_optimize.h"

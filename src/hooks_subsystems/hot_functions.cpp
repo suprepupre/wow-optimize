@@ -7,6 +7,7 @@
 #include <cstring>
 #include <emmintrin.h>   // SSE2
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "hot_functions.h"
 #include "ab_test.h"
 #include "crash_dumper.h"

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "crash_dumper.h"
 #include <intrin.h>
 

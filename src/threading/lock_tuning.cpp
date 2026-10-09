@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <cstdint>
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "lock_tuning.h"
 
 extern "C" void Log(const char* fmt, ...);

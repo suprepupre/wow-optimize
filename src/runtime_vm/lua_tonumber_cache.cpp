@@ -1,6 +1,7 @@
 #include "lua_tonumber_cache.h"
 #include <windows.h>
 #include <MinHook.h>
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "lua_index2adr.h"
 
 extern "C" void Log(const char* fmt, ...);

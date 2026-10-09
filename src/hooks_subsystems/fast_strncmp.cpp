@@ -12,6 +12,7 @@
 #include <cctype>
 #include <emmintrin.h>   // SSE2
 #include "MinHook.h"
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include "fast_strncmp.h"
 
 extern "C" void Log(const char* fmt, ...);

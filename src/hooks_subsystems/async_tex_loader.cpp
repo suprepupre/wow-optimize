@@ -3,6 +3,7 @@
 #include "../allocators/loading_defrag.h"
 #include "MinHook.h"
 #include <windows.h>
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include <string>
 #include <vector>
 #include <queue>

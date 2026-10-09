@@ -7,6 +7,7 @@
 #include "net_packet_offload.h"
 #include "MinHook.h"
 #include <windows.h>
+#include "version.h"   // the No Client Patches gate and the foreign-detour check live here
 #include <atomic>
 // <thread> was included here and never used - every worker in this project is
 // a CreateThread. Including it is what the no-std::thread rule exists to stop:
