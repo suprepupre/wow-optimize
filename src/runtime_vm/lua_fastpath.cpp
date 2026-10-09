@@ -6,6 +6,8 @@
 #include "lua_fastpath.h"
 #include <cstdint>
 #include <cstring>
+#include <emmintrin.h>
+#include <tmmintrin.h>
 #include <cstdio>
 #include <cmath>
 #include "MinHook.h"
@@ -1783,7 +1785,7 @@ static int __cdecl Hooked_StrUpper(lua_State* L) {
 
 static lua_CFunction_t orig_str_reverse = nullptr;
 
-static int __cdecl Hooked_StrReverse(lua_State* L) {
+WO_TARGET_SSSE3 static int __cdecl Hooked_StrReverse(lua_State* L) {
     if (lua_type_(L, 1) != LUA_TSTRING) return orig_str_reverse(L);
 
     size_t sLen = 0;

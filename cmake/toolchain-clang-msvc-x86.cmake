@@ -55,6 +55,10 @@ set(_common_flags "${_xwin_includes_str} -m32")
 set(CMAKE_C_FLAGS_INIT   "${_common_flags}")
 set(CMAKE_CXX_FLAGS_INIT "${_common_flags}")
 
+# llvm-rc preprocesses version.rc through clang-cl, which does not get the
+# /imsvc paths above, so winver.h is not found without these.
+set(CMAKE_RC_FLAGS_INIT "-I ${XWIN}/crt/include -I ${XWIN}/sdk/include/ucrt -I ${XWIN}/sdk/include/um -I ${XWIN}/sdk/include/shared")
+
 # Match the Release-config flags that MSVC's VS generator sets but the
 # cross-build path doesn't pick up:
 #   /Gy  -> per-function COMDAT (so /OPT:REF /OPT:ICF can drop/fold)
