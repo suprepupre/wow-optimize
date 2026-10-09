@@ -2435,6 +2435,8 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         if (asker == 0x0086B28D) asker = ((const uintptr_t*)_AddressOfReturnAddress())[3];
         SleepTimer sleepTimer(asker, ms);
 
+        if (asker == 0x0087DF79 && FastExit::SoundStopSleep(ms)) return;
+
         if (ms == 0) {
             orig_Sleep(0);
             return;
