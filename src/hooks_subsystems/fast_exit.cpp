@@ -18,9 +18,12 @@
 //
 // sub_86FE40 opens a WinINet session called "Blizzard Web Client", connects, and
 // sets the connect and receive timeouts to 5000 ms. On a private server the
-// address the client was given may not answer, and quitting soon after the
-// character screen has loaded finds the request still waiting for its timeout.
-// The shutdown does nothing else for those seconds.
+// address the client was given may not answer, and a shutdown that arrives while
+// the request is still waiting for its timeout waits with it; the shutdown does
+// nothing else for those seconds. Which way of quitting leaves a request pending
+// is a guess (soon after the character screen has loaded): the same player's
+// exit in a session of 2026-10-07, build 783ab7af, took 0.3 s from socket close to
+// the end of the process, so the wait is not on every exit.
 //
 // What this does. It remembers the session handle of every InternetOpenA call
 // whose agent is "Blizzard Web Client", and hooks sub_4DBBC0. If either global is
