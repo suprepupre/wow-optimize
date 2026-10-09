@@ -38,6 +38,7 @@ static const BoolSetting kBoolSettings[] = {
     { "General", "MemoryPressure", &Settings::OptMemoryPressure },
     { "General", "HeapOptimization", &Settings::OptHeapOptimization },
     { "General", "AsyncPollSpin", &Settings::OptAsyncPollSpin },
+    { "General", "FastExit", &Settings::OptFastExit },
     { "UI_Lua", "LoadingCollectSkip", &Settings::OptLoadingCollectSkip },
     { "General", "HeapCompactor", &Settings::OptHeapCompactor },
     { "General", "DefragLf", &Settings::OptDefragLf },
@@ -601,6 +602,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptMemoryPressure      = GetPrivateProfileIntA("General", "MemoryPressure", 1, iniPath.c_str()) != 0;
         g_settings.OptHeapOptimization    = GetPrivateProfileIntA("General", "HeapOptimization", 1, iniPath.c_str()) != 0;
         g_settings.OptAsyncPollSpin       = GetPrivateProfileIntA("General", "AsyncPollSpin", 0, iniPath.c_str()) != 0;
+        g_settings.OptFastExit            = GetPrivateProfileIntA("General", "FastExit", 0, iniPath.c_str()) != 0;
         g_settings.OptLoadingCollectSkip  = GetPrivateProfileIntA("UI_Lua", "LoadingCollectSkip", 0, iniPath.c_str()) != 0;
         g_settings.OptHeapCompactor       = GetPrivateProfileIntA("General", "HeapCompactor", 1, iniPath.c_str()) != 0;
         g_settings.OptDefragLf            = GetPrivateProfileIntA("General", "DefragLf", 0, iniPath.c_str()) != 0;

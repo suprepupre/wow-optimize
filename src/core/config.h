@@ -40,6 +40,7 @@ namespace Config {
         bool OptMemoryPressure = true;
         bool OptHeapOptimization = true;
         bool OptAsyncPollSpin = false;
+        bool OptFastExit = false;
         bool OptLoadingCollectSkip = false;
         bool OptHeapCompactor = true;
         bool OptDefragLf = false;

@@ -565,6 +565,8 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/addon_memory_walk.h
     src/hooks_subsystems/async_poll_spin.cpp
     src/hooks_subsystems/async_poll_spin.h
+    src/hooks_subsystems/fast_exit.cpp
+    src/hooks_subsystems/fast_exit.h
     src/runtime_vm/lua_collect_skip.cpp
     src/runtime_vm/lua_collect_skip.h
     src/diagnostics/sleep_census.cpp
