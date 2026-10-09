@@ -41,6 +41,7 @@ namespace Config {
         bool OptHeapOptimization = true;
         bool OptAsyncPollSpin = false;
         bool OptFastExit = false;
+        bool OptClientCodeAudit = true;
         bool OptLoadingCollectSkip = false;
         bool OptHeapCompactor = true;
         bool OptDefragLf = false;
