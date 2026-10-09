@@ -1023,6 +1023,7 @@ extern "C" void WowOpt_NoteClientPatchRefused(void) {
 // While this is 1 (set across MainThread's install sequence), module enables
 // routed through WO_EnableHook are queued and applied in one MH_ApplyQueued.
 volatile long g_hookBatchMode = 0;
+volatile long g_hookQueued = 0;
 
 // Set once the init sequence has committed its queue, so later installs know
 // the shared MinHook queue is theirs to batch into. See WO_LateBatchAllowed.

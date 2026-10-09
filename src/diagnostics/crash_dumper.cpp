@@ -1227,34 +1227,38 @@ bool Init() {
     // case it loads after we do.
     RefreshBenignModuleRanges();
 
-    // Hook WoW's internal assertion handler (sub_8889B0)
-    // This fires on ERROR #134 "Fatal Condition" which bypasses Windows exceptions
-    void* assertTarget = (void*)0x008889B0;
-    if (WineSafe_CreateHook(assertTarget, (void*)Hooked_WowAssert, (void**)&orig_WowAssert) == MH_OK) {
-        WO_EnableHookNow(assertTarget);
-        Log("[CrashDumper] WoW assertion handler hook ACTIVE (sub_8889B0)");
-    }
-
-    // Hook ExitProcess as a fallback to flush logs on any abnormal exit
+    // The four hooks are created first and enabled with one freeze: an immediate enable freezes
+    // every thread in the process through a system-wide snapshot, about 22 ms each, and these four
+    // were 0.24 s of a startup that now takes 0.6 s. They are still live before the rest of init
+    // queues anything. When something is already queued, applying here would commit that half-built
+    // set, so each is enabled on its own then.
+    void* assertTarget = (void*)0x008889B0;     // fires on ERROR #134 "Fatal Condition", which bypasses Windows exceptions
     void* exitTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ExitProcess");
-    if (exitTarget && WineSafe_CreateHook(exitTarget, (void*)Hooked_ExitProcess, (void**)&orig_ExitProcess) == MH_OK) {
-        WO_EnableHookNow(exitTarget);
-        Log("[CrashDumper] ExitProcess hook ACTIVE (log flush on exit)");
-    }
-
-    // Hook TerminateProcess to catch silent kills (Warden, anti-cheat, or WoW internals)
     void* termTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "TerminateProcess");
-    if (termTarget && WineSafe_CreateHook(termTarget, (void*)Hooked_TerminateProcess, (void**)&orig_TerminateProcess) == MH_OK) {
-        WO_EnableHookNow(termTarget);
-        Log("[CrashDumper] TerminateProcess hook ACTIVE (silent kill detection)");
-    }
-
-    // Hook SetUnhandledExceptionFilter to prevent WoW or anti-cheat from overriding our UEF handler
     void* suefTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetUnhandledExceptionFilter");
-    if (suefTarget && WineSafe_CreateHook(suefTarget, (void*)Hooked_SetUnhandledExceptionFilter, (void**)&orig_SetUnhandledExceptionFilter) == MH_OK) {
-        WO_EnableHookNow(suefTarget);
-        Log("[CrashDumper] SetUnhandledExceptionFilter hook ACTIVE (override protection)");
+    const bool assertOk = WineSafe_CreateHook(assertTarget, (void*)Hooked_WowAssert, (void**)&orig_WowAssert) == MH_OK;
+    const bool exitOk = exitTarget && WineSafe_CreateHook(exitTarget, (void*)Hooked_ExitProcess, (void**)&orig_ExitProcess) == MH_OK;
+    const bool termOk = termTarget && WineSafe_CreateHook(termTarget, (void*)Hooked_TerminateProcess, (void**)&orig_TerminateProcess) == MH_OK;
+    const bool suefOk = suefTarget && WineSafe_CreateHook(suefTarget, (void*)Hooked_SetUnhandledExceptionFilter, (void**)&orig_SetUnhandledExceptionFilter) == MH_OK;
+    if (WO_QueueIsEmpty()) {
+        if (assertOk) MH_QueueEnableHook(assertTarget);
+        if (exitOk) MH_QueueEnableHook(exitTarget);
+        if (termOk) MH_QueueEnableHook(termTarget);
+        if (suefOk) MH_QueueEnableHook(suefTarget);
+        MH_ApplyQueued();
+    } else {
+        if (assertOk) WO_EnableHookNow(assertTarget);
+        if (exitOk) WO_EnableHookNow(exitTarget);
+        if (termOk) WO_EnableHookNow(termTarget);
+        if (suefOk) WO_EnableHookNow(suefTarget);
     }
+    if (assertOk) Log("[CrashDumper] WoW assertion handler hook ACTIVE (sub_8889B0)");
+    // ExitProcess as a fallback to flush logs on any abnormal exit
+    if (exitOk) Log("[CrashDumper] ExitProcess hook ACTIVE (log flush on exit)");
+    // TerminateProcess to catch silent kills (Warden, anti-cheat, or WoW internals)
+    if (termOk) Log("[CrashDumper] TerminateProcess hook ACTIVE (silent kill detection)");
+    // SetUnhandledExceptionFilter to prevent WoW or anti-cheat from overriding our handler
+    if (suefOk) Log("[CrashDumper] SetUnhandledExceptionFilter hook ACTIVE (override protection)");
 
     Log("[CrashDumper] Enhanced crash reporter active%s",
         IsWine() ? " (Wine: text reports)" : " (Windows: minidump)");

@@ -1101,13 +1101,20 @@ static inline void WowOpt_HexBytes(uintptr_t addr, char* out, size_t cap) {
 // end of init. Outside that window (and for crash guards that call MH_EnableHook
 // directly) enables apply immediately. Defined in dllmain.cpp.
 extern volatile long g_hookBatchMode;
+extern volatile long g_hookQueued;      // enables queued through WO_EnableHook since the process started
 static inline MH_STATUS WO_EnableHook(void* target) {
 #if defined(TEST_DISABLE_HOOK_BATCHING) && TEST_DISABLE_HOOK_BATCHING
     return MH_EnableHook(target);
 #else
-    if (g_hookBatchMode) return MH_QueueEnableHook(target);
+    if (g_hookBatchMode) { ++g_hookQueued; return MH_QueueEnableHook(target); }
     return MH_EnableHook(target);
 #endif
+}
+
+// True while init is batching and nothing has been queued yet, which is the one moment a caller
+// may queue its own hooks and apply them without committing anybody else's half-built set.
+static inline bool WO_QueueIsEmpty() {
+    return g_hookBatchMode != 0 && g_hookQueued == 0;
 }
 
 // The immediate enable, for a crash guard that has to be live while the rest of init is still
