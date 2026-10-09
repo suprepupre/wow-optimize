@@ -67,7 +67,7 @@ namespace WowOptimizeLauncher {
         private static readonly string[] DiagKeys = new string[] {
             "AbTest", "SamplingProfiler", "AddonProfiler", "LuaAddonProfile",
             "LuaAllocCensus", "LuaCompileCensus", "LuaTableCensus", "LuaChainCensus", "AnimCensus", "AnimTrackCensus",
-            "DrawCensus", "ShadowStateProbe", "LockSpinHooks",
+            "DrawCensus", "ShadowStateProbe",
             "VaCensus", "CameraReplay", "SkyCloudTexels", "LuaGcPace",
             // Both only measure. They were filed as unproven replacements because
             // they are experimental, which put them on the NOT PROVEN tab beside
@@ -83,6 +83,10 @@ namespace WowOptimizeLauncher {
         private static readonly string[] CompatKeys = new string[] {
             "FrameLimiter", "LockTuningInitHook", "CompatMode", "NoClientPatches",
             "LuaGcStockPace",
+            // Sat on the diagnostics tab and no recording button ticks it, because it
+            // measures nothing: it changes how long the game spins on a lock before it
+            // sleeps. That is an option, and it is filed as one.
+            "LockSpinHooks",
         };
         private static readonly string[] LogKeys = new string[] {
             "SessionLogs", "FlightRecorder", "NetDiag", "CpuTopology",
@@ -265,8 +269,15 @@ namespace WowOptimizeLauncher {
         // frame time. Addon CPU by Sampling answers the same question without it.
         public static bool RecordsForLogging(string key) {
             if (key == "AbTest" || key == "NoClientPatches" || key == "LockSpinHooks"
-                || key == "AddonProfiler") return false;
+                || IsTooCostly(key)) return false;
             return In(DiagKeys, key) || In(LogKeys, key);
+        }
+
+        // A measurement that slows the whole session so much that every comparison
+        // made in it is made between two slow halves. Addon CPU by Sampling answers
+        // the same question without it.
+        public static bool IsTooCostly(string key) {
+            return key == "AddonProfiler";
         }
     }
 
@@ -1821,6 +1832,8 @@ namespace WowOptimizeLauncher {
         private const string HeldHeading =
             "UNDER INVESTIGATION - THE BUTTONS LEAVE THESE OFF, TICK BY HAND";
         private const string UnprovenFixHeading = "FIXES NOT PROVEN YET";
+        private const string CostlyHeading =
+            "TOO COSTLY FOR ANY BUTTON - TICK BY HAND FOR ONE SHORT SESSION";
 
         // The heading a row sits under on its tab. Speed and not-proven rows are
         // grouped by the part of the game they touch; the held-back ones form the
@@ -1837,6 +1850,7 @@ namespace WowOptimizeLauncher {
                 if (kind == Kinds.Compat) return Kinds.Heading(Kinds.Compat);
                 return data.Experimental ? UnprovenFixHeading : Kinds.Heading(Kinds.Fix);
             }
+            if (flow == diagFlow && Kinds.IsTooCostly(data.Key)) return CostlyHeading;
             return Kinds.Heading(kind);
         }
 
@@ -1855,7 +1869,11 @@ namespace WowOptimizeLauncher {
                 };
             }
             if (flow == lookFlow) return new string[] { Kinds.Heading(Kinds.Trade) };
-            if (flow == diagFlow) return new string[] { Kinds.Heading(Kinds.Log), Kinds.Heading(Kinds.Diag) };
+            if (flow == diagFlow) {
+                return new string[] {
+                    Kinds.Heading(Kinds.Log), Kinds.Heading(Kinds.Diag), CostlyHeading
+                };
+            }
             return new string[] { Kinds.Heading(Kinds.Lost) };
         }
 
@@ -1886,7 +1904,8 @@ namespace WowOptimizeLauncher {
                      + "or sounds. That is a trade for you to make, so no button turns them on.";
             if (flow == diagFlow)
                 return "These record or measure and cost frames. LOGGING: FULL ticks the recording ones; "
-                     + "TRY THE UNPROVEN ONES does too. MAX PERFORMANCE leaves them off.";
+                     + "TRY THE UNPROVEN ONES does too. MAX PERFORMANCE leaves them off. The group at "
+                     + "the bottom is left off by every button, because it would slow the whole session.";
             return "Measured against the game's own code and lost, or found to do nothing. Off, and no "
                  + "button turns them on. They are listed so the result is not repeated.";
         }
