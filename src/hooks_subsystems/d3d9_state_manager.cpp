@@ -9,6 +9,7 @@
 #endif
 #include <windows.h>
 #include <cstdint>
+#include <intrin.h>
 #include <d3d9.h>
 #include "d3d9_state_manager.h"
 #include "config.h"
@@ -397,14 +398,40 @@ static HRESULT __stdcall Hooked_SetTextureStageState(void* dev, DWORD stage, DWO
     return hr;
 }
 
+// What a skipped SetSamplerState would save, measured rather than assumed: one call in
+// kSsTimeEvery is timed with the time-stamp counter, kept apart by whether the value was
+// already set. The detour runs on the thread that calls the device, so these are written
+// by one thread and read by the report on the same one.
+static const unsigned long kSsTimeEvery = 256;
+static unsigned long       g_ssTimeTick = 0;
+static unsigned long long  g_ssCyc[2]   = {};   // [0] value changed, [1] value already set
+static unsigned long       g_ssCycN[2]  = {};
+static unsigned long long  g_ssTsc0 = 0, g_ssQpc0 = 0;
+
 static HRESULT __stdcall Hooked_SetSamplerState(void* dev, DWORD sampler, DWORD type, DWORD value) {
     CheckDeviceChange(dev);
     ++g_statCalls[2];
 
     DWORD idx = (sampler & 15) * 16 + (type & 15);
-    if (idx < 256 && g_ssValid[idx] && g_ssCache[idx] == value)
+    const bool repeated = idx < 256 && g_ssValid[idx] && g_ssCache[idx] == value;
+    if (repeated)
         ++g_wouldSkip[2];
-    HRESULT hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
+    HRESULT hr;
+    if (++g_ssTimeTick >= kSsTimeEvery) {
+        g_ssTimeTick = 0;
+        const unsigned long long t0 = __rdtsc();
+        hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
+        const unsigned long long dt = __rdtsc() - t0;
+        if (!g_ssTsc0) {
+            LARGE_INTEGER q; QueryPerformanceCounter(&q);
+            g_ssQpc0 = (unsigned long long)q.QuadPart;
+            g_ssTsc0 = t0;
+        }
+        g_ssCyc[repeated ? 1 : 0] += dt;
+        ++g_ssCycN[repeated ? 1 : 0];
+    } else {
+        hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
+    }
     if (SUCCEEDED(hr) && idx < 256) {
         g_ssCache[idx] = value;
         g_ssValid[idx] = true;
@@ -2165,10 +2192,31 @@ void D3D9StateManager_LogStats(void) {
                                         g_statCalls[2] + g_statCalls[5];
             const double share = total ? 100.0 * (double)ws / (double)total : 0.0;
             if (share >= 1.0) {
-                Log("[D3D9State]   THE DEDUP MAY BE WORTH PUTTING BACK ON THIS CLIENT: "
-                    "%lu of %lu call(s) (%.1f%%) to SetRenderState, "
+                Log("[D3D9State]   %lu of %lu call(s) (%.1f%%) to SetRenderState, "
                     "SetTextureStageState, SetSamplerState or SetMaterial carried a "
-                    "value that was already set. They only count now.", ws, total, share);
+                    "value that was already set. They only count now; whether skipping "
+                    "them would pay is the timing line below, which is what the real "
+                    "call costs when the value is already set.", ws, total, share);
+                if (g_ssCycN[0] >= 100 && g_ssCycN[1] >= 100 && g_ssTsc0) {
+                    LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f);
+                    const unsigned long long tsc1 = __rdtsc();
+                    const double secs = (double)((unsigned long long)q.QuadPart - g_ssQpc0) / (double)f.QuadPart;
+                    const double cycPerNs = secs > 1.0 ? (double)(tsc1 - g_ssTsc0) / (secs * 1e9) : 0.0;
+                    if (cycPerNs > 0.0) {
+                        const double nsSame = (double)g_ssCyc[1] / (double)g_ssCycN[1] / cycPerNs;
+                        const double nsDiff = (double)g_ssCyc[0] / (double)g_ssCycN[0] / cycPerNs;
+                        const double perFrame = frames ? (double)g_wouldSkip[2] / (double)frames : 0.0;
+                        Log("[D3D9State]   SetSamplerState timing, one call in %lu timed with the time-stamp counter "
+                            "(%.2f GHz): %.0f ns when the value was already set (%lu timed), %.0f ns when it changed "
+                            "(%lu timed). Skipping the repeats would save about %.0f ns x %.0f repeats per frame = %.1f us "
+                            "per frame, before the cost of the check itself.",
+                            kSsTimeEvery, cycPerNs, nsSame, g_ssCycN[1], nsDiff, g_ssCycN[0], nsSame, perFrame,
+                            nsSame * perFrame / 1000.0);
+                    }
+                } else {
+                    Log("[D3D9State]   SetSamplerState timing: not measured, too few timed calls (%lu repeated, %lu changed).",
+                        g_ssCycN[1], g_ssCycN[0]);
+                }
             } else {
                 Log("[D3D9State]   %lu of %lu call(s) (%.4f%%) to SetRenderState, "
                     "SetTextureStageState, SetSamplerState or SetMaterial carried a "
