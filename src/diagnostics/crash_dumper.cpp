@@ -666,6 +666,54 @@ static void LogClientFatalErrorText() {
     }
 }
 
+// What the client's "not enough memory resources" dialog does not say: whether the process ran out
+// of address space (and in which half) or the machine ran out of commit. Two sessions of one
+// tester ended in that dialog, one 2.5 hours in at a 350 KB request and one ten seconds in at a
+// 492 byte request, and nothing in either log could tell the two causes apart: the low-half walk
+// is periodic and was minutes old, and the commit figures were never read. Plain VirtualQuery
+// over the whole space and one GlobalMemoryStatusEx, in the order the failure would be read.
+static void LogMemoryAtFatalError() {
+    __try {
+        uint64_t freeLow = 0, bigLow = 0, freeHigh = 0, bigHigh = 0, privateBytes = 0, mappedBytes = 0;
+        MEMORY_BASIC_INFORMATION mbi;
+        uintptr_t a = 0;
+        unsigned regions = 0;
+        while (regions < 200000 && VirtualQuery((const void*)a, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            ++regions;
+            const uintptr_t base = (uintptr_t)mbi.BaseAddress;
+            const uint64_t sz = mbi.RegionSize;
+            if (mbi.State == MEM_FREE) {
+                // A hole that straddles 2GB counts toward each half by its own part.
+                const uint64_t lo = base < 0x80000000u ? (base + sz > 0x80000000u ? 0x80000000u - base : sz) : 0;
+                const uint64_t hi = sz - lo;
+                freeLow += lo; freeHigh += hi;
+                if (lo > bigLow) bigLow = lo;
+                if (hi > bigHigh) bigHigh = hi;
+            } else if (mbi.State == MEM_COMMIT) {
+                if (mbi.Type == MEM_PRIVATE) privateBytes += sz; else mappedBytes += sz;
+            }
+            const uintptr_t next = base + (uintptr_t)sz;
+            if (next <= a) break;
+            a = next;
+        }
+        Log("!!!   address space at this moment: %llu MB free below 2GB (largest hole %llu MB), %llu MB free above it "
+            "(largest hole %llu MB); %llu MB committed private, %llu MB committed mapped; %u regions walked",
+            freeLow >> 20, bigLow >> 20, freeHigh >> 20, bigHigh >> 20, privateBytes >> 20, mappedBytes >> 20, regions);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log("!!!   the address space could not be walked");
+    }
+    MEMORYSTATUSEX ms = {};
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) {
+        Log("!!!   machine: %llu of %llu MB physical free, %llu of %llu MB commit (RAM plus page file) free, "
+            "%llu of %llu MB of this process's address space free",
+            ms.ullAvailPhys >> 20, ms.ullTotalPhys >> 20, ms.ullAvailPageFile >> 20, ms.ullTotalPageFile >> 20,
+            ms.ullAvailVirtual >> 20, ms.ullTotalVirtual >> 20);
+    } else {
+        Log("!!!   machine memory status not available");
+    }
+}
+
 static BOOL WINAPI Hooked_TerminateProcess(HANDLE hProcess, UINT uExitCode) {
     __try {
         // Only log if it's our own process being terminated
@@ -676,6 +724,7 @@ static BOOL WINAPI Hooked_TerminateProcess(HANDLE hProcess, UINT uExitCode) {
                 Log("!!! TERMINATE PROCESS (code=%u) from the client's own fatal-error "
                     "handler, after its error dialog. The dialog said:", uExitCode);
                 LogClientFatalErrorText();
+                LogMemoryAtFatalError();
             } else {
                 Log("!!! TERMINATE PROCESS (code=%u) - silent kill detected !!!", uExitCode);
             }
