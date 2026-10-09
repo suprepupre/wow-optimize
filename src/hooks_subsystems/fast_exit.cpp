@@ -42,6 +42,23 @@
 //
 // Off by default (General/FastExit). Not run in a game. The measurement it is
 // built on is two exits in two logs.
+//
+// The same session opens on the main thread, too. prince's sessions of 2026-10-08
+// (build 9fc59ceb) each have one frame of 364 to 375 ms, and one of 2849 ms, whose
+// samples are 95% inside WININET waiting on an event (WaitForSingleObjectEx under
+// WININET.dll, reached through IsHostInProxyBypassList), in all three of his logs and
+// in none of the logs from machines without a proxy setting. sub_86FE40 opens the
+// session with InternetOpenA(agent, 0, ...), access type 0, which is
+// INTERNET_OPEN_TYPE_PRECONFIG: WinINet reads the system's proxy settings and, where
+// they say so, looks for an automatic configuration script before it connects. That
+// lookup is what the main thread waits for. General/NoWebProxy opens the notice
+// and agreement downloads with INTERNET_OPEN_TYPE_DIRECT instead, so there is no
+// proxy lookup to wait for. A player who can reach the notice host only through a
+// proxy loses the notice text and nothing else: the download then fails the way it
+// does when the host does not answer, and the glue screen's flag clears as it does
+// then. Which call of the session the wait is in (open, connect or send) is not
+// known from the stack; the log reports the time spent in the open call, and the
+// answer is whether the long frame is gone.
 // ============================================================================
 
 #include "fast_exit.h"
@@ -80,6 +97,9 @@ void* volatile g_sessions[kMaxSessions];
 volatile LONG g_sessionNext = 0;
 
 unsigned long g_opened = 0;
+unsigned long g_madeDirect = 0;         // sessions opened direct instead of through the system's proxy settings
+unsigned long g_openLogged = 0;
+double        g_worstOpenMs = 0.0;
 unsigned long g_exitsSeen = 0;          // the shutdown reached the loop with a download pending
 unsigned long g_handlesClosed = 0;
 unsigned long g_cleared = 0;            // both globals were zero within the wait after the close
@@ -92,8 +112,29 @@ inline bool Pending() {
 }
 
 void* WINAPI Hooked_InternetOpenA(LPCSTR agent, DWORD type, LPCSTR proxy, LPCSTR bypass, DWORD flags) {
+    const bool ours = agent && lstrcmpA(agent, "Blizzard Web Client") == 0;
+    const DWORD askedType = type;
+    if (ours && Config::g_settings.OptNoWebProxy && type == 0 /* INTERNET_OPEN_TYPE_PRECONFIG */) {
+        type = 1;                                 // INTERNET_OPEN_TYPE_DIRECT
+        proxy = nullptr;
+        bypass = nullptr;
+        ++g_madeDirect;
+    }
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
     void* h = g_origOpen(agent, type, proxy, bypass, flags);
-    if (h && agent && lstrcmpA(agent, "Blizzard Web Client") == 0) {
+    QueryPerformanceCounter(&t1);
+    if (ours) {
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+        if (ms > g_worstOpenMs) g_worstOpenMs = ms;
+        if (g_openLogged < 4) {
+            ++g_openLogged;
+            Log("[FastExit] InternetOpenA for the \"Blizzard Web Client\" session: access type %lu%s, %.1f ms in the call.",
+                (unsigned long)askedType, type != askedType ? " changed to 1 (direct, no proxy lookup)" : "", ms);
+        }
+    }
+    if (h && ours) {
         const LONG at = (InterlockedIncrement(&g_sessionNext) - 1) % kMaxSessions;
         g_sessions[at] = h;
         ++g_opened;
@@ -149,22 +190,27 @@ int __cdecl Hooked_Shutdown() {
 } // namespace
 
 void Init() {
-    if (!Config::g_settings.OptFastExit) return;
+    if (!Config::g_settings.OptFastExit && !Config::g_settings.OptNoWebProxy) return;
     if (RunningUnderTranslation()) {
         Log("[FastExit] NOT active: not installed under Wine or Rosetta.");
         return;
     }
+    // The shutdown hook patches the client; the proxy change is a hook on a WinINet export and needs
+    // no patch of wow.exe, so it runs under No Client Patches and the exit wait does not.
     void* const target = (void*)kTarget;
-    if (!WowOpt_ClientPatchAllowed(target)) {
-        Log("[FastExit] NOT active: client patches disallowed at 0x%08X", (unsigned)kTarget);
-        return;
+    const bool wantExit = Config::g_settings.OptFastExit;
+    bool exitOk = wantExit;
+    if (wantExit && !WowOpt_ClientPatchAllowed(target)) {
+        Log("[FastExit] exit wait NOT active: client patches disallowed at 0x%08X", (unsigned)kTarget);
+        exitOk = false;
     }
-    if (std::memcmp(target, kPrologue, sizeof(kPrologue)) != 0) {
+    if (exitOk && std::memcmp(target, kPrologue, sizeof(kPrologue)) != 0) {
         char found[64] = {};
         WowOpt_HexBytes(kTarget, found, sizeof(found));
-        Log("[FastExit] NOT active: the bytes at 0x%08X are not the shutdown's wait loop (%s).", (unsigned)kTarget, found);
-        return;
+        Log("[FastExit] exit wait NOT active: the bytes at 0x%08X are not the shutdown's wait loop (%s).", (unsigned)kTarget, found);
+        exitOk = false;
     }
+    if (!exitOk && !Config::g_settings.OptNoWebProxy) return;
     HMODULE wininet = LoadLibraryA("wininet.dll");
     void* open = wininet ? (void*)GetProcAddress(wininet, "InternetOpenA") : nullptr;
     g_close = wininet ? (InternetCloseHandle_fn)GetProcAddress(wininet, "InternetCloseHandle") : nullptr;
@@ -177,24 +223,32 @@ void Init() {
         Log("[FastExit] NOT active: InternetOpenA could not be hooked.");
         return;
     }
-    if (WineSafe_CreateHook(target, (void*)&Hooked_Shutdown, (void**)&g_origShutdown) != MH_OK ||
-        WO_EnableHook(target) != MH_OK) {
-        Log("[FastExit] NOT active: the hook on 0x%08X could not be created or enabled.", (unsigned)kTarget);
-        return;
+    if (exitOk) {
+        if (WineSafe_CreateHook(target, (void*)&Hooked_Shutdown, (void**)&g_origShutdown) != MH_OK ||
+            WO_EnableHook(target) != MH_OK) {
+            Log("[FastExit] exit wait NOT active: the hook on 0x%08X could not be created or enabled.", (unsigned)kTarget);
+        } else {
+            SamplingProfiler::RegisterSelfSymbol("FastExit", (const void*)&Hooked_Shutdown);
+            Log("[FastExit] exit wait ACTIVE: when the shutdown reaches its wait loop (sub_4DBBC0) with a web request "
+                "pending, the request's WinINet session is closed so the client's own completion path runs now rather "
+                "than at the 5000 ms timeout. Not yet run in a game.");
+        }
     }
     g_installed = true;
-    SamplingProfiler::RegisterSelfSymbol("FastExit", (const void*)&Hooked_Shutdown);
-    Log("[FastExit] ACTIVE: when the shutdown reaches its wait loop (sub_4DBBC0) with a web request pending, the "
-        "request's WinINet session is closed so the client's own completion path runs now rather than at the 5000 ms "
-        "timeout. Not yet run in a game.");
+    if (Config::g_settings.OptNoWebProxy)
+        Log("[FastExit] proxy lookup OFF for the notice and agreement downloads: InternetOpenA with access type 0 (system "
+            "proxy settings) is opened as type 1 (direct). Not yet run in a game.");
 }
 
 void Shutdown() {
 }
 
 void LogStats() {
-    if (!Config::g_settings.OptFastExit) return;
+    if (!Config::g_settings.OptFastExit && !Config::g_settings.OptNoWebProxy) return;
     if (!g_installed) { Log("[FastExit] not installed, so nothing here was measured."); return; }
+    if (Config::g_settings.OptNoWebProxy)
+        Log("[FastExit] proxy lookup: %lu of %lu \"Blizzard Web Client\" session(s) opened direct; the slowest open call took "
+            "%.1f ms. Plain counters.", g_madeDirect, g_opened, g_worstOpenMs);
     Log("[FastExit] %lu \"Blizzard Web Client\" session(s) seen opening; the shutdown reached its wait with a request pending "
         "%lu time(s): %lu session handle(s) closed, %lu cleared within %lu ms, %lu did not. Last wait %.0f ms, worst %.0f ms. "
         "Plain counters. This line is printed from the report at the end of the session, which runs after the shutdown.",
