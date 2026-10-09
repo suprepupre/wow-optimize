@@ -2266,7 +2266,14 @@ static double g_lastFrameMs = 0.0;
 // not matter which of them the client's pacing happens to go through. The
 // eight-millisecond gate inside is what keeps two callers from doing the work
 // twice.
+// Plain 32-bit counters, written only by the main thread. They exist so a log can say whether the
+// pump ran at all: with the Sleep hook declined or bypassed it silently does not, and the Lua
+// setup that !LuaBoost waits for never happens.
+static uint32_t g_pumpRuns = 0;
+static uint32_t g_mainForeignSleeps = 0;
+
 static void MainThreadPump() {
+    ++g_pumpRuns;
     UpdateMainThreadActivity();
 
     // Runs Lua, so it belongs here and nowhere else, and not while the interface
@@ -2418,6 +2425,7 @@ static void WINAPI hooked_Sleep(DWORD ms) {
         // few seconds in sessions whose profile put a fifth of the main thread inside NtDelayExecution.
         // It is only timed and filed under the caller; the sleep itself is the real one.
         if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
+            ++g_mainForeignSleeps;
             SleepTimer foreignTimer((uintptr_t)_ReturnAddress(), ms);
             orig_Sleep(ms);
             return;
@@ -2513,8 +2521,32 @@ static bool InstallSleepHook() {
 
     void* p = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Sleep");
     if (!p) return false;
-    if (MH_CreateHook(p, (void*)hooked_Sleep, (void**)&orig_Sleep) != MH_OK) return false;
-    if (WO_EnableHook(p) != MH_OK) return false;
+    MH_STATUS created = MH_CreateHook(p, (void*)hooked_Sleep, (void**)&orig_Sleep);
+    bool overForeign = false;
+    if (created == MH_ERROR_UNSUPPORTED_FUNCTION) {
+        // Declined because an overlay already detoured Sleep. The main thread pump runs from this
+        // hook and nowhere else on the default path, so without it the Lua setup that tells
+        // !LuaBoost the DLL is loaded never happens. Hook on top; the overlay stays behind us.
+        unsigned char first = 0;
+        __try { first = *(volatile unsigned char*)p; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (first == 0xE9 || first == 0xEB) {
+            created = WowOpt_CreateHookOverForeign(p, (void*)hooked_Sleep, (void**)&orig_Sleep);
+            overForeign = (created == MH_OK);
+        }
+    }
+    if (created != MH_OK) {
+        Log("Sleep hook: FAILED to create (MinHook status %d). The main thread pump does not run, so "
+            "!LuaBoost will report the DLL as not loaded.", (int)created);
+        return false;
+    }
+    if (WO_EnableHook(p) != MH_OK) {
+        Log("Sleep hook: created but not enabled. The main thread pump does not run.");
+        return false;
+    }
+    if (overForeign) {
+        Log("Sleep hook: installed on top of another module's detour at 0x%08X (an overlay such as "
+            "Special K). Its detour stays in the chain behind this one.", (unsigned)(uintptr_t)p);
+    }
     Log("Sleep hook: ACTIVE (PreciseSleep: %s, RDTSC %.1f MHz + Lua GC + combat log)", Config::g_settings.OptSleepPrecision ? "ENABLED" : "DISABLED", g_rdtscFreqMhz);
     return true;
 }
@@ -6051,6 +6083,10 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("GxRT::LogStats", GxRT::LogStats());
     STAT_TIME("ThreadCpu::Report", ThreadCpu::Report());
     STAT_TIME("SleepCensus::LogStats", SleepCensus::LogStats());
+    Log("[Pump] main thread pump ran %u times (lower bound, plain counter); %u main-thread Sleep calls "
+        "came from modules other than the client and were passed through without it. A pump count of "
+        "zero with Sleep calls listed means the Sleep hook is not the first thing the client reaches.",
+        (unsigned)g_pumpRuns, (unsigned)g_mainForeignSleeps);
     STAT_TIME("SimdHooks_LogStats", SimdHooks_LogStats());
     STAT_TIME("DeviceCallbackGuard::LogStats", DeviceCallbackGuard::LogStats());
     STAT_TIME("LayoutRelinkFast::LogStats", LayoutRelinkFast::LogStats());

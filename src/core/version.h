@@ -1069,6 +1069,24 @@ static inline MH_STATUS WineSafe_CreateHook(void* target, void* detour, void** o
     return WowOpt_CreateHookGuarded(target, detour, original);
 }
 
+// The one kind of target the refusal above must not apply to: a system function this DLL cannot
+// run without, already detoured by an overlay that loaded first. Special K (dinput8.dll) detours
+// kernel32!Sleep, the guard declined ours, and everything that rides the Sleep hook - the main
+// thread pump, the Lua state setup that sets LUABOOST_DLL_LOADED, the freeze heartbeat - never ran,
+// so !LuaBoost reported the DLL as not loaded. The Ascension reasoning behind the guard is about
+// bytes inside the client's image; MinHook moves a leading jmp rel32 into the trampoline, so the
+// overlay's detour stays in the chain behind ours. Callers must pass a target outside wow.exe and
+// say in the log that they did it.
+static inline MH_STATUS WowOpt_CreateHookOverForeign(void* target, void* detour, void** original) {
+    if (WowOpt_InsideClientImage(target)) return MH_ERROR_UNSUPPORTED_FUNCTION;
+    MH_STATUS st = MH_CreateHook(target, detour, original);   // still MinHook's own entry here
+    if (st == MH_OK) {
+        WowOpt_NoteDetour((uintptr_t)target, detour);
+        WowOpt_RecordHookOwner((uintptr_t)target, detour);
+    }
+    return st;
+}
+
 #define MH_CreateHook WowOpt_CreateHookGuarded
 
 // Sixteen bytes at an address as hex, for the log line of a module that declined because the
