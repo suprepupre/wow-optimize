@@ -439,6 +439,10 @@ void NoteRead(double ms, unsigned int bytes) {
     g_ioReadsThisLoad++;
 }
 
+unsigned long ReadsThisLoad() {
+    return (unsigned long)g_ioReadsThisLoad;
+}
+
 void ReportLoadTimes() {
     if (g_loadCount == 0) {
         Log("[LoadingState] No loading screens completed this session");

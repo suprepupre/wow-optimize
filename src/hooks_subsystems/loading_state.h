@@ -40,6 +40,12 @@ ClientWriteBatch::WriteFn GetClientWriter();
     // Only called while IsLoading() is true, so gameplay pays nothing.
     void NoteRead(double ms, unsigned int bytes);
 
+    // How many reads NoteRead has counted in the loading screen now up, from a
+    // counter that restarts at zero with each one. The low 32 bits, read from any
+    // thread without a lock: a caller takes differences of two readings, so a
+    // torn or stale value costs one sample and nothing else.
+    unsigned long ReadsThisLoad();
+
     // The write side of the same question. A tester's 139-second loading screen
     // spent 1% of itself in ReadFile, and the freeze watchdog caught its main
     // thread blocked 13 seconds inside the client's own write wrapper - the one
