@@ -82,8 +82,23 @@ void LogStats() {
         if (best < 0) break;
         taken[best] = true;
         const Row& r = g_rows[best];
-        Log("[SleepCensus]   wow!0x%08X  %lu call(s), %.0f ms asked on average, %.2f ms slept on average, %.1f s in all "
-            "(%.1f s of it in a loading screen)", (unsigned)r.caller, r.n, (double)r.requestedMs / (double)r.n,
+        char who[96];
+        const uintptr_t cli = (uintptr_t)GetModuleHandleA(nullptr);
+        HMODULE owner = nullptr;
+        if (r.caller - cli < 0x00A00000u) {
+            wsprintfA(who, "wow!0x%08X", (unsigned)r.caller);
+        } else if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      (LPCSTR)r.caller, &owner) && owner) {
+            char path[MAX_PATH] = {};
+            GetModuleFileNameA(owner, path, MAX_PATH);
+            const char* name = path;
+            for (const char* c = path; *c; ++c) if (*c == '\\' || *c == '/') name = c + 1;
+            wsprintfA(who, "%s+0x%X", name, (unsigned)(r.caller - (uintptr_t)owner));
+        } else {
+            wsprintfA(who, "0x%08X", (unsigned)r.caller);
+        }
+        Log("[SleepCensus]   %s  %lu call(s), %.0f ms asked on average, %.2f ms slept on average, %.1f s in all "
+            "(%.1f s of it in a loading screen)", who, r.n, (double)r.requestedMs / (double)r.n,
             (double)r.sleptUs / 1000.0 / (double)r.n, (double)r.sleptUs / 1e6, (double)r.loadingUs / 1e6);
     }
     if (g_lost) Log("[SleepCensus]   %lu call(s) from callers that did not fit the table.", g_lost);

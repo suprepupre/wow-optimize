@@ -2410,7 +2410,19 @@ struct SleepTimer {
 };
 
 static void WINAPI hooked_Sleep(DWORD ms) {
-    if (WOWOPT_FOREIGN_CALLER()) { orig_Sleep(ms); return; }
+    if (WOWOPT_FOREIGN_CALLER()) {
+        // A module that is neither the client nor this DLL (the Direct3D layer, a driver, an overlay)
+        // sleeping on the main thread is time the census used to leave out, so its total read as a
+        // few seconds in sessions whose profile put a fifth of the main thread inside NtDelayExecution.
+        // It is only timed and filed under the caller; the sleep itself is the real one.
+        if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
+            SleepTimer foreignTimer((uintptr_t)_ReturnAddress(), ms);
+            orig_Sleep(ms);
+            return;
+        }
+        orig_Sleep(ms);
+        return;
+    }
     if (g_mainThreadId != 0 && GetCurrentThreadId() == g_mainThreadId) {
         MainThreadPump();
 
