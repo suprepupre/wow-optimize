@@ -9351,7 +9351,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
         if (Config::g_settings.OptCvarNullGuard && WineSafe_CreateHook(target, (void*)NullGuard_5E90D0::Hooked, (void**)&orig_Sub5E90D0) == MH_OK) {
             // Crash guard: enable immediately (not batched) so it protects the
             // init window too.
-            if (MH_EnableHook(target) == MH_OK) {
+            if (WO_EnableHookNow(target) == MH_OK) {
                 Log("[CrashFix] sub_5E90D0 NULL guard: ACTIVE (dword_C24238 check)");
             } else {
                 Log("[CrashFix] sub_5E90D0 NULL guard: enable failed");
@@ -9445,7 +9445,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
 
         void* target_6D4920 = (void*)0x006D4920;
         if (Config::g_settings.OptCvarNullGuard && WineSafe_CreateHook(target_6D4920, (void*)NullGuard_6D4920::Hooked, (void**)&orig_Sub6D4920) == MH_OK) {
-            if (MH_EnableHook(target_6D4920) == MH_OK) {
+            if (WO_EnableHookNow(target_6D4920) == MH_OK) {
                 Log("[CrashFix] sub_6D4920 NULL/bounds guard: ACTIVE");
             } else {
                 Log("[CrashFix] sub_6D4920 NULL/bounds guard: enable failed");

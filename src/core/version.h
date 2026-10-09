@@ -1110,6 +1110,21 @@ static inline MH_STATUS WO_EnableHook(void* target) {
 #endif
 }
 
+// The immediate enable, for a crash guard that has to be live while the rest of init is still
+// queueing. It pays a full process-wide thread freeze, about 22 ms.
+static inline MH_STATUS WO_EnableHookNow(void* target) {
+    return MH_EnableHook(target);
+}
+
+// Every other MH_EnableHook in the tree goes through the batch as well. Thirty-five modules called
+// it directly during init, and the 2026-10-08 startup log shows each of them taking 20 to 24 ms
+// between its own log line and the one before: 0.85 s of a 1.02 s initialization, against 23 ms
+// for the single freeze that applies the whole queue. Outside init g_hookBatchMode is zero and
+// this is the plain call, as before. Defined after the two functions above so their bodies call the
+// real entry point. A file that includes this header before MinHook.h would have the declaration
+// rewritten, which is why this sits inside the MinHook guard like MH_CreateHook does.
+#define MH_EnableHook WO_EnableHook
+
 // Set once MainThread has run its MH_ApplyQueued. Installs that happen after
 // that point — the Lua fast path rediscovers and hooks its functions on the
 // main thread every time the lua_State changes — find g_hookBatchMode back at

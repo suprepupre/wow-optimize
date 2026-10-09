@@ -1231,28 +1231,28 @@ bool Init() {
     // This fires on ERROR #134 "Fatal Condition" which bypasses Windows exceptions
     void* assertTarget = (void*)0x008889B0;
     if (WineSafe_CreateHook(assertTarget, (void*)Hooked_WowAssert, (void**)&orig_WowAssert) == MH_OK) {
-        MH_EnableHook(assertTarget);
+        WO_EnableHookNow(assertTarget);
         Log("[CrashDumper] WoW assertion handler hook ACTIVE (sub_8889B0)");
     }
 
     // Hook ExitProcess as a fallback to flush logs on any abnormal exit
     void* exitTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ExitProcess");
     if (exitTarget && WineSafe_CreateHook(exitTarget, (void*)Hooked_ExitProcess, (void**)&orig_ExitProcess) == MH_OK) {
-        MH_EnableHook(exitTarget);
+        WO_EnableHookNow(exitTarget);
         Log("[CrashDumper] ExitProcess hook ACTIVE (log flush on exit)");
     }
 
     // Hook TerminateProcess to catch silent kills (Warden, anti-cheat, or WoW internals)
     void* termTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "TerminateProcess");
     if (termTarget && WineSafe_CreateHook(termTarget, (void*)Hooked_TerminateProcess, (void**)&orig_TerminateProcess) == MH_OK) {
-        MH_EnableHook(termTarget);
+        WO_EnableHookNow(termTarget);
         Log("[CrashDumper] TerminateProcess hook ACTIVE (silent kill detection)");
     }
 
     // Hook SetUnhandledExceptionFilter to prevent WoW or anti-cheat from overriding our UEF handler
     void* suefTarget = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetUnhandledExceptionFilter");
     if (suefTarget && WineSafe_CreateHook(suefTarget, (void*)Hooked_SetUnhandledExceptionFilter, (void**)&orig_SetUnhandledExceptionFilter) == MH_OK) {
-        MH_EnableHook(suefTarget);
+        WO_EnableHookNow(suefTarget);
         Log("[CrashDumper] SetUnhandledExceptionFilter hook ACTIVE (override protection)");
     }
 
