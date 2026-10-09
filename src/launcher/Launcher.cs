@@ -28,6 +28,7 @@ namespace WowOptimizeLauncher {
     public static class Kinds {
         public const string Perf  = "[+]";   // makes the game faster
         public const string Fix   = "[=]";   // protects or repairs; no speed claim
+        public const string Compat = "[~]";  // an option or a compatibility hook; not speed, and no button turns it on
         public const string Diag  = "[?]";   // measures - costs frames, gives numbers
         public const string Trade = "[-]";   // more frames by changing how it looks
         public const string Log   = "[.]";   // records; negligible cost
@@ -66,22 +67,32 @@ namespace WowOptimizeLauncher {
         private static readonly string[] DiagKeys = new string[] {
             "AbTest", "SamplingProfiler", "AddonProfiler", "LuaAddonProfile",
             "LuaAllocCensus", "LuaCompileCensus", "LuaTableCensus", "LuaChainCensus", "AnimCensus", "AnimTrackCensus",
-            "DrawCensus", "ShadowStateProbe", "LockSpinHooks", "NoClientPatches",
+            "DrawCensus", "ShadowStateProbe", "LockSpinHooks",
             "VaCensus", "CameraReplay", "SkyCloudTexels", "LuaGcPace",
             // Both only measure. They were filed as unproven replacements because
             // they are experimental, which put them on the NOT PROVEN tab beside
             // things that change what the game does.
             "FreezeCatcher", "MpqOpenCensus",
         };
+        // Neither a speed switch nor a measurement nor a repair: how the game is
+        // paced, which hook is allowed to stand in front of another module, what
+        // a server that removes players for patched clients needs, and the one
+        // Lua pacing switch that undoes the others. They sat under MAKES IT
+        // FASTER or among the crash guards, and a player reading the heading
+        // took them for what the heading said. No button turns any of them on.
+        private static readonly string[] CompatKeys = new string[] {
+            "FrameLimiter", "LockTuningInitHook", "CompatMode", "NoClientPatches",
+            "LuaGcStockPace",
+        };
         private static readonly string[] LogKeys = new string[] {
             "SessionLogs", "FlightRecorder", "NetDiag", "CpuTopology",
         };
         private static readonly string[] FixKeys = new string[] {
-            "CompatMode", "MemoryPressure", "TimingCvarPin", "CvarNullGuard",
+            "MemoryPressure", "TimingCvarPin", "CvarNullGuard",
             "PriorityGuard", "DeviceCbGuard", "OomGovernor", "HardwareCursor",
             "MouseClipRelease", "SavedVarsBackup", "MimallocHighArena",
-            "RenderNullGuard", "CombatLogLeakFix", "ShadowCascadeHold",
-            "LuaGcStockPace", "UIFrameBatch",
+            "RenderNullGuard", "CombatLogLeakFix",
+            "UIFrameBatch",
         };
         private static readonly string[] TradeKeys = new string[] {
             // Each of these buys frames by changing something the player can see
@@ -91,6 +102,12 @@ namespace WowOptimizeLauncher {
             // handed over and nothing about what is in it.
             "QualityGovernor", "MipBiasGovernor", "SpellEffectCulling",
             "SoundVolumeLimit",
+            // Removes the flicker on buildings by redrawing the nearest shadow map
+            // twice as often, which costs frames the game would have skipped, and the
+            // description records that an earlier version gave a tester visibly
+            // lagging shadows. It was filed as a fix; it is a trade of frames for how
+            // the shadows look, and that is the player's to make.
+            "ShadowCascadeHold",
         };
 
         // A replacement for something the client already does, as opposed to a
@@ -98,7 +115,21 @@ namespace WowOptimizeLauncher {
         // measurement. What "TRY THE UNPROVEN ONES" is allowed to turn on.
         public static bool IsReplacement(string key) {
             return !In(DiagKeys, key) && !In(TradeKeys, key) && !In(LostKeys, key)
-                && !In(LogKeys, key) && !In(FixKeys, key);
+                && !In(LogKeys, key) && !In(FixKeys, key) && !In(CompatKeys, key);
+        }
+
+        // A repair, as opposed to a replacement. An unproven one is still something
+        // a test session is for.
+        public static bool IsFix(string key) {
+            return In(FixKeys, key);
+        }
+
+        // An unproven replacement that the preset buttons leave off on purpose, each
+        // for a reason recorded in NotForSpeed. The NOT PROVEN tab lists these last,
+        // under a heading that says so, instead of leaving a half-ticked tab after a
+        // button that says it tries the unproven ones.
+        public static bool IsHeldBack(string key, bool unproven) {
+            return unproven && Of(key, true) == Unproven && !HelpsSpeed(key);
         }
 
         private static bool In(string[] set, string key) {
@@ -119,6 +150,7 @@ namespace WowOptimizeLauncher {
             if (In(DiagKeys, key))  return Diag;
             if (In(TradeKeys, key)) return Trade;
             if (In(LogKeys, key))   return Log;
+            if (In(CompatKeys, key)) return Compat;
             if (In(FixKeys, key))   return Fix;
             return unproven ? Unproven : Perf;
         }
@@ -142,7 +174,7 @@ namespace WowOptimizeLauncher {
             // 350 to 262 and back seven times in four minutes, and could only
             // say that something was wrong with the graphics.
             "QualityGovernor", "MipBiasGovernor", "SpellEffectCulling",
-            "AnimLod", "M2AnimStride", "SoundVolumeLimit",
+            "AnimLod", "M2AnimStride", "SoundVolumeLimit", "ShadowCascadeHold",
 
             // Keeps a player out of the world. The hook it installs sits in front
             // of InitializeCriticalSection for every module in the process, and a
@@ -173,13 +205,14 @@ namespace WowOptimizeLauncher {
             "RenderStateDedup", "ObjVisCache", "AsyncWorkerPool", "FontMetricsFast", "ThreadIdCache", "ParticleQuad", "SceneLightGrid",   // no effect, see LostKeys
 
             // Each verifies itself against the client on the hot path it replaces
-            // and none has been seen to arm and pay in a session. Two have a
-            // recorded reason: M2AnimReuse got two different bone arrays for the
-            // same model and arguments and retired itself, and CollisionFaceClip
-            // retires on its second verified call with a real disagreement. The
-            // other three have no measured gain either; they stay a tickbox.
-            "M2AnimReuse", "CollisionFaceClip", "AnimSplineTrack",
-            "PixelFormatBlit", "SkyTextureReuse",
+            // and neither has been seen to arm and pay in a session. M2AnimReuse got
+            // two different bone arrays for the same model and arguments and retired
+            // itself, and CollisionFaceClip retires on its second verified call with
+            // a real disagreement. AnimSplineTrack, PixelFormatBlit and
+            // SkyTextureReuse used to be here too, with no recorded reason beyond
+            // having no measured gain; a session that only tries what is proven
+            // would never give them one, so TRY THE UNPROVEN ONES turns them on.
+            "M2AnimReuse", "CollisionFaceClip",
 
             // Computes a distance and a speed in single precision where the client
             // uses x87 at 53 bits, and writes the distance into a client global.
@@ -193,7 +226,7 @@ namespace WowOptimizeLauncher {
         // last: a person scrolling a tab meets the reasons to tick something
         // before the reasons not to.
         public static readonly string[] Order = new string[] {
-            Perf, Unproven, Fix, Log, Diag, Trade, Lost
+            Perf, Unproven, Fix, Compat, Log, Diag, Trade, Lost
         };
 
         // Short, and each one leads with the reason you would or would not
@@ -205,6 +238,7 @@ namespace WowOptimizeLauncher {
             if (kind == Perf)     return "MAKES IT FASTER";
             if (kind == Unproven) return "NOT PROVEN YET";
             if (kind == Fix)      return "STABILITY AND FIXES";
+            if (kind == Compat)   return "OPTIONS AND COMPATIBILITY - NOT SPEED, NO BUTTON TURNS THESE ON";
             if (kind == Log)      return "LOGGING";
             if (kind == Diag)     return "DIAGNOSTICS - COSTS FRAMES";
             if (kind == Trade)    return "CHANGES HOW IT LOOKS OR SOUNDS";
@@ -500,17 +534,19 @@ namespace WowOptimizeLauncher {
         private ToolTip toolTip;
 
 
-        private FlowLayoutPanel generalFlow;
-        private FlowLayoutPanel uiLuaFlow;
-        private FlowLayoutPanel combatNetFlow;
-        private FlowLayoutPanel graphicsSoundFlow;
-        // Two tabs that collect by what a switch is rather than by which part of
-        // the game it touches. Everything the preset buttons deliberately leave
-        // off used to be scattered across the four section tabs, so "why is this
-        // one still off" had no place to be answered.
+        // The tabs collect by what a switch is, never by which part of the game it
+        // touches. Four area tabs once held everything: the replacements that make
+        // the game faster beside the crash guards, the frame limiter, a server
+        // compatibility switch and four that trade how the game looks for frames,
+        // so "why is this one off, and why is it here" had no place to be answered.
+        // Each tab now holds one kind, says on its first line what the kind is and
+        // what the preset buttons do with it, and the area survives as a heading.
+        private FlowLayoutPanel speedFlow;
         private FlowLayoutPanel notProvenFlow;
-        private FlowLayoutPanel triedFlow;
+        private FlowLayoutPanel fixesFlow;
+        private FlowLayoutPanel lookFlow;
         private FlowLayoutPanel diagFlow;
+        private FlowLayoutPanel triedFlow;
         private TextBox searchBox;
 
         // Background image
@@ -706,7 +742,7 @@ namespace WowOptimizeLauncher {
                 { "SavedVariables Backup on Startup", new SettingItem("General", "SavedVarsBackup", false, null, "At startup, copies each WTF\\Account SavedVariables .lua to a .lua.bak so you have the last-good config if a session corrupts it. Runs once on a background thread; only ever copies existing files, never modifies your live SavedVariables.") },
                 { "Sampling Profiler (diagnostic)", new SettingItem("General", "SamplingProfiler", false, null, "Developer tool: a background thread samples the main-thread instruction pointer ~1000x/sec and logs the top 50 hot functions on exit. Read-only, no gameplay effect. Leave off for normal play. Skipped by Enable All: it is a diagnostic and it costs frames. One reporter traced their long loading screens to leaving it on.", true) },
                 { "Catch Freezes", new SettingItem("General", "FreezeCatcher", true, null, "The game sometimes stops for a moment - a tester session has a frame that took nearly two seconds, and a hundred and forty over a tenth of a second - and nothing in the log can say what it was doing. The recorder tracks file reads, archive opens and network traffic, and during that two-second frame not one of them moved, so whatever it was, it was the processor working on something nobody is watching. The full profiler could answer it but costs too much to leave on, and one reporter traced longer loading screens to having it enabled. This watches instead: a background thread glances at the clock a few times a millisecond and does nothing at all unless the frame already in progress has run past a sixteenth of a second. Only then does it start looking, and only until that frame ends. A frame that behaves costs nothing. On by default: a log of a hitch without it has no stack to read.") },
-                { "No Client Patches (diagnostic)", new SettingItem("General", "NoClientPatches", false, null, "Writes nothing into WoW.exe, which turns every optimization off. Fixes the WoWCircle disconnects: two players ran it and the drops stopped. It is a trade, not a fix - you keep your connection and lose the performance work.", true) },
+                { "No Client Patches (for servers that remove patched clients)", new SettingItem("General", "NoClientPatches", false, null, "Writes nothing into WoW.exe, which turns every optimization off. Fixes the WoWCircle disconnects: two players ran it and the drops stopped. It is a trade, not a fix - you keep your connection and lose the performance work.", true) },
                 { "Flight Recorder (mark a moment)", new SettingItem("General", "FlightRecorder", true, null, "Keeps the last 512 frames and writes 240 of them to the log when you press Scroll Lock. Press it the moment you see something wrong. Nothing is written until you do, and it also marks itself for a disconnect, a freeze and a bad SavedVariables filename. Change the key with FlightRecorderKey in wow_opt.ini.") },
                 { "Camera Replay Benchmark", new SettingItem("General", "CameraReplay", false, null, "Measurement only. Stand still somewhere, press Shift+Pause, move the camera around, and press Shift+Pause again: the camera's motion is saved. Press Pause to play it back while the log measures every frame of the playback on its own. Run it once per build or setting from the same spot, facing the same way, with vsync off, and compare the BENCHMARK WINDOW blocks. Only the camera is replayed; other players and NPCs still move, so repeat each side. Hooks one wow.exe function, so leave it off on servers that kick for client patches. Change the key with CameraReplayKey in wow_opt.ini.", true) },
                 { "A/B Test a Feature", new SettingItem("General", "AbTest", false, null, "Switches every replacement you have turned on off and on together, 20 seconds at a time, and compares the frame times of the two halves of the same session. It measures only features that are switched on, so tick the ones you want counted as well; TRY THE UNPROVEN ONES does both. Play at least 45 minutes with the frame rate uncapped, somewhere busy. To measure a single feature instead, put AbTestSubject=its name under [General] in wow_opt.ini. Keep the game window in focus: the client locks itself to 30 frames a second in the background, and those frames are left out of the numbers, so time spent in the background measures nothing. AbTestSubject=sweep walks the collision and culling replacements one at a time to find which one causes a visible glitch; stand where it happens and press the flight recorder key (Scroll Lock) each time it shows, and the log names the suspect.", true) },
@@ -1454,27 +1490,22 @@ namespace WowOptimizeLauncher {
             // that builds does not depend on which tab is showing. That is what
             // made a tab appear half drawn and finish a moment later.
 
-            // Create tab pages
-            // The four areas hold what is known to work. Everything not yet
-            // proven in a game has its own tab, and so do the two kinds every
-            // preset leaves off, so a person looking for "what is still unticked
-            // and why" has three named places to look instead of seven headings
-            // spread over four tabs.
-            TabPage tpGeneral = CreateTabPage("GENERAL");
-            TabPage tpUiLua = CreateTabPage("UI & LUA");
-            TabPage tpCombatNet = CreateTabPage("COMBAT & NET");
-            TabPage tpGraphicsSound = CreateTabPage("GFX & SOUND");
+            // Create tab pages, in the order a person wants them: what makes the
+            // game faster, what might, what protects it, what trades its looks for
+            // frames, what only measures, and what did not work.
+            TabPage tpSpeed = CreateTabPage("SPEED");
             TabPage tpNotProven = CreateTabPage("NOT PROVEN");
-            TabPage tpTried = CreateTabPage("DIDN'T HELP");
+            TabPage tpFixes = CreateTabPage("FIXES & COMPAT");
+            TabPage tpLook = CreateTabPage("LOOK & SOUND");
             TabPage tpDiag = CreateTabPage("DIAGNOSTICS");
+            TabPage tpTried = CreateTabPage("DIDN'T HELP");
 
-            tabs.TabPages.Add(tpGeneral);
-            tabs.TabPages.Add(tpUiLua);
-            tabs.TabPages.Add(tpCombatNet);
-            tabs.TabPages.Add(tpGraphicsSound);
+            tabs.TabPages.Add(tpSpeed);
             tabs.TabPages.Add(tpNotProven);
-            tabs.TabPages.Add(tpTried);
+            tabs.TabPages.Add(tpFixes);
+            tabs.TabPages.Add(tpLook);
             tabs.TabPages.Add(tpDiag);
+            tabs.TabPages.Add(tpTried);
 
             // Every tab the same width and all of them on screen. At a fixed 110
             // pixels six tabs needed 660 of the 610 available and the last ones
@@ -1482,13 +1513,12 @@ namespace WowOptimizeLauncher {
             tabs.ItemSize = new Size(Math.Max(80, (tabs.Width - 6) / tabs.TabPages.Count), 28);
 
             // Get the scroll panels from each tab page
-            generalFlow = (FlowLayoutPanel)((Panel)tpGeneral.Controls[0]).Controls[0];
-            uiLuaFlow = (FlowLayoutPanel)((Panel)tpUiLua.Controls[0]).Controls[0];
-            combatNetFlow = (FlowLayoutPanel)((Panel)tpCombatNet.Controls[0]).Controls[0];
-            graphicsSoundFlow = (FlowLayoutPanel)((Panel)tpGraphicsSound.Controls[0]).Controls[0];
+            speedFlow = (FlowLayoutPanel)((Panel)tpSpeed.Controls[0]).Controls[0];
             notProvenFlow = (FlowLayoutPanel)((Panel)tpNotProven.Controls[0]).Controls[0];
-            triedFlow = (FlowLayoutPanel)((Panel)tpTried.Controls[0]).Controls[0];
+            fixesFlow = (FlowLayoutPanel)((Panel)tpFixes.Controls[0]).Controls[0];
+            lookFlow = (FlowLayoutPanel)((Panel)tpLook.Controls[0]).Controls[0];
             diagFlow = (FlowLayoutPanel)((Panel)tpDiag.Controls[0]).Controls[0];
+            triedFlow = (FlowLayoutPanel)((Panel)tpTried.Controls[0]).Controls[0];
 
 
 
@@ -1538,9 +1568,8 @@ namespace WowOptimizeLauncher {
         // that already says MAKES THE GAME FASTER, a [+] in front of every line
         // is the same word twice.
         private void Rebuild(string query) {
-            if (generalFlow == null || uiLuaFlow == null ||
-                combatNetFlow == null || graphicsSoundFlow == null ||
-                notProvenFlow == null || triedFlow == null || diagFlow == null) {
+            if (speedFlow == null || notProvenFlow == null || fixesFlow == null ||
+                lookFlow == null || diagFlow == null || triedFlow == null) {
                 return;
             }
 
@@ -1555,8 +1584,7 @@ namespace WowOptimizeLauncher {
             bool hasSearch = !string.IsNullOrEmpty(query);
 
             FlowLayoutPanel[] flows = new FlowLayoutPanel[] {
-                generalFlow, uiLuaFlow, combatNetFlow, graphicsSoundFlow,
-                notProvenFlow, triedFlow, diagFlow
+                speedFlow, notProvenFlow, fixesFlow, lookFlow, diagFlow, triedFlow
             };
             // Laid out once at the end. Without this every row added repositioned
             // every row already there, which on a tab of a hundred rows is ten
@@ -1605,8 +1633,11 @@ namespace WowOptimizeLauncher {
             // needed a legend at the top of the window to be read at all. A
             // heading over the matches says the same thing in words.
             for (int f = 0; f < flows.Length; f++) {
-                bool byArea = (flows[f] == notProvenFlow);
-                string[] groups = byArea ? AreaOrder : Kinds.Order;
+                // What the tab is, and what the preset buttons do with it, on its
+                // first line. Left out while searching, when the matches are the point.
+                if (!hasSearch) flows[f].Controls.Add(MakeTabNote(flows[f], TabNote(flows[f])));
+
+                string[] groups = GroupOrder(flows[f]);
                 for (int k = 0; k < groups.Length; k++) {
                     bool headed = false;
 
@@ -1614,12 +1645,10 @@ namespace WowOptimizeLauncher {
                         SettingItem data = pair.Value;
                         if (data.Ctrl == null || !data.Ctrl.Visible) continue;
                         if (FlowFor(data) != flows[f]) continue;
-                        string group = byArea ? data.Section : Kinds.Of(data.Key, data.Experimental);
-                        if (group != groups[k]) continue;
+                        if (GroupOf(flows[f], data) != groups[k]) continue;
 
                         if (!headed) {
-                            flows[f].Controls.Add(MakeGroupHeader(
-                                byArea ? AreaHeading(groups[k]) : Kinds.Heading(groups[k])));
+                            flows[f].Controls.Add(MakeGroupHeader(groups[k]));
                             headed = true;
                         }
                         data.Ctrl.Text = pair.Key;
@@ -1686,8 +1715,8 @@ namespace WowOptimizeLauncher {
             return n;
         }
 
-        // The order areas are listed in on the NOT PROVEN tab, and what each
-        // is called there. The keys are the ini sections.
+        // The order areas are listed in on the SPEED and NOT PROVEN tabs, and what
+        // each is called there. The keys are the ini sections.
         private static readonly string[] AreaOrder = new string[] {
             "General", "UI_Lua", "Combat_Net", "Graphics_Sound"
         };
@@ -1771,30 +1800,111 @@ namespace WowOptimizeLauncher {
         // filter route through here, because they are the two places that have
         // already drifted apart once and emptied a tab between them.
         //
-        // What a switch is decides its tab before which part of the game it
-        // touches does. The four area tabs hold what has been shown to work;
-        // anything not yet proven in a game, anything measured and lost, and
-        // anything that only measures has a tab of its own.
-        //
-        // An Experimental tab existed once and was removed because it held
-        // nearly half the switches and left the area tabs thin. It is back, on
-        // purpose, for the same reason it was removed: more than half of the
-        // switches are still unproven, and mixing them into the area tabs made
-        // a tab that looked like a list of things that work into mostly things
-        // nobody has run. Inside it they are grouped by area, so the areas are
-        // still findable.
+        // What a switch is decides its tab, and the part of the game it touches
+        // is only a heading inside the tab. SPEED holds what has run in a game and
+        // makes it faster, NOT PROVEN what has not, FIXES & COMPAT what protects it
+        // or is an option rather than speed, LOOK & SOUND what trades appearance
+        // for frames, DIAGNOSTICS what measures, DIDN'T HELP what lost. The two
+        // buttons then read as rules over tabs: MAX PERFORMANCE turns on SPEED and
+        // the proven fixes, TRY THE UNPROVEN ONES adds NOT PROVEN and the recording
+        // switches, and neither touches LOOK & SOUND, DIDN'T HELP or the options.
         private FlowLayoutPanel FlowFor(SettingItem data) {
             string kind = Kinds.Of(data.Key, data.Experimental);
             if (kind == Kinds.Lost) return triedFlow;
             if (kind == Kinds.Diag || kind == Kinds.Log) return diagFlow;
+            if (kind == Kinds.Trade) return lookFlow;
+            if (kind == Kinds.Fix || kind == Kinds.Compat) return fixesFlow;
             if (kind == Kinds.Unproven) return notProvenFlow;
-            switch (data.Section) {
-                case "General":        return generalFlow;
-                case "UI_Lua":         return uiLuaFlow;
-                case "Combat_Net":     return combatNetFlow;
-                case "Graphics_Sound": return graphicsSoundFlow;
+            return speedFlow;
+        }
+
+        private const string HeldHeading =
+            "UNDER INVESTIGATION - THE BUTTONS LEAVE THESE OFF, TICK BY HAND";
+        private const string UnprovenFixHeading = "FIXES NOT PROVEN YET";
+
+        // The heading a row sits under on its tab. Speed and not-proven rows are
+        // grouped by the part of the game they touch; the held-back ones form the
+        // last group of NOT PROVEN so that the rows a button skips are together and
+        // named, not scattered through a tab that reads as half ticked.
+        private string GroupOf(FlowLayoutPanel flow, SettingItem data) {
+            string kind = Kinds.Of(data.Key, data.Experimental);
+            if (flow == speedFlow) return AreaHeading(data.Section);
+            if (flow == notProvenFlow) {
+                return Kinds.IsHeldBack(data.Key, data.Experimental)
+                    ? HeldHeading : AreaHeading(data.Section);
             }
-            return generalFlow;
+            if (flow == fixesFlow) {
+                if (kind == Kinds.Compat) return Kinds.Heading(Kinds.Compat);
+                return data.Experimental ? UnprovenFixHeading : Kinds.Heading(Kinds.Fix);
+            }
+            return Kinds.Heading(kind);
+        }
+
+        private string[] GroupOrder(FlowLayoutPanel flow) {
+            if (flow == speedFlow) return AreaHeadings();
+            if (flow == notProvenFlow) {
+                string[] areas = AreaHeadings();
+                string[] all = new string[areas.Length + 1];
+                for (int i = 0; i < areas.Length; i++) all[i] = areas[i];
+                all[areas.Length] = HeldHeading;
+                return all;
+            }
+            if (flow == fixesFlow) {
+                return new string[] {
+                    Kinds.Heading(Kinds.Fix), UnprovenFixHeading, Kinds.Heading(Kinds.Compat)
+                };
+            }
+            if (flow == lookFlow) return new string[] { Kinds.Heading(Kinds.Trade) };
+            if (flow == diagFlow) return new string[] { Kinds.Heading(Kinds.Log), Kinds.Heading(Kinds.Diag) };
+            return new string[] { Kinds.Heading(Kinds.Lost) };
+        }
+
+        private static string[] AreaHeadings() {
+            string[] h = new string[AreaOrder.Length];
+            for (int i = 0; i < AreaOrder.Length; i++) h[i] = AreaHeading(AreaOrder[i]);
+            return h;
+        }
+
+        // The first line of each tab: what is on it and what each button does with
+        // it. Written against the rules in WantedByMaxPerformance and WantedForSpeed;
+        // change those and these together.
+        private string TabNote(FlowLayoutPanel flow) {
+            if (flow == speedFlow)
+                return "Replacements that make the game faster and have run in tester sessions, "
+                     + "each checked against the game's own answers while it plays. MAX PERFORMANCE "
+                     + "and TRY THE UNPROVEN ONES turn all of them on.";
+            if (flow == notProvenFlow)
+                return "Replacements nobody has run in a game yet. TRY THE UNPROVEN ONES turns them on, "
+                     + "except the group at the bottom, which is under investigation and stays off. "
+                     + "MAX PERFORMANCE leaves all of them at their own default.";
+            if (flow == fixesFlow)
+                return "Protect the game or repair something; none of these is a speed switch. "
+                     + "The options at the bottom are left off by every button: tick one only if "
+                     + "its description says you need it.";
+            if (flow == lookFlow)
+                return "Each of these buys frames or removes a flicker by changing how the game looks "
+                     + "or sounds. That is a trade for you to make, so no button turns them on.";
+            if (flow == diagFlow)
+                return "These record or measure and cost frames. LOGGING: FULL ticks the recording ones; "
+                     + "TRY THE UNPROVEN ONES does too. MAX PERFORMANCE leaves them off.";
+            return "Measured against the game's own code and lost, or found to do nothing. Off, and no "
+                 + "button turns them on. They are listed so the result is not repeated.";
+        }
+
+        // A wrapped line of plain text across the top of a tab.
+        private Label MakeTabNote(FlowLayoutPanel flow, string text) {
+            Label l = new Label();
+            l.Text = text;
+            l.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+            l.ForeColor = Color.FromArgb(150, 160, 178);
+            l.BackColor = Color.Transparent;
+            l.AutoSize = false;
+            int w = Math.Max(200, flow.Width - 60);
+            Size need = TextRenderer.MeasureText(text, l.Font, new Size(w, 0),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            l.Size = new Size(w, need.Height + 6);
+            l.Margin = new Padding(6, 2, 5, 4);
+            return l;
         }
 
         // A quiet heading over a run of buttons. Returns the height it used so
@@ -2015,7 +2125,11 @@ namespace WowOptimizeLauncher {
             // over, and a session that waits measures nothing.
             if (item.Key == "FrameLimiter") return false;
             if (!Kinds.HelpsSpeed(item.Key)) return false;
-            if (item.Experimental) return Kinds.IsReplacement(item.Key) || item.DefaultVal;
+            // An unproven repair is something a test session is for as much as an
+            // unproven replacement is. What it leaves off is what NotForSpeed names.
+            if (item.Experimental) {
+                return Kinds.IsReplacement(item.Key) || Kinds.IsFix(item.Key) || item.DefaultVal;
+            }
             return true;
         }
 
@@ -2113,11 +2227,13 @@ namespace WowOptimizeLauncher {
                 + "session exists. If the game crashes, that is the answer - send the "
                 + "log and the crash file. It will be slower than usual while "
                 + "recording, so do not judge FPS by feel.\r\n\r\n"
-                + off.ToString() + " switches stay off on purpose (the ones that "
-                + "change how the game looks or sounds, the measured losses, the "
-                + "frame limiter override, the Critical Section Hook, the collision "
-                + "tree walks and No Client Patches). Press DEFAULT afterwards to go "
-                + "back to normal.\r\n\r\n"
+                + off.ToString() + " switches stay off on purpose: the whole "
+                + "LOOK & SOUND tab, the options at the bottom of FIXES & COMPAT "
+                + "(frame limiter override, Critical Section Hook, Compatibility "
+                + "Mode, No Client Patches), DIDN'T HELP, the measuring switches "
+                + "that are not part of recording, and the group at the bottom of "
+                + "NOT PROVEN that is under investigation. Each tab says so on its "
+                + "first line. Press DEFAULT afterwards to go back to normal.\r\n\r\n"
                 + "Saved.",
                 "Try the unproven ones", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
