@@ -30,6 +30,16 @@
 // samples them while a loading frame is on), and nothing here has run in a
 // game.
 //
+// It has run against the client's own reader in the offline rig (2026-10-10). A harness on the main
+// thread opened 193 files named by the interface TOCs and read each through the client's own request
+// (sub_4BA170, sub_4BAB50) and AsyncFileReadWait (sub_4BA060), one after another, with a loading
+// screen forced on for the learning logic. With the client's sleep a read took 1.65 to 1.70 ms (a
+// Sleep(1) on that machine averages 1.53 ms), the same figure as the 0.65 to 2.2 ms per read in
+// Drain's sessions. With this on, spin windows completed 12.9 reads per ms against 1.28 for the sleep
+// windows, it armed itself after 2.05 s of windows (ratio 10.06), and the armed passes took 0.157 ms a
+// read. About 7 s of CPU were spent spinning in the 13 s the harness ran. What this does not tell is
+// how much of a real load is waiting for files rather than Lua, models and the GPU.
+//
 // What this does. It hooks sub_86B280 and, for those four call sites only
 // (the return address says which) and only for a one millisecond request, it
 // waits a few tens of microseconds by spinning instead, and returns. Each
