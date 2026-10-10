@@ -308,9 +308,14 @@ bool Init() {
 
     // The function opens by loading this[1] into a register and testing it.
     // Checked so that a different build does not get patched blindly.
-    unsigned char* p = (unsigned char*)kPoolAlloc;
-    if (IsBadReadPtr(p, 8)) {
-        Log("[LuaMemPool] 0x%08X is not readable - not installing", (unsigned)kPoolAlloc);
+    static const unsigned char kPoolAllocOpening[14] = {
+        0x53, 0x56, 0x8B, 0xF1, 0x57, 0x8B, 0x7E, 0x04, 0x33, 0xD2, 0x85, 0xFF, 0x76, 0x27
+    };
+    if (!WowOpt_ClientBytesAre(kPoolAlloc, kPoolAllocOpening, sizeof(kPoolAllocOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(kPoolAlloc, hex, sizeof(hex));
+        Log("[LuaMemPool] NOT installed: the bytes at 0x%08X are not sub_855820's opening: %s",
+            (unsigned)kPoolAlloc, hex);
         return false;
     }
 

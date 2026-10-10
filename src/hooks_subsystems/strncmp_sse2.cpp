@@ -240,6 +240,18 @@ bool Init() {
         return true;
     }
 
+    // push ebp / mov ebp,esp / push ecx / and dword [ebp-4],0 / push ebx / mov ebx,[ebp+10h] / test ebx,ebx / jnz
+    static const unsigned char kStrncmpOpening[16] = {
+        0x55, 0x8B, 0xEC, 0x51, 0x83, 0x65, 0xFC, 0x00, 0x53, 0x8B, 0x5D, 0x10, 0x85, 0xDB, 0x75, 0x07
+    };
+    if (!WowOpt_ClientBytesAre(ADDR_Strncmp, kStrncmpOpening, sizeof(kStrncmpOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(ADDR_Strncmp, hex, sizeof(hex));
+        Log("[StrncmpSSE2] NOT installed: the bytes at 0x%08X are not the client's strncmp: %s",
+            (unsigned)ADDR_Strncmp, hex);
+        return false;
+    }
+
     if (!SelfTest()) return false;
 
     if (WineSafe_CreateHook((void*)ADDR_Strncmp, (void*)Hooked_Strncmp,

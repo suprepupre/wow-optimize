@@ -1790,6 +1790,17 @@ static bool g_frameScriptInjectHooked = false;
 
 static void InstallFrameScriptInjectionHook() {
     if (!Api.FrameScript_Execute) return;
+    // push ebp / mov ebp,esp / push ecx / add dword [D41390h],1 / mov eax,[D4139Ch]: sub_819210 of build 12340
+    static const unsigned char kExecuteOpening[16] = {
+        0x55, 0x8B, 0xEC, 0x51, 0x83, 0x05, 0xA0, 0x13, 0xD4, 0x00, 0x01, 0xA1, 0x9C, 0x13, 0xD4, 0x00
+    };
+    if (!WowOpt_ClientBytesAre((uintptr_t)Api.FrameScript_Execute, kExecuteOpening, sizeof(kExecuteOpening))) {
+        char hex[64];
+        WowOpt_HexBytes((uintptr_t)Api.FrameScript_Execute, hex, sizeof(hex));
+        Log("[LuaOpt] FrameScript injection hook: NOT installed, the bytes at 0x%08X are not "
+            "FrameScript_Execute's opening: %s", (unsigned)(uintptr_t)Api.FrameScript_Execute, hex);
+        return;
+    }
     if (MH_CreateHook((void*)Api.FrameScript_Execute, (void*)Hooked_FrameScript_Execute,
                       (void**)&g_origFrameScript) != MH_OK) {
         Log("[LuaOpt] FrameScript injection hook: FAILED");

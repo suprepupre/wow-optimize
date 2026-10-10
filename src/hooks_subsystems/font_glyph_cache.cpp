@@ -183,6 +183,18 @@ bool Init() {
     g_hits = 0;
     g_misses = 0;
 
+    // push ebp / mov ebp,esp / mov eax,[ebp+8] / sub esp,14h / test eax,eax / push edi / jz
+    static const unsigned char kGlyphLoaderOpening[14] = {
+        0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x83, 0xEC, 0x14, 0x85, 0xC0, 0x57, 0x74, 0x0D
+    };
+    if (!WowOpt_ClientBytesAre(0x006C8CC0, kGlyphLoaderOpening, sizeof(kGlyphLoaderOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(0x006C8CC0, hex, sizeof(hex));
+        Log("[FontGlyphCache] NOT installed: the bytes at 0x006C8CC0 are not the glyph loader's opening "
+            "(another detour or another client build): %s", hex);
+        return false;
+    }
+
     if (WineSafe_CreateHook((void*)0x006C8CC0, (void*)Hooked_GxuLoadGlyph, (void**)&orig_GxuLoadGlyph) == MH_OK) {
         if (MH_EnableHook((void*)0x006C8CC0) == MH_OK) {
             Log("[FontGlyphCache] Hooked GxuLoadGlyph at 0x006C8CC0 successfully");

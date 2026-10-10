@@ -287,8 +287,14 @@ static __declspec(naked) void HookedGetThis() {
 bool InstallLuaThisCache() {
     if (!Config::g_settings.OptLuaThisFast) return true;
 
-    if (IsBadReadPtr((void*)kGetThis, 8)) {
-        Log("[LuaThis] 0x%08X unreadable - not installing", (unsigned)kGetThis);
+    // push ebp / mov ebp, esp / push 1 / push esi / call. The replacement reads the lua_State and the
+    // frame object at the offsets of this build, so anything else at this address is not patched.
+    static const unsigned char kGetThisOpening[7] = { 0x55, 0x8B, 0xEC, 0x6A, 0x01, 0x56, 0xE8 };
+    if (!WowOpt_ClientBytesAre(kGetThis, kGetThisOpening, sizeof(kGetThisOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(kGetThis, hex, sizeof(hex));
+        Log("[LuaThis] NOT installed: the bytes at 0x%08X are not sub_4A81B0's opening (55 8B EC 6A 01 56 E8): %s",
+            (unsigned)kGetThis, hex);
         return false;
     }
     if (WineSafe_CreateHook((void*)kGetThis, (void*)HookedGetThis, &orig_GetThis) != MH_OK) {

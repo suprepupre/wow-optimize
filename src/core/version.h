@@ -1112,6 +1112,21 @@ static inline void WowOpt_HexBytes(uintptr_t addr, char* out, size_t cap) {
     }
 }
 
+// True when the n bytes at addr are exactly 'expected'. A hook that replaces a client function
+// has to know it is looking at that function: a client build whose addresses differ (a private
+// server's own executable) puts some other code there, and reading it through a layout it does not
+// have is a crash. IsBadReadPtr on eight bytes does not say that. Reads under SEH.
+static inline bool WowOpt_ClientBytesAre(uintptr_t addr, const unsigned char* expected, size_t n) {
+    __try {
+        const unsigned char* p = (const unsigned char*)addr;
+        for (size_t i = 0; i < n; ++i)
+            if (p[i] != expected[i]) return false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // Hook-enable batching shared across modules. Each MH_EnableHook freezes every
 // process thread (~20ms via a system-wide thread snapshot). During MainThread's
 // synchronous install sequence g_hookBatchMode is 1, so enables routed through

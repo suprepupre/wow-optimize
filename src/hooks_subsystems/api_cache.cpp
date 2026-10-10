@@ -449,6 +449,18 @@ bool Init() {
     }
 
 #if !TEST_DISABLE_GETITEMINFO_CACHE
+    // push ebp / mov ebp,esp / sub esp,5E8h / push ebx / push esi / push edi / lea ecx,[ebp-0E4h]
+    static const unsigned char kGetItemInfoOpening[18] = {
+        0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xE8, 0x05, 0x00, 0x00, 0x53, 0x56, 0x57, 0x8D, 0x8D, 0x1C, 0xFF, 0xFF, 0xFF
+    };
+    if (!WowOpt_ClientBytesAre(ADDR_GetItemInfo, kGetItemInfoOpening, sizeof(kGetItemInfoOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(ADDR_GetItemInfo, hex, sizeof(hex));
+        Log("[ApiCache] NOT installed: the bytes at 0x%08X are not GetItemInfo's opening: %s",
+            (unsigned)ADDR_GetItemInfo, hex);
+        g_active = false;
+        return false;
+    }
     bool hooked = HookFunc("GetItemInfo", ADDR_GetItemInfo,
                            (void*)Hooked_GetItemInfo, (void**)&orig_GetItemInfo);
 #else

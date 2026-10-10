@@ -533,8 +533,12 @@ bool Init() {
 
     // The write timer. Separate from the event detour above so a failure here
     // cannot take loading detection down with it.
+    // push ebp / mov ebp,esp / sub esp,400h / push edi / mov edi,[ebp+8] / mov ecx,[edi] / ...
+    static const unsigned char kClientWriteOpening[16] = {
+        0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x00, 0x04, 0x00, 0x00, 0x57, 0x8B, 0x7D, 0x08, 0x8B, 0x0F, 0x83
+    };
     if (QueryPerformanceFrequency(&g_qpcFreq) &&
-        !IsBadReadPtr((void*)kClientWrite, 8) &&
+        WowOpt_ClientBytesAre(kClientWrite, kClientWriteOpening, sizeof(kClientWriteOpening)) &&
         WineSafe_CreateHook((void*)kClientWrite, (void*)Hooked_ClientWrite,
                             (void**)&orig_ClientWrite) == MH_OK &&
         WO_EnableHook((void*)kClientWrite) == MH_OK) {
