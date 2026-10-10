@@ -313,6 +313,11 @@ bool Init() {
         return false;
     }
 
+    static const unsigned char kOpenOpening[16] = { 0x55, 0x8B, 0xEC, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x6A, 0xFF, 0x68, 0x5C, 0x5E, 0x9C, 0x00 };
+    if (!WowOpt_ClientBytesAre(kOpen, kOpenOpening, sizeof(kOpenOpening))) {
+        Log("[MpqOpen] NOT active: the bytes at 0x%08X are not the client's file open of build 12340", (unsigned)kOpen);
+        return false;
+    }
     if (WineSafe_CreateHook((void*)kOpen, (void*)&Hooked_Open,
                             (void**)&orig_Open) != MH_OK ||
         WO_EnableHook((void*)kOpen) != MH_OK) {

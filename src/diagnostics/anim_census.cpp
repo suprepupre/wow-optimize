@@ -483,6 +483,12 @@ bool Init() {
     if (freq.QuadPart == 0) return false;
     g_qpcToNs = 1e9 / (double)freq.QuadPart;
 
+    static const unsigned char kAnimateOpening[12] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x9C, 0x01, 0x00, 0x00, 0x56, 0x8B, 0xF1 };
+    if (!WowOpt_ClientBytesAre(ADDR_AnimateModel, kAnimateOpening, sizeof(kAnimateOpening))) {
+        Log("[AnimCensus] NOT active: the bytes at 0x%08X are not the model animation update of build 12340",
+            (unsigned)ADDR_AnimateModel);
+        return false;
+    }
     if (WineSafe_CreateHook((void*)ADDR_AnimateModel, (void*)Hooked_AnimateModel,
                             (void**)&orig_AnimateModel) != MH_OK) {
         Log("[AnimCensus] Could not hook the model animation update at 0x%08X",

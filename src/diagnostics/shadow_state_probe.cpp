@@ -453,8 +453,10 @@ bool Init() {
     const bool wantProbe = Config::g_settings.OptShadowStateProbe;
     if (!wantProbe && !g_holdActive) return true;
 
-    if (wantProbe && IsBadReadPtr((void*)ADDR_Pass, 16)) {
-        Log("[ShadowProbe] 0x%08X unreadable - not installing", (unsigned)ADDR_Pass);
+    static const unsigned char kPassOpening[16] = { 0x55, 0x8B, 0xEC, 0xA1, 0x1C, 0xD5, 0xB1, 0x00, 0x81, 0xEC, 0x8C, 0x0B, 0x00, 0x00, 0x57, 0x33 };
+    static const unsigned char kCascadeOpening[16] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x60, 0xA1, 0x1C, 0xD5, 0xB1, 0x00, 0xF7, 0xD8, 0x1B, 0xC0, 0x53 };
+    if (wantProbe && !WowOpt_ClientBytesAre(ADDR_Pass, kPassOpening, sizeof(kPassOpening))) {
+        Log("[ShadowProbe] NOT installed: the bytes at 0x%08X are not the shadow pass of build 12340", (unsigned)ADDR_Pass);
         return false;
     }
     if (wantProbe &&
@@ -469,7 +471,7 @@ bool Init() {
 
     // The cascade updater, installed separately so a failure there leaves the
     // pass hook above working rather than taking it down.
-    if (!IsBadReadPtr((void*)ADDR_Cascade, 16) &&
+    if (WowOpt_ClientBytesAre(ADDR_Cascade, kCascadeOpening, sizeof(kCascadeOpening)) &&
         WineSafe_CreateHook((void*)ADDR_Cascade, (void*)HookedCascade, &g_origCascade) == MH_OK &&
         WO_EnableHook((void*)ADDR_Cascade) == MH_OK) {
         Log("[ShadowProbe] also watching the cascade cache (sub_874890 @ 0x%08X). "

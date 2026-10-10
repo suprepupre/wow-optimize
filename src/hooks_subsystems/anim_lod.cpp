@@ -623,8 +623,10 @@ void OnFrame() {
 bool Init() {
     if (!Config::g_settings.OptAnimLod) return true;
 
-    if (IsBadReadPtr((void*)kAnimateModel, 8)) {
-        Log("[AnimLod] 0x%08X unreadable - not installing", (unsigned)kAnimateModel);
+    static const unsigned char kAnimateOpening[12] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x9C, 0x01, 0x00, 0x00, 0x56, 0x8B, 0xF1 };
+    if (!WowOpt_ClientBytesAre(kAnimateModel, kAnimateOpening, sizeof(kAnimateOpening))) {
+        Log("[AnimLod] NOT installed: the bytes at 0x%08X are not the model animation update of build 12340",
+            (unsigned)kAnimateModel);
         return false;
     }
     memset(g_slots, 0, sizeof(g_slots));

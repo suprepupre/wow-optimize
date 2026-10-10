@@ -693,8 +693,14 @@ bool InstallAsyncHooks(void) {
 
     Log("[AsyncHooks] Worker pool: %d threads, %d task slots", ASYNC_POOL_WORKERS, TASK_QUEUE_SIZE);
 
+    // Each target is looked at before it is hooked: these detours hand client pointers to worker
+    // threads, so a different build's code at the address is not recoverable.
+    static const unsigned char kAdtOpening[16] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0x56, 0x8B, 0x75, 0x08, 0x8B, 0x46, 0x4C };
+    static const unsigned char kDbcOpening[16] = { 0x68, 0xEB, 0x00, 0x00, 0x00, 0x68, 0x8C, 0x6E, 0xA2, 0x00, 0xB9, 0x5C, 0x30, 0xAD, 0x00, 0xFF };
+    static const unsigned char kParticleOpening[16] = { 0x55, 0x8B, 0xEC, 0xD9, 0x05, 0x14, 0x03, 0xA4, 0x00, 0x8B, 0x45, 0x1C, 0x85, 0xC0, 0x53, 0x56 };
+
     #if !TEST_DISABLE_ADT_PREFETCH
-    if (ADDR_ADT_CHUNK_LOAD) {
+    if (ADDR_ADT_CHUNK_LOAD && WowOpt_ClientBytesAre(ADDR_ADT_CHUNK_LOAD, kAdtOpening, sizeof(kAdtOpening))) {
         if (WineSafe_CreateHook((void*)ADDR_ADT_CHUNK_LOAD, (void*)Hooked_sub_7D9A20, (void**)&orig_AdtChunkLoad) == MH_OK) {
             if (WO_EnableHook((void*)ADDR_ADT_CHUNK_LOAD) == MH_OK) {
                 Log("[AsyncHooks] Hook installed: ADT prefetcher (0x%08X)", ADDR_ADT_CHUNK_LOAD);
@@ -704,7 +710,7 @@ bool InstallAsyncHooks(void) {
     #endif
 
     #if !TEST_DISABLE_DBC_PARALLEL
-    if (ADDR_DBC_LOAD_DISPATCH) {
+    if (ADDR_DBC_LOAD_DISPATCH && WowOpt_ClientBytesAre(ADDR_DBC_LOAD_DISPATCH, kDbcOpening, sizeof(kDbcOpening))) {
         if (WineSafe_CreateHook((void*)ADDR_DBC_LOAD_DISPATCH, (void*)Hooked_DbcLoadDispatch, (void**)&orig_DbcLoadDispatch) == MH_OK) {
             if (WO_EnableHook((void*)ADDR_DBC_LOAD_DISPATCH) == MH_OK) {
                 Log("[AsyncHooks] Hook installed: DBC Parallel loader (0x%08X)", ADDR_DBC_LOAD_DISPATCH);
@@ -714,7 +720,7 @@ bool InstallAsyncHooks(void) {
     #endif
 
     #if !TEST_DISABLE_PARTICLE_ASYNC
-    if (ADDR_PARTICLE_EMITTER_UPDATE) {
+    if (ADDR_PARTICLE_EMITTER_UPDATE && WowOpt_ClientBytesAre(ADDR_PARTICLE_EMITTER_UPDATE, kParticleOpening, sizeof(kParticleOpening))) {
         if (WineSafe_CreateHook((void*)ADDR_PARTICLE_EMITTER_UPDATE, (void*)Hooked_ParticleEmitterUpdate, (void**)&orig_ParticleEmitterUpdate) == MH_OK) {
             if (WO_EnableHook((void*)ADDR_PARTICLE_EMITTER_UPDATE) == MH_OK) {
                 Log("[AsyncHooks] Hook installed: Multi-threaded Particle simulation (0x%08X)", ADDR_PARTICLE_EMITTER_UPDATE);
