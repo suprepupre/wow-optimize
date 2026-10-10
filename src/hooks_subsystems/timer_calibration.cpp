@@ -78,6 +78,21 @@ void ReadState() {
 
 void Init() {
     ReadState();
+    // Which branch of the world load the client takes: sub_7BFCE0 sets dword_CE0494 from these two
+    // bytes, and sub_7B6B00 then loads either through the 1 ms polling pump or through loops that
+    // sleep 10 ms per pass. Read here so a log says which one a client uses.
+    {
+        unsigned char a = 0, b = 0;
+        bool ok = false;
+        __try { a = *(volatile unsigned char*)0x00B38180; b = *(volatile unsigned char*)0x00B38181; ok = true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (ok)
+            Log("[WorldLoad] The client's file layer reports mode flags %u and %u, so a world load runs %s.",
+                (unsigned)a, (unsigned)b,
+                a ? "the loops that sleep 10 ms a pass (sub_7B6B00)" : "the 1 ms polling pump (sub_4BAE10)");
+        else
+            Log("[WorldLoad] The file layer's mode flags could not be read.");
+    }
     // The network start's poll interval, patched by the proxy under General/FastNetworkInit.
     {
         const uintptr_t kNetPollImm = 0x00469401;

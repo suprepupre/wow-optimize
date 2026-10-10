@@ -40,6 +40,14 @@
 // read. About 7 s of CPU were spent spinning in the 13 s the harness ran. What this does not tell is
 // how much of a real load is waiting for files rather than Lua, models and the GPU.
 //
+// Second rig run, through the client's own world-load pump (sub_4BAE10) with C chains of dependent
+// requests, 190 files, each completion callback queueing the next file of its chain: milliseconds a
+// file with the client's sleep and with this module, best of six passes. C=1 1.65 / 0.18, C=2 0.79 /
+// 0.09, C=4 0.40 / 0.07, C=8 0.20 / 0.06, C=16 0.11 / 0.06, C=190 0.066 / 0.059. The client's cost
+// per file falls as 1/C, which is what a load bounded by one wake-up per dependency step looks like,
+// and the module reaches the reader's own throughput from about four chains. On this client the file
+// layer reports mode flags 0/0, so a world load takes the 1 ms pump and one reader thread.
+//
 // What this does. It hooks sub_86B280 and, for those four call sites only
 // (the return address says which) and only for a one millisecond request, it
 // waits a few tens of microseconds by spinning instead, and returns. Each
