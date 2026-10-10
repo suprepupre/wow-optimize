@@ -26,6 +26,12 @@
 // the two compose. The main thread runs the completion callbacks (the rig's checksum is one), which is
 // where the curve flattens.
 //
+// Then real assets: 3923 files (448 MB; textures, models, skins, animations, WMOs and ADTs, one in
+// fifty-three of a 213000-name listing of the 22 archives in a stock Data folder, patch archives
+// included), 16 chains, each completion checked against a synchronous read of the same file. One
+// reader 1727 ms, two 1074 ms (1.6x), three 908 ms (1.9x); three passes at each count, 35307 requests
+// completed with two or three threads active, 0 wrong checksums. tools/rig_async_reads_stress.patch.
+//
 // What is not shown: that the client never relies on completion order within a queue. The requests
 // are served in list order by one thread today; with two, a small request queued after a large one
 // can complete before it. Callers that queue dependent work do it from the completion callback (the
