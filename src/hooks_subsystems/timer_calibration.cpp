@@ -78,6 +78,23 @@ void ReadState() {
 
 void Init() {
     ReadState();
+    // The network start's poll interval, patched by the proxy under General/FastNetworkInit.
+    {
+        const uintptr_t kNetPollImm = 0x00469401;
+        unsigned char b = 0;
+        bool read = false;
+        __try { b = *(volatile unsigned char*)kNetPollImm; read = true; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (read && b == 1) WowOpt_RecordHookOwner(kNetPollImm, (const void*)&Init);
+        if (Config::g_settings.OptFastNetworkInit) {
+            if (read && b == 1)
+                Log("[NetworkInit] The network start waits for its thread by polling every 1 ms instead of 100. "
+                    "The version proxy wrote it before the client started.");
+            else
+                Log("[NetworkInit] Switched on, but the poll interval at 0x%08X is %s: the version proxy did not "
+                    "write it (see its log: no proxy, No Client Patches, or different bytes).",
+                    (unsigned)kNetPollImm, read ? "still the client's" : "unreadable");
+        }
+    }
     if (g_state == 1) WowOpt_RecordHookOwner(kWaitImmediate, (const void*)&Init);
     if (Config::g_settings.OptFastTimerCalibration) {
         switch (g_state) {

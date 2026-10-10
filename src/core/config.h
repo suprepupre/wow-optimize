@@ -42,6 +42,7 @@ namespace Config {
         bool OptAsyncPollSpin = false;
         bool OptFastExit = false;
         bool OptFastTimerCalibration = false;
+        bool OptFastNetworkInit = false;
         bool OptNoWebProxy = false;
         bool OptClientCodeAudit = true;
         bool OptFileAttrCensus = true;

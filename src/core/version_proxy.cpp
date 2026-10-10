@@ -296,6 +296,48 @@ static void ApplyFastTimerCalibration(HMODULE hSelf) {
         false);
 }
 
+// The client's network start (WowConnection init, called once from the first NetClient) creates its
+// network thread and then waits for the thread to say it has started by polling a flag at
+// connection+0x8ED every 100 ms: `push 64h / call sub_86B280 / add esp,4 / cmp byte [ebx+8EDh],0 /
+// jz`, at 0x00469400. The thread sets the flag in its first instructions, but the flag is read once
+// before the thread has been scheduled, so the loop always sleeps at least one full 100 ms (about 109
+// on a machine at the default timer period) and does so on the main thread during startup. The
+// patch makes the interval 1 ms. The loop is unchanged: it still returns exactly when the flag is
+// set, it just looks at it every millisecond.
+static const unsigned kNetPollSite = 0x00469400;
+static const unsigned char kNetPollOld[17] = {
+    0x6A, 0x64, 0xE8, 0x79, 0x1E, 0x40, 0x00, 0x83, 0xC4, 0x04, 0x80, 0xBB, 0xED, 0x08, 0x00, 0x00, 0x00
+};
+
+static void ApplyFastNetworkInit(HMODULE hSelf) {
+    char ini[MAX_PATH];
+    if (!ProxyFindIni(ini, sizeof(ini))) return;
+    if (GetPrivateProfileIntA("General", "FastNetworkInit", 0, ini) == 0) return;
+    if (GetPrivateProfileIntA("General", "NoClientPatches", 0, ini) != 0) {
+        ProxyLog(hSelf, "FastNetworkInit: skipped, NoClientPatches is on\r\n", false);
+        return;
+    }
+    if ((uintptr_t)GetModuleHandleA(NULL) != 0x00400000) {
+        ProxyLog(hSelf, "FastNetworkInit: skipped, the client is not at 0x00400000\r\n", false);
+        return;
+    }
+    unsigned char* site = (unsigned char*)(uintptr_t)kNetPollSite;
+    DWORD oldProt = 0;
+    if (!VirtualProtect(site, sizeof(kNetPollOld), PAGE_EXECUTE_READWRITE, &oldProt)) {
+        ProxyLog(hSelf, "FastNetworkInit: skipped, the client's code could not be made writable\r\n", false);
+        return;
+    }
+    const bool matches = memcmp(site, kNetPollOld, sizeof(kNetPollOld)) == 0;
+    if (matches) site[1] = 1;
+    DWORD ignored;
+    VirtualProtect(site, sizeof(kNetPollOld), oldProt, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kNetPollOld));
+    ProxyLog(hSelf, matches
+        ? "FastNetworkInit: the network start's wait for its thread now polls every 1 ms instead of 100 (0x00469401)\r\n"
+        : "FastNetworkInit: skipped, the bytes at 0x00469400 are not the ones this was written against\r\n",
+        false);
+}
+
 static DWORD WINAPI LoaderThread(LPVOID param) {
     Sleep(3000);
 
@@ -364,6 +406,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 return FALSE;
             }
             if (!HostIsOneOfOurs()) ApplyFastTimerCalibration(hModule);
+            if (!HostIsOneOfOurs()) ApplyFastNetworkInit(hModule);
             CloseHandle(CreateThread(NULL, 0, LoaderThread, (LPVOID)hModule, 0, NULL));
             break;
 
