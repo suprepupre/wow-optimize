@@ -718,6 +718,7 @@ namespace Config {
         bool OptParticleEmitterActive = true;
         bool OptCollisionFaceClip = false;
         bool OptCollisionPolyCopy = true;
+        bool OptM2SphereRayGather = false;   // experimental, offline-verified against the client only
         bool OptMat3RotAxis = false;
         bool OptM2MeshPickFast = true;
         bool OptM2CollisionOutcode = true;

@@ -252,6 +252,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "ParticleEmitterActive", &Settings::OptParticleEmitterActive },
     { "Graphics_Sound", "CollisionFaceClip", &Settings::OptCollisionFaceClip },
     { "Graphics_Sound", "CollisionPolyCopy", &Settings::OptCollisionPolyCopy },
+    { "Graphics_Sound", "M2SphereRayGather", &Settings::OptM2SphereRayGather },
     { "Graphics_Sound", "Mat3RotAxis", &Settings::OptMat3RotAxis },
     { "Graphics_Sound", "M2MeshPickFast", &Settings::OptM2MeshPickFast },
     { "Graphics_Sound", "M2CollisionOutcode", &Settings::OptM2CollisionOutcode },
@@ -902,6 +903,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptParticleEmitterActive = GetPrivateProfileIntA("Graphics_Sound", "ParticleEmitterActive", 1, iniPath.c_str()) != 0;
         g_settings.OptCollisionFaceClip     = GetPrivateProfileIntA("Graphics_Sound", "CollisionFaceClip", 0, iniPath.c_str()) != 0;
         g_settings.OptCollisionPolyCopy     = GetPrivateProfileIntA("Graphics_Sound", "CollisionPolyCopy", 1, iniPath.c_str()) != 0;
+        g_settings.OptM2SphereRayGather     = GetPrivateProfileIntA("Graphics_Sound", "M2SphereRayGather", 0, iniPath.c_str()) != 0;
         g_settings.OptMat3RotAxis           = GetPrivateProfileIntA("Graphics_Sound", "Mat3RotAxis", 0, iniPath.c_str()) != 0;
         g_settings.OptM2MeshPickFast        = GetPrivateProfileIntA("Graphics_Sound", "M2MeshPickFast", 1, iniPath.c_str()) != 0;
         g_settings.OptM2CollisionOutcode    = GetPrivateProfileIntA("Graphics_Sound", "M2CollisionOutcode", 1, iniPath.c_str()) != 0;

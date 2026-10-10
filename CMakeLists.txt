@@ -603,6 +603,9 @@ add_library(wow_optimize SHARED
     src/simd_math/collision_face_clip_sse2.h
     src/simd_math/collision_poly_copy_sse2.cpp
     src/simd_math/collision_poly_copy_sse2.h
+    src/simd_math/m2_sphere_ray_gather.cpp
+    src/simd_math/m2_sphere_ray_gather.h
+    src/simd_math/m2_sphere_ray_gather_core.h
     src/simd_math/mat3_rot_axis_sse2.cpp
     src/simd_math/mat3_rot_axis_sse2.h
     src/simd_math/m2_mesh_pick_fast.cpp
