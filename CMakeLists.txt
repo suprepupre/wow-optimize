@@ -571,6 +571,8 @@ add_library(wow_optimize SHARED
     src/diagnostics/file_attr_census.h
     src/hooks_subsystems/fast_exit.cpp
     src/hooks_subsystems/fast_exit.h
+    src/hooks_subsystems/extra_readers.cpp
+    src/hooks_subsystems/extra_readers.h
     src/hooks_subsystems/timer_calibration.cpp
     src/hooks_subsystems/timer_calibration.h
     src/runtime_vm/lua_collect_skip.cpp

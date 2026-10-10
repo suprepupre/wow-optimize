@@ -119,6 +119,7 @@
 #include "../hooks_subsystems/async_poll_spin.h"
 #include "../runtime_vm/lua_collect_skip.h"
 #include "../hooks_subsystems/fast_exit.h"
+#include "../hooks_subsystems/extra_readers.h"
 #include "../hooks_subsystems/timer_calibration.h"
 #include "../diagnostics/client_code_audit.h"
 #include "../diagnostics/file_attr_census.h"
@@ -5997,6 +5998,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("ParticleLoopPrefetch::LogStats", ParticleLoopPrefetch::LogStats());
     STAT_TIME("AddonMemoryWalk::LogStats", AddonMemoryWalk::LogStats());
     STAT_TIME("AsyncPollSpin::LogStats", AsyncPollSpin::LogStats());
+    STAT_TIME("ExtraReaders::LogStats", ExtraReaders::LogStats());
     STAT_TIME("LuaCollectSkip::LogStats", LuaCollectSkip::LogStats());
     STAT_TIME("FastExit::LogStats", FastExit::LogStats());
     STAT_TIME("TimerCalibration::LogStats", TimerCalibration::LogStats());
@@ -6372,6 +6374,7 @@ static SwapPresentTiming_fn orig_SwapPresentTiming = nullptr;
 // hooked_Sleep tick, which is gated to fire at most once every 8ms - i.e. it
 // stops tracking frames at all above ~125fps.
 extern "C" void WowOpt_OnFrameBoundary() {
+    ExtraReaders::OnFrame();
     // Retires the render-sort key cache. It was bumped from MainThreadPump,
     // which is reached from hooked_Sleep and from the frame limiter and so runs
     // twice per frame - halving the cache's life for no reason. This is the

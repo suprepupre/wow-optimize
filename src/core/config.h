@@ -43,6 +43,7 @@ namespace Config {
         bool OptFastExit = false;
         bool OptFastTimerCalibration = false;
         bool OptFastNetworkInit = false;
+        bool OptExtraReaderThread = false;
         bool OptNoWebProxy = false;
         bool OptClientCodeAudit = true;
         bool OptFileAttrCensus = true;
