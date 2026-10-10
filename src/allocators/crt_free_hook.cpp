@@ -175,6 +175,14 @@ bool InstallCrtFreeHook() {
         return false;
     }
 
+    static const unsigned char kFreeOpening[12] = { 0x55, 0x8B, 0xEC, 0x56, 0x8B, 0x75, 0x08, 0x85, 0xF6, 0x74, 0x0F, 0x56 };
+    if (!WowOpt_ClientBytesAre(WOW_FREE_WRAPPER, kFreeOpening, sizeof(kFreeOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(WOW_FREE_WRAPPER, hex, sizeof(hex));
+        Log("[CrtFree] NOT installed: the bytes at 0x%08X are not the client's free wrapper: %s",
+            (unsigned)WOW_FREE_WRAPPER, hex);
+        return false;
+    }
     void* target = (void*)WOW_FREE_WRAPPER;
     if (WineSafe_CreateHook(target, (void*)Hooked_CrtFree, (void**)&g_orig) != MH_OK) {
         Log("[CrtFree] ERROR: could not create hook at 0x%08X", (unsigned)WOW_FREE_WRAPPER);
@@ -203,6 +211,14 @@ bool InstallCrtAllocHook() {
         return false;
     }
 
+    static const unsigned char kAllocOpening[16] = { 0x55, 0x8B, 0xEC, 0x56, 0x57, 0x8B, 0x7D, 0x08, 0x8D, 0x47, 0x07, 0x83, 0xE0, 0xF8, 0xF6, 0x45 };
+    if (!WowOpt_ClientBytesAre(WOW_ALLOC_WRAPPER, kAllocOpening, sizeof(kAllocOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(WOW_ALLOC_WRAPPER, hex, sizeof(hex));
+        Log("[CrtAlloc] NOT installed: the bytes at 0x%08X are not the client's allocation wrapper, part of "
+            "which this replaces: %s", (unsigned)WOW_ALLOC_WRAPPER, hex);
+        return false;
+    }
     void* target = (void*)WOW_ALLOC_WRAPPER;
     if (WineSafe_CreateHook(target, (void*)Hooked_WowAlloc, (void**)&g_origAlloc) != MH_OK) {
         Log("[CrtAlloc] ERROR: could not create hook at 0x%08X", (unsigned)WOW_ALLOC_WRAPPER);

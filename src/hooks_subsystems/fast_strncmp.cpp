@@ -127,6 +127,13 @@ int __stdcall Hooked_strnicmp(const char* s1, const char* s2, size_t n) {
 }
 
 bool InstallFastStrncmp() {
+    static const unsigned char kStrnicmpOpening[16] = { 0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x10, 0x8B, 0x4D, 0x0C, 0x8B, 0x55, 0x08, 0x50, 0x51, 0x52, 0xE8 };
+    if (!WowOpt_ClientBytesAre(0x0076E780, kStrnicmpOpening, sizeof(kStrnicmpOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(0x0076E780, hex, sizeof(hex));
+        Log("[FastStrnicmp] NOT installed: the bytes at 0x0076E780 are not the client's _strnicmp wrapper: %s", hex);
+        return false;
+    }
     void* target = (void*)0x0076E780;
 
     if (MH_CreateHook(target, (void*)Hooked_strnicmp, (void**)&g_orig) != MH_OK) {

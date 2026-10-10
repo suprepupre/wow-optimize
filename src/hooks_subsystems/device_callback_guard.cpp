@@ -261,6 +261,14 @@ bool Init() {
         return true;
     }
 
+    static const unsigned char kListWalkOpening[16] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x53, 0x57, 0x8B, 0xF9, 0x8B, 0x87, 0x0C, 0x29, 0x00, 0x00 };
+    if (!WowOpt_ClientBytesAre(kListWalk, kListWalkOpening, sizeof(kListWalkOpening))) {
+        char hex[64];
+        WowOpt_HexBytes(kListWalk, hex, sizeof(hex));
+        Log("[DeviceCbGuard] NOT installed: the bytes at 0x%08X are not the device callback list walk of "
+            "build 12340: %s", (unsigned)kListWalk, hex);
+        return false;
+    }
     void* target = (void*)kListWalk;
     MH_STATUS st = WineSafe_CreateHook(target, (void*)Hooked_ListWalk,
                                        (void**)&orig_ListWalk);

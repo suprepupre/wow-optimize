@@ -396,6 +396,13 @@ namespace WowPerfHooks {
             // off OptWowPerfHooks, so the key controlled nothing it named.
             if (h.addr == (void*)0x0084DEB0 && !Config::g_settings.OptLuaTypeFast)
                 continue;
+            // lua_type's opening, from build 12340.
+            static const unsigned char kLuaTypeOpening[12] = { 0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x0C, 0x8B, 0x4D, 0x08, 0xE8, 0x02, 0xFB };
+            if (h.addr == (void*)0x0084DEB0 &&
+                !WowOpt_ClientBytesAre(0x0084DEB0, kLuaTypeOpening, sizeof(kLuaTypeOpening))) {
+                Log("[WowPerf] %s: NOT hooked, the bytes at 0x0084DEB0 are not lua_type's opening", h.name);
+                continue;
+            }
             if (WineSafe_CreateHook(h.addr, h.hook, h.orig) == MH_OK) {
                 if (MH_EnableHook(h.addr) == MH_OK) {
                     Log("[WowPerf] %s: ACTIVE @ 0x%08X", h.name, (uintptr_t)h.addr);
