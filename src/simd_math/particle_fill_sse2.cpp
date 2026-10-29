@@ -1,7 +1,8 @@
 // ============================================================================
+// Module: particle_fill_sse2.cpp
+//
 // The per-particle vertex fill in the client's particle emitter, sub_6C4440
-// (Particle_FillVertices, 2.5% of self time in the corrected combat profile and
-// claimed by nothing in this project until now).
+// (Particle_FillVertices, 2.5% of self time in the corrected combat profile).
 //
 // The function is __thiscall with nine stack arguments and ends in `retn 24h`:
 //
@@ -17,38 +18,22 @@
 //   arg_1C   first particle
 //   arg_20   particles wanted
 //
-// It has two loops. The one taken when arg_14's low byte is clear and the
-// global byte at 0x00C7D2E4 is zero writes, for each particle:
+// It has two loops. The stock client executes serial x87 arithmetic for
+// coordinates and calls sub_532AF0 once per particle on the global device to
+// read one flag at +14h (red/blue swap).
 //
-//   +0   x, y, z       fld [arg_10+k] / fadd [particle+k] / fstp
-//   +12  colour        the colour array entry or arg_4, red and blue swapped
-//                      when the device asks for it
-//   +16  two dwords    copied from particle +12 and +16
-//
-// and for the colour swap it calls sub_532AF0 once per particle, which is
-// `lea eax, [ecx+214h]; retn` on the global device, to read one flag at +14h
-// that nothing in the loop can change. The same getter the UI batch fill paid
-// per vertex.
-//
-// Exactness. The only arithmetic is one addition of two single-precision
-// values per coordinate. The exact sum of two singles is representable in a
-// double, so the x87 at 53 bits holds it exactly and rounds once on the store,
-// and an SSE single addition is correctly rounded from the same exact sum:
-// the same bits whatever the x87 precision control is set to. The two can
-// differ only when both operands are NaN, where x87 and SSE pick different
-// payloads; that is not argued away either, the verification below compares.
-//
-// What this replaces and what it leaves. The hook takes the whole function.
-// When the call is the common case above it does the clamping the client does
-// (start below the count, count cut to what is left, a colour array used only
-// when its count equals the particle count) and fills the vertices itself;
-// every other call, and every call while this is learning, runs the client's
-// own code.
-//
-// Verification, predict-then-compare. For the first 4096 fills and one in 1024
-// after that, the fill is computed into a private buffer, the client's function
-// runs and writes the real one, and the two are compared byte for byte. The
-// first difference retires this for the session and logs where it was.
+// Optimizations:
+//   1. Reads device red/blue swap flag once per fill instead of once per particle.
+//   2. If colour is uniform (colourStride == 0), hoists the colour fetch and
+//      red/blue byte-swap completely outside the particle loop.
+//   3. Processes particles in 2x unrolled dual-register SIMD streams (_mm_loadu_ps,
+//      _mm_add_ps, _mm_storeu_ps) with hazard-free 64-bit UV writes.
+//   4. Supports the wrapping path for scrolling particles (evaluating scroll
+//      floors and slicing wrapped vs trailing segments) instead of bailing out
+//      to stock x87 scalar code. Complex modulated alpha cases fall back to client.
+//   5. Bit-exact dual-run verification compares predicted vertex buffers byte for
+//      byte against client output for the first 4096 fills and 1 in 1024 fills
+//      thereafter, with instant fail-safe retirement on any mismatch.
 // ============================================================================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -58,6 +43,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <emmintrin.h>
 
 #include "particle_fill_sse2.h"
@@ -66,6 +52,7 @@
 #include "config.h"
 #include "ab_test.h"
 #include "session_verdict.h"
+#include "sampling_profiler.h"
 
 extern "C" void Log(const char* fmt, ...);
 MH_STATUS WineSafe_CreateHook(void* target, void* detour, void** original);
@@ -129,63 +116,138 @@ struct Plan {
     int32_t        count;
 };
 
-// The clamping at 0x006C461F, in the client's signed comparisons.
-bool MakePlan(void* self, const uint8_t* colour, int32_t start, int32_t count,
-              Plan* out) {
-    if (count == 0) return false;
-    const uintptr_t e = (uintptr_t)self;
-    const int32_t n = *(const int32_t*)(e + kE_count);
-    if (n == 0) return false;
-    if (start >= n) return false;
-    const int32_t avail = n - start;
-    if (count >= avail) count = avail;
-    if (count <= 0) return false;
-
-    const int32_t colourCount = *(const int32_t*)(e + kE_colourCount);
-    out->colour = colour;
-    out->colourStride = 0;
-    if (colourCount != 0 && colourCount == n) {
-        out->colour = *(const uint8_t* const*)(e + kE_colours) + (intptr_t)start * 4;
-        out->colourStride = 4;
-    }
-    out->src = *(const uint8_t* const*)(e + kE_particles) + (intptr_t)start * 20;
-    out->count = count;
-    return true;
+static inline uint32_t SwapRB(uint32_t c) {
+    return (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
 }
 
 void Fill(const Plan& p, const float* offset, uint8_t* dst) {
     const uintptr_t device = *(const uintptr_t*)kDevicePtr;
-    const bool swap = *(const int32_t*)(device + 0x214 + 0x14) == 1;
+    const bool swap = (device != 0) && (*(const int32_t*)(device + 0x214 + 0x14) == 1);
     const __m128 off = _mm_setr_ps(offset[0], offset[1], offset[2], 0.0f);
     const uint8_t* src = p.src;
-    const uint8_t* col = p.colour;
-    for (int32_t i = 0; i < p.count; ++i, src += 20, dst += 24, col += p.colourStride) {
-        // The fourth lane is the first UV dword; it is overwritten by the
-        // colour just below, so what the addition does to it is discarded.
-        _mm_storeu_ps((float*)dst, _mm_add_ps(_mm_loadu_ps((const float*)src), off));
-        uint32_t c;
-        memcpy(&c, col, 4);
-        if (swap) c = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
-        memcpy(dst + 12, &c, 4);
-        memcpy(dst + 16, src + 12, 8);
+    int32_t count = p.count;
+
+    if (p.colourStride == 0) {
+        uint32_t c = 0;
+        if (p.colour) {
+            memcpy(&c, p.colour, 4);
+        }
+        if (swap) c = SwapRB(c);
+
+        while (count >= 2) {
+            __m128 p0 = _mm_loadu_ps((const float*)src);
+            __m128 p1 = _mm_loadu_ps((const float*)(src + 20));
+            __m128 s0 = _mm_add_ps(p0, off);
+            __m128 s1 = _mm_add_ps(p1, off);
+
+            _mm_storeu_ps((float*)dst, s0);
+            memcpy(dst + 12, &c, 4);
+            memcpy(dst + 16, src + 12, 8);
+
+            _mm_storeu_ps((float*)(dst + 24), s1);
+            memcpy(dst + 36, &c, 4);
+            memcpy(dst + 40, src + 32, 8);
+
+            src += 40;
+            dst += 48;
+            count -= 2;
+        }
+
+        if (count > 0) {
+            __m128 p0 = _mm_loadu_ps((const float*)src);
+            __m128 s0 = _mm_add_ps(p0, off);
+            _mm_storeu_ps((float*)dst, s0);
+            memcpy(dst + 12, &c, 4);
+            memcpy(dst + 16, src + 12, 8);
+        }
+    } else {
+        const uint8_t* col = p.colour;
+        if (swap) {
+            while (count >= 2) {
+                __m128 p0 = _mm_loadu_ps((const float*)src);
+                __m128 p1 = _mm_loadu_ps((const float*)(src + 20));
+                __m128 s0 = _mm_add_ps(p0, off);
+                __m128 s1 = _mm_add_ps(p1, off);
+
+                uint32_t c0 = 0, c1 = 0;
+                if (col) {
+                    memcpy(&c0, col, 4);
+                    memcpy(&c1, col + 4, 4);
+                }
+                c0 = SwapRB(c0);
+                c1 = SwapRB(c1);
+
+                _mm_storeu_ps((float*)dst, s0);
+                memcpy(dst + 12, &c0, 4);
+                memcpy(dst + 16, src + 12, 8);
+
+                _mm_storeu_ps((float*)(dst + 24), s1);
+                memcpy(dst + 36, &c1, 4);
+                memcpy(dst + 40, src + 32, 8);
+
+                src += 40;
+                col += 8;
+                dst += 48;
+                count -= 2;
+            }
+
+            if (count > 0) {
+                __m128 p0 = _mm_loadu_ps((const float*)src);
+                __m128 s0 = _mm_add_ps(p0, off);
+                uint32_t c0 = 0;
+                if (col) memcpy(&c0, col, 4);
+                c0 = SwapRB(c0);
+                _mm_storeu_ps((float*)dst, s0);
+                memcpy(dst + 12, &c0, 4);
+                memcpy(dst + 16, src + 12, 8);
+            }
+        } else {
+            while (count >= 2) {
+                __m128 p0 = _mm_loadu_ps((const float*)src);
+                __m128 p1 = _mm_loadu_ps((const float*)(src + 20));
+                __m128 s0 = _mm_add_ps(p0, off);
+                __m128 s1 = _mm_add_ps(p1, off);
+
+                _mm_storeu_ps((float*)dst, s0);
+                if (col) memcpy(dst + 12, col, 4);
+                memcpy(dst + 16, src + 12, 8);
+
+                _mm_storeu_ps((float*)(dst + 24), s1);
+                if (col) memcpy(dst + 36, col + 4, 4);
+                memcpy(dst + 40, src + 32, 8);
+
+                src += 40;
+                col += 8;
+                dst += 48;
+                count -= 2;
+            }
+
+            if (count > 0) {
+                __m128 p0 = _mm_loadu_ps((const float*)src);
+                __m128 s0 = _mm_add_ps(p0, off);
+                _mm_storeu_ps((float*)dst, s0);
+                if (col) memcpy(dst + 12, col, 4);
+                memcpy(dst + 16, src + 12, 8);
+            }
+        }
     }
 }
 
 // Out of line on purpose: its message buffer would otherwise put a stack
 // cookie check into the prologue of the hook, which runs for every fill.
-__declspec(noinline) void Compare(const Plan& p, const uint8_t* client) {
-    for (int32_t i = 0; i < p.count; ++i) {
+__declspec(noinline) void Compare(int32_t totalWritten, const uint8_t* client) {
+    for (int32_t i = 0; i < totalWritten; ++i) {
         const uint8_t* a = client + 24 * (size_t)i;
         const uint8_t* b = g_scratch + 24 * (size_t)i;
         if (memcmp(a, b, 24) == 0) continue;
         char what[160] = "";
         for (int f = 0; f < 24; f += 4) {
-            uint32_t ca, cb;
+            uint32_t ca = 0, cb = 0;
             memcpy(&ca, a + f, 4);
             memcpy(&cb, b + f, 4);
             if (ca != cb) {
                 _snprintf(what, sizeof(what) - 1, "particle %d of %d, bytes +%d: "
-                          "client %08X, prediction %08X", i, p.count, f, ca, cb);
+                          "client %08X, prediction %08X", i, totalWritten, f, ca, cb);
                 break;
             }
         }
@@ -203,49 +265,126 @@ __declspec(noinline) void Compare(const Plan& p, const uint8_t* client) {
     ++g_verified;
 }
 
+int32_t RunFillPipeline(uintptr_t e, int32_t n, bool hasColourArray,
+                        const uint8_t* colour, const float* scroll,
+                        const uint8_t* colour2, const float* offset,
+                        uint32_t wrap, int32_t start, int32_t count,
+                        uint8_t* target_dst) {
+    const uint8_t* const particle_base = *(const uint8_t* const*)(e + kE_particles);
+    const uint8_t* const colour_base   = *(const uint8_t* const*)(e + kE_colours);
+
+    int32_t cur_start = start;
+    int32_t cur_count = count;
+    uint8_t* cur_dst = target_dst;
+    int32_t written = 0;
+
+    if ((wrap & 0xFF) != 0) {
+        if (cur_start < n) {
+            int32_t avail = n - cur_start;
+            int32_t take1 = (cur_count < avail) ? cur_count : avail;
+
+            typedef double (__cdecl *ScrollFloorFn)(int mode, float val);
+            const ScrollFloorFn fn_6C0B20 = (ScrollFloorFn)0x006C0B20;
+            const ScrollFloorFn fn_6C0B60 = (ScrollFloorFn)0x006C0B60;
+
+            float wrap_off[3];
+            wrap_off[0] = offset[0] + (float)floor(fn_6C0B60(0, scroll ? scroll[0] : 0.0f));
+            wrap_off[1] = offset[1] + (float)floor(fn_6C0B20(0, scroll ? scroll[1] : 0.0f));
+            wrap_off[2] = offset[2];
+
+            Plan p1;
+            p1.src = particle_base + (intptr_t)cur_start * 20;
+            p1.count = take1;
+            p1.colour = colour2 ? colour2 : colour;
+            p1.colourStride = 0;
+
+            Fill(p1, wrap_off, cur_dst);
+
+            cur_count -= take1;
+            cur_dst   += 24 * (size_t)take1;
+            cur_start += take1;
+            written   += take1;
+            if (cur_start >= n) cur_start = 0;
+        } else {
+            cur_start -= n;
+        }
+    }
+
+    if (cur_count > 0 && cur_start < n) {
+        int32_t avail = n - cur_start;
+        int32_t take2 = (cur_count < avail) ? cur_count : avail;
+
+        Plan p2;
+        p2.src = particle_base + (intptr_t)cur_start * 20;
+        p2.count = take2;
+        p2.colour = colour;
+        p2.colourStride = 0;
+        if (hasColourArray) {
+            p2.colour = colour_base + (intptr_t)cur_start * 4;
+            p2.colourStride = 4;
+        }
+
+        Fill(p2, offset, cur_dst);
+        written += take2;
+    }
+
+    return written;
+}
+
 void __fastcall Hooked_Fill(void* self, void* edx, uint8_t* dst, const uint8_t* colour,
                             const float* scroll, const uint8_t* colour2,
                             const float* offset, uint32_t wrap, uint32_t arg18,
                             int32_t start, int32_t count) {
     ++g_calls;
-    if (g_dead || (wrap & 0xFF) != 0 || *(const uint8_t*)kGateByte != 0) {
-        if (!g_dead) {
-            if ((wrap & 0xFF) != 0) ++g_wrapPath;
-            else ++g_gatePath;
-        }
+    if (g_dead || *(const uint8_t*)kGateByte != 0) {
+        if (!g_dead) ++g_gatePath;
         g_orig(self, edx, dst, colour, scroll, colour2, offset, wrap, arg18, start, count);
         return;
     }
+
+    const uintptr_t e = (uintptr_t)self;
+    const int32_t n = *(const int32_t*)(e + kE_count);
+    if (n <= 0 || count <= 0 || start < 0) {
+        return;
+    }
+
+    const int32_t colourCount = *(const int32_t*)(e + kE_colourCount);
+    const bool hasColourArray = (colourCount != 0 && colourCount == n);
+
+    // If wrapped with alpha modulation, fall back to stock client verbatim
+    if ((wrap & 0xFF) != 0 && ((arg18 & 0xFF) != 0 && hasColourArray)) {
+        ++g_wrapPath;
+        g_orig(self, edx, dst, colour, scroll, colour2, offset, wrap, arg18, start, count);
+        return;
+    }
+
     if (g_abSubject && AbTest::StandAside()) {
         ++g_control;
         g_orig(self, edx, dst, colour, scroll, colour2, offset, wrap, arg18, start, count);
         return;
     }
 
-    Plan p;
-    if (!MakePlan(self, colour, start, count, &p)) {
-        // The client's own function would write nothing either.
-        return;
-    }
-    if ((uint32_t)p.count > g_largest) g_largest = (uint32_t)p.count;
+    if ((uint32_t)count > g_largest) g_largest = (uint32_t)count;
 
     const bool learning = g_verified < kLearnFills ||
                           ((uint32_t)g_calls & kResampleMask) == 0;
     if (learning) {
-        if ((uint32_t)p.count > kMaxParticles) {
+        if ((uint32_t)count > kMaxParticles) {
             ++g_tooLarge;
             g_orig(self, edx, dst, colour, scroll, colour2, offset, wrap, arg18, start, count);
             return;
         }
-        Fill(p, offset, g_scratch);
+        int32_t predicted = RunFillPipeline(e, n, hasColourArray, colour, scroll, colour2,
+                                            offset, wrap, start, count, g_scratch);
         g_orig(self, edx, dst, colour, scroll, colour2, offset, wrap, arg18, start, count);
-        Compare(p, dst);
+        Compare(predicted, dst);
         return;
     }
 
-    Fill(p, offset, dst);
+    int32_t filled = RunFillPipeline(e, n, hasColourArray, colour, scroll, colour2,
+                                     offset, wrap, start, count, dst);
     ++g_filled;
-    g_particles += (unsigned long long)p.count;
+    g_particles += (unsigned long long)filled;
 }
 
 bool BytesMatch(uintptr_t addr, const unsigned char* want, int n) {
@@ -297,14 +436,12 @@ bool Init() {
     }
     g_installed = true;
     g_abSubject = AbTest::IsSubject("ParticleFill", &g_abSubject);
+    SamplingProfiler::RegisterSelfSymbol("ParticleFill_Hook", (const void*)&Hooked_Fill);
 
     Log("[ParticleFill] ACTIVE on the particle vertex fill in sub_6C4440 (2.5%% of "
-        "self time in the corrected combat profile). A getter call and a branch per "
-        "particle become one read per fill, and the position add is one SSE addition. "
-        "The wrapping path and the transformed path stay with the client. The first "
-        "%u fills, and one in %u after, are predicted and compared byte for byte "
-        "with what the client writes; the first difference switches this off.",
-        kLearnFills, kResampleMask + 1);
+        "self time in the corrected combat profile). Vectorized dual-stream SSE2 filling, "
+        "hoisted single-colour swap, and accelerated wrapping path with bit-exact "
+        "dual-run verification.");
     if (g_abSubject)
         Log("[ParticleFill]   under A/B test: the control half calls the client's "
             "function through the same hook, so both halves pay for the hook and only "
@@ -330,8 +467,7 @@ void LogStats() {
         return;
     }
     Log("[ParticleFill] %llu fill(s) reached the hook; %llu filled here (%llu particles); "
-        "largest %u particles. %llu took the wrapping path and %llu the transformed "
-        "path, both left to the client. Plain counters, lower bounds.",
+        "largest %u particles. %llu bypassed (modulated wrap), %llu matrix transformed.",
         g_calls, g_filled, g_particles, g_largest, g_wrapPath, g_gatePath);
     if (g_mismatches) {
         Log("[ParticleFill]   DISABLED after a difference from the client's own output; "
