@@ -828,6 +828,7 @@ namespace Config {
         bool OptMat44AffineOpsFast = false;
         bool OptTerrainChunkIntersectFast = false;
         bool OptCollisionClipVertsBox = true;
+        bool OptTerrainAlphaUnpackFast = true;
     };
 
 
