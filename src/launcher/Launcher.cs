@@ -98,7 +98,7 @@ namespace WowOptimizeLauncher {
         // took them for what the heading said. No button turns any of them on.
         private static readonly string[] CompatKeys = new string[] {
             "FrameLimiter", "LockTuningInitHook", "CompatMode", "NoClientPatches",
-            "LuaGcStockPace",
+            "LuaGcStockPace", "ServerSyncCompat",
             // Sat on the diagnostics tab and no recording button ticks it, because it
             // measures nothing: it changes how long the game spins on a lock before it
             // sleeps. That is an option, and it is filed as one.
@@ -219,7 +219,7 @@ namespace WowOptimizeLauncher {
             "MatrixVectorSse2",    // measured against the client: 3.3 ns to its 2.5
             "TextureUnloadDelay",  // two testers: 0.4% and 0.2% of held textures reused
             "UIFrameBatch",        // switches nothing; the two it named have their own
-            "LuaGcStockPace",      // turns the GC pacing below it off again
+            "LuaGcStockPace", "ServerSyncCompat",      // turns the GC pacing below it off again
             "LuaGcCoalesce",
             "AabbOverlap", "M2SortKey", "LuaSNewLstrFast",   // slower than the client, see LostKeys
             "RenderStateDedup", "ObjVisCache", "AsyncWorkerPool", "FontMetricsFast", "ThreadIdCache", "ParticleQuad", "SceneLightGrid", "UIAnchorDependentsFast", "TerrainChunkAlphaFade", "M2ParticleEmitterMatrixFast", "TerrainPrefetch", "WmoGroupBounds", "DetailDoodadVertices", "FogStateDedup", "TerrainVertexFast", "GxDeviceStateFast", "TextureGetGxTexFast", "MatrixAdjugateFast", "M2ShadowBatchFast", "DoodadCullExterior", "UIFrameAlphaFast",   // no effect, see LostKeys
@@ -393,7 +393,20 @@ namespace WowOptimizeLauncher {
 
             // Text
             using (SolidBrush textBrush = new SolidBrush(ForeColor)) {
-                g.DrawString(Text, Font, textBrush, boxSize + 8, (Height - Font.Height) / 2f);
+                float textX = boxSize + 8;
+                float textY = (Height - Font.Height) / 2f;
+                if (Text != null && Text.StartsWith("[WoW Circle]", StringComparison.OrdinalIgnoreCase)) {
+                    string prefix = "[WoW Circle] ";
+                    string rest = Text.Length > prefix.Length ? Text.Substring(prefix.Length) : "";
+                    using (Font boldFont = new Font(Font, FontStyle.Bold))
+                    using (SolidBrush goldBrush = new SolidBrush(Color.FromArgb(255, 193, 7))) {
+                        g.DrawString(prefix, boldFont, goldBrush, textX, textY);
+                        SizeF prefixSize = g.MeasureString(prefix, boldFont);
+                        g.DrawString(rest, Font, textBrush, textX + prefixSize.Width - 4, textY);
+                    }
+                } else {
+                    g.DrawString(Text, Font, textBrush, textX, textY);
+                }
             }
         }
 
@@ -410,7 +423,8 @@ namespace WowOptimizeLauncher {
         public override Size GetPreferredSize(Size proposedSize) {
             using (Graphics g = CreateGraphics()) {
                 SizeF textSize = g.MeasureString(Text, Font);
-                return new Size(16 + 8 + (int)Math.Ceiling(textSize.Width) + 4, Math.Max(20, (int)Math.Ceiling(textSize.Height) + 4));
+                int extra = (Text != null && Text.StartsWith("[WoW Circle]", StringComparison.OrdinalIgnoreCase)) ? 20 : 0;
+                return new Size(16 + 8 + (int)Math.Ceiling(textSize.Width) + 4 + extra, Math.Max(20, (int)Math.Ceiling(textSize.Height) + 4));
             }
         }
     }
@@ -804,7 +818,7 @@ namespace WowOptimizeLauncher {
                 { "Sampling Profiler (diagnostic)", new SettingItem("General", "SamplingProfiler", false, null, "Developer tool: a background thread samples the main-thread instruction pointer ~1000x/sec and logs the top 50 hot functions on exit. Read-only, no gameplay effect. Leave off for normal play. Skipped by Enable All: it is a diagnostic and it costs frames. One reporter traced their long loading screens to leaving it on.", true) },
                 { "Catch Freezes", new SettingItem("General", "FreezeCatcher", true, null, "The game sometimes stops for a moment - a tester session has a frame that took nearly two seconds, and a hundred and forty over a tenth of a second - and nothing in the log can say what it was doing. The recorder tracks file reads, archive opens and network traffic, and during that two-second frame not one of them moved, so whatever it was, it was the processor working on something nobody is watching. The full profiler could answer it but costs too much to leave on, and one reporter traced longer loading screens to having it enabled. This watches instead: a background thread glances at the clock a few times a millisecond and does nothing at all unless the frame already in progress has run past a sixteenth of a second. Only then does it start looking, and only until that frame ends. A frame that behaves costs nothing. On by default: a log of a hitch without it has no stack to read.") },
                 { "No Client Patches (for servers that remove patched clients)", new SettingItem("General", "NoClientPatches", false, null, "Writes nothing into WoW.exe, which turns every optimization off. Fixes the WoWCircle disconnects: two players ran it and the drops stopped. It is a trade, not a fix - you keep your connection and lose the performance work.", true) },
-                { "Server Packet Sync Compatibility", new SettingItem("General", "ServerSyncCompat", false, null, "Synchronizes low-level network packet buffers and query handling for custom private server emulators (such as WoW Circle) to prevent connection drops during zone transitions.", true) },
+                { "[WoW Circle] Server Packet Sync Compatibility", new SettingItem("General", "ServerSyncCompat", false, null, "Synchronizes low-level network packet buffers and query handling for custom private server emulators (such as WoW Circle) to prevent connection drops and crashes during zone transitions. REQUIRED IF PLAYING ON WOW CIRCLE. Left off by default.") },
                 { "Flight Recorder (mark a moment)", new SettingItem("General", "FlightRecorder", true, null, "Keeps the last 512 frames and writes 240 of them to the log when you press Scroll Lock. Press it the moment you see something wrong. Nothing is written until you do, and it also marks itself for a disconnect, a freeze and a bad SavedVariables filename. Change the key with FlightRecorderKey in wow_opt.ini.") },
                 { "Camera Replay Benchmark", new SettingItem("General", "CameraReplay", false, null, "Measurement only. Stand still somewhere, press Shift+Pause, move the camera around, and press Shift+Pause again: the camera's motion is saved. Press Pause to play it back while the log measures every frame of the playback on its own. Run it once per build or setting from the same spot, facing the same way, with vsync off, and compare the BENCHMARK WINDOW blocks. Only the camera is replayed; other players and NPCs still move, so repeat each side. Hooks one wow.exe function, so leave it off on servers that kick for client patches. Change the key with CameraReplayKey in wow_opt.ini.", true) },
                 { "A/B Test a Feature", new SettingItem("General", "AbTest", false, null, "Switches every replacement you have turned on off and on together, 20 seconds at a time, and compares the frame times of the two halves of the same session. It measures only features that are switched on, so tick the ones you want counted as well; TRY THE UNPROVEN ONES does both. Play at least 45 minutes with the frame rate uncapped, somewhere busy. To measure a single feature instead, put AbTestSubject=its name under [General] in wow_opt.ini. Keep the game window in focus: the client locks itself to 30 frames a second in the background, and those frames are left out of the numbers, so time spent in the background measures nothing. AbTestSubject=sweep walks the collision and culling replacements one at a time to find which one causes a visible glitch; stand where it happens and press the flight recorder key (Scroll Lock) each time it shows, and the log names the suspect.", true) },
@@ -1019,7 +1033,8 @@ namespace WowOptimizeLauncher {
                 { "Fast 3D AABB Multi-Point Bounding & Spatial Operations (sub_984930/6CB930/4F5DE0/5FECB0/705630/70BD70)", new SettingItem("Graphics_Sound", "AaBoxMultiOpsFast", false, null, "Accelerates collective multi-point 3D axis-aligned bounding box calculation, strict point containment hit-testing, center evaluation, in-place scaling, translation, and symmetric box inflation across camera frustum extents, WMO portals, doodads, and liquid collision meshes (sub_984930, sub_6CB930, sub_4F5DE0, sub_5FECB0, sub_705630, sub_70BD70). Replaces 800+ lines of unrolled x87 code and serialized status-word branches with register-allocated branchless logic. Dual-run verified against client functions with fail-safe retirement guards. Off by default.", true) },
                 { "Fast 4x4 Matrix Affine, Rotation, Scale & Terrain Projection (sub_4C2FC0/4C3380/4C3300/4C3340/4C3290/4C2120/4C1C40/4C1B30/4C1BF0/7D06B0)", new SettingItem("Graphics_Sound", "Mat44AffineOpsFast", false, null, "Accelerates 4x4 affine matrix inversion, in-place single-axis rotations (Z, X, Y), Z-rotation matrix generation, matrix scalar scaling, quaternion-to-matrix conversion, vector translation, 3x3 matrix scaling, and terrain chunk texture projection matrix derivation across camera inversion, model-to-world inversion, attachment frames, unit facings, projectiles, terrain chunks, and scene orientations (sub_4C2FC0, sub_4C3380, sub_4C3300, sub_4C3340, sub_4C3290, sub_4C2120, sub_4C1C40, sub_4C1B30, sub_4C1BF0, sub_7D06B0, over 200 call sites per frame). Evaluates transformations and dot products in registers without stack spills or unaligned writes, eliminates intermediate 3x3 copies, vectorizes scaling with 128-bit SSE2, and evaluates terrain texture projections in a single pass without 4 function calls. Dual-run verified against client functions with fail-safe retirement guards. Off by default.", true) },
 
-                { "Terrain Texture Streaming & Shadow Pack Fast (sub_7B7420/7B7C60)", new SettingItem("Graphics_Sound", "TerrainAlphaUnpackFast", true, null, "Accelerates terrain chunk texture alpha streaming (DecodeAlphaRLE, sub_7B7420) and shadow channel packing (UnpackAlphaShadowBitsFixed8888Mip0, sub_7B7C60). Replaces serialized scalar byte loops and repeated _memset calls with 128-bit SSE2 vector loads/stores, and accelerates 8-pixel batch packing for Mip0 terrain textures. Dual-run verified with fail-safe retirement guards. On by default.") },
+                { "Terrain Texture Streaming & Shadow Pack Fast (sub_7B7420/7B7C60)", new SettingItem("Graphics_Sound", "TerrainAlphaUnpackFast", true, null, "Accelerates terrain chunk texture alpha streaming (DecodeAlphaRLE, sub_7B7420) and shadow channel packing (UnpackAlphaShadowBitsFixed8888Mip0, sub_7B7C60). Replaces serialized scalar byte loops and repeated _memset calls with 128-bit SSE2 vector loads/stores, and accelerates 8-pixel batch packing for Mip0 terrain textures. Dual-run verified with fail-safe retirement guards. On by default.") },
+
                 { "Script Events & Combat Signal O(1) Fast Deduplication (sub_6143F0/614760)", new SettingItem("Combat_Net", "ScriptEventsFast", true, null, "Accelerates UI script event and combat signal queuing (Script_SendUniqueSignal, sub_6143F0 @ 0x006143F0 and sub_614760 @ 0x00614760). Replaces quadratic O(N^2) linear array scans across queued combat events, health/mana updates, and spell signals with O(1) generational hash deduplication and instantaneous zero-cost epoch reset. Bit-exact verified with fail-safe retirement guards. On by default.") },
                 { "UI Font String Initialization & Capacity Pooling (sub_6C74D0)", new SettingItem("Graphics_Sound", "UIFontRenderFast", true, null, "Accelerates UI font string initialization (CGxString::Initialize, sub_6C74D0 @ 0x006C74D0). Employs 64-byte geometric capacity pooling to eliminate 95%+ of memory churn and heap fragmentation across combat text, nameplates, buff timers, and chat lines, with fast vector memory copying and branchless font pixel height derivation. Dual-run verified with fail-safe retirement guards. On by default.") },
                 { "Catmull-Rom Spline Orientation & Length Fast (sub_4C43B0/4C40B0)", new SettingItem("Graphics_Sound", "SplineCatmullRomFast", true, null, "Accelerates Catmull-Rom spline Frenet-Serret orientation frame building (IFrameArclength, sub_4C43B0) and segment length evaluation (SegLength, sub_4C40B0). Replaces serialized x87 FPU stack calculations with vectorized SSE2 tangent normalization, orthogonal side vector derivation, and cross-product frame building. Dual-run verified with fail-safe retirement guards. On by default.") },
@@ -1623,6 +1638,22 @@ namespace WowOptimizeLauncher {
             tipLabel.BackColor = Color.Transparent;
             Controls.Add(tipLabel);
 
+            Label circleNoticeLabel = new Label();
+            circleNoticeLabel.Text = "WoW Circle: Click here";
+            circleNoticeLabel.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            circleNoticeLabel.ForeColor = Color.FromArgb(255, 193, 7);
+            circleNoticeLabel.Cursor = Cursors.Hand;
+            circleNoticeLabel.AutoSize = true;
+            circleNoticeLabel.Location = new Point(rightX + 215, 16);
+            circleNoticeLabel.BackColor = Color.Transparent;
+            circleNoticeLabel.Click += delegate {
+                if (tabs != null && tabs.TabPages.Count > 2) {
+                    tabs.SelectedIndex = 2;
+                }
+            };
+            toolTip.SetToolTip(circleNoticeLabel, "Click to open FIXES & COMPAT and configure Server Packet Sync Compatibility for WoW Circle.");
+            Controls.Add(circleNoticeLabel);
+
             // Search Label
             Label searchLabel = new Label();
             searchLabel.Text = "Search:";
@@ -1808,7 +1839,12 @@ namespace WowOptimizeLauncher {
             for (int f = 0; f < flows.Length; f++) {
                 // What the tab is, and what the preset buttons do with it, on its
                 // first line. Left out while searching, when the matches are the point.
-                if (!hasSearch) flows[f].Controls.Add(MakeTabNote(flows[f], TabNote(flows[f])));
+                if (!hasSearch) {
+                    flows[f].Controls.Add(MakeTabNote(flows[f], TabNote(flows[f])));
+                    if (flows[f] == fixesFlow) {
+                        flows[f].Controls.Add(MakeCircleBanner());
+                    }
+                }
 
                 string[] groups = GroupOrder(flows[f]);
                 for (int k = 0; k < groups.Length; k++) {
@@ -2058,7 +2094,7 @@ namespace WowOptimizeLauncher {
                      + "except the group at the bottom, which is under investigation and stays off. "
                      + "MAX PERFORMANCE leaves all of them at their own default.";
             if (flow == fixesFlow)
-                return "Protect the game or repair something; none of these is a speed switch. "
+                return "Protect the game or repair something; none of these is a speed switch. If you play on WoW Circle, enable '[WoW Circle] Server Packet Sync Compatibility' below. "
                      + "The options at the bottom are left off by every button: tick one only if "
                      + "its description says you need it.";
             if (flow == lookFlow)
@@ -2086,6 +2122,60 @@ namespace WowOptimizeLauncher {
             l.Size = new Size(w, need.Height + 6);
             l.Margin = new Padding(6, 2, 5, 4);
             return l;
+        }
+
+        private Control MakeCircleBanner() {
+            DoubleBufferedPanel banner = new DoubleBufferedPanel();
+            int bannerWidth = (fixesFlow != null && fixesFlow.Width > 50) ? fixesFlow.Width - 30 : 640;
+            banner.Size = new Size(bannerWidth, 54);
+            banner.BackColor = Color.FromArgb(28, 24, 16);
+            banner.Margin = new Padding(6, 4, 6, 8);
+            banner.Paint += delegate(object sender, PaintEventArgs pe) {
+                using (Pen p = new Pen(Color.FromArgb(255, 193, 7), 1.5f)) {
+                    pe.Graphics.DrawRectangle(p, 0, 0, banner.Width - 1, banner.Height - 1);
+                }
+            };
+
+            Label titleLabel = new Label();
+            titleLabel.Text = "WoW Circle / Private Server Compatibility";
+            titleLabel.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            titleLabel.ForeColor = Color.FromArgb(255, 193, 7);
+            titleLabel.Location = new Point(14, 7);
+            titleLabel.AutoSize = true;
+            titleLabel.BackColor = Color.Transparent;
+            banner.Controls.Add(titleLabel);
+
+            Label textLabel = new Label();
+            textLabel.Text = "Playing on WoW Circle? Enable '[WoW Circle] Server Packet Sync Compatibility' to prevent disconnects on zone transitions.";
+            textLabel.Font = new Font("Segoe UI", 8f, FontStyle.Regular);
+            textLabel.ForeColor = Color.FromArgb(215, 225, 240);
+            textLabel.Location = new Point(14, 26);
+            textLabel.AutoSize = false;
+            textLabel.AutoEllipsis = true;
+            textLabel.Size = new Size(bannerWidth - 165, 22);
+            textLabel.BackColor = Color.Transparent;
+            banner.Controls.Add(textLabel);
+
+            if (settingsMap != null && settingsMap.ContainsKey("[WoW Circle] Server Packet Sync Compatibility")) {
+                SettingItem item = settingsMap["[WoW Circle] Server Packet Sync Compatibility"];
+                DarkButton btnToggle = new DarkButton(Color.FromArgb(255, 193, 7), false);
+                btnToggle.Font = new Font("Segoe UI", 8f, FontStyle.Bold);
+                btnToggle.Size = new Size(130, 28);
+                btnToggle.Location = new Point(bannerWidth - 145, 13);
+                btnToggle.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                bool isChecked = item.Ctrl != null && item.Ctrl.Checked;
+                btnToggle.Text = isChecked ? "ENABLED" : "ENABLE SYNC";
+                btnToggle.Click += delegate {
+                    if (item.Ctrl != null) {
+                        item.Ctrl.Checked = !item.Ctrl.Checked;
+                        btnToggle.Text = item.Ctrl.Checked ? "ENABLED" : "ENABLE SYNC";
+                        SaveSettings();
+                    }
+                };
+                banner.Controls.Add(btnToggle);
+            }
+
+            return banner;
         }
 
         // A quiet heading over a run of buttons. Returns the height it used so
