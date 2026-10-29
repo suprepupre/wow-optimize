@@ -1013,6 +1013,7 @@ extern "C" void LuaOpt_GetVaSourceStats(unsigned long* fromMonitor,
 #include "lua_gettable_cache.h"
 #include "saved_vars_async.h"
 #include "event_coalescer.h"
+#include "hooks_subsystems/net_addon_coalescer.h"
 #include "loading_state.h"
 #include "diagnostics/frame_bench.h"
 #include "diagnostics/thread_cpu.h"
@@ -2559,6 +2560,7 @@ static void MainThreadPump() {
 #if !TEST_DISABLE_ADAPTIVE_FARCLIP
     #endif
 #if !TEST_DISABLE_NET_ADDON_COALESCER
+        NetAddonCoalescer::OnFrame();
 #endif
 #if !TEST_DISABLE_MIP_BIAS_GOVERNOR
         MipBiasGovernor::UpdateMipBias(elapsedMs);
@@ -6315,6 +6317,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("LuaPoolFast::LogStats", LuaPoolFast::LogStats());
     STAT_TIME("CombatLogFilter::LogStats", CombatLogFilter::LogStats());
     STAT_TIME("EventCoalescer::LogStats", EventCoalescer::LogStats());
+    STAT_TIME("NetAddonCoalescer::LogStats", NetAddonCoalescer::LogStats());
     STAT_TIME("LuaOpt::LogStats", LuaOpt::LogStats());
     STAT_TIME("StallProbe_LogStats", StallProbe_LogStats());
     STAT_TIME("RenderStateDedup_LogStats", RenderStateDedup_LogStats());
@@ -8633,6 +8636,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     LoadingState::Init();
 #if !TEST_DISABLE_EVENT_COALESCER
     EventCoalescer::Init();
+#if !TEST_DISABLE_NET_ADDON_COALESCER
+    NetAddonCoalescer::Init();
+#endif
 #else
     // Compiled out, so the launcher no longer offers a checkbox for it. It
     // suppressed whitelisted events and re-emitted them a frame later from the
@@ -12310,6 +12316,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 #endif
 #if !TEST_DISABLE_EVENT_COALESCER
             EventCoalescer::Shutdown();
+#if !TEST_DISABLE_NET_ADDON_COALESCER
+            NetAddonCoalescer::Shutdown();
+#endif
 #endif
 #if !TEST_DISABLE_LUAS_NEWLSTR_SSE2
             LuaSNewlstr::Shutdown();

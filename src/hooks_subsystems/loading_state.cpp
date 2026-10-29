@@ -29,6 +29,7 @@
 #include "session_verdict.h"
 #include "event_coalescer.h"
 #include "combat_log_filter.h"
+#include "net_addon_coalescer.h"
 #include "runtime_vm/lua_gc_governor.h"
 #include "diagnostics/crash_dumper.h"
 #include "diagnostics/sampling_profiler.h"
@@ -394,6 +395,9 @@ extern "C" bool __fastcall LoadingState_OnSignalEvent(int eventId, const char* f
     // asked here, before that gate.
     if (CombatLogFilter::IsActive() &&
         CombatLogFilter::ShouldDrop(eventId, format, vaStart)) return true;
+
+    if (NetAddonCoalescer::IsActive() &&
+        NetAddonCoalescer::TryQueueIncoming(eventId, format, vaStart)) return true;
 
     if (!EventCoalescer::IsActive()) return false;
     return EventCoalescer::TryQueue(eventId, format, vaStart);

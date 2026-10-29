@@ -205,6 +205,7 @@ namespace Config {
         bool OptCombatLogParser = false;
         bool OptCombatLogIncremental = false;
         bool OptEventCoalescer = false;
+        bool OptNetAddonCoalescer = false;
         // Off, and equally inert: InstallSavedVarsAsync is a three-line stub that
         // logs "Bypassed for stability" and returns true, and its Shutdown is a
         // no-op. Nothing writes SavedVariables off the main thread here.

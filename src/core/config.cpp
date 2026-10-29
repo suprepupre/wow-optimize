@@ -113,6 +113,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Combat_Net", "CombatLogParser", &Settings::OptCombatLogParser },
     { "Combat_Net", "CombatLogIncremental", &Settings::OptCombatLogIncremental },
     { "Combat_Net", "EventCoalescer", &Settings::OptEventCoalescer },
+    { "Combat_Net", "NetAddonCoalescer", &Settings::OptNetAddonCoalescer },
     { "Combat_Net", "SavedVarsAsync", &Settings::OptSavedVarsAsync },
     { "Combat_Net", "SavedVarsPretoken", &Settings::OptSavedVarsPretoken },
     { "Combat_Net", "UnitAuraFast", &Settings::OptUnitAuraFast },
@@ -636,7 +637,8 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
             WritePrivateProfileStringA("Combat_Net", "CombatLogLeakFix", "1", iniPath.c_str());
             WritePrivateProfileStringA("Combat_Net", "CombatLogParser", "0", iniPath.c_str());
             WritePrivateProfileStringA("Combat_Net", "CombatLogIncremental", "0", iniPath.c_str());
-            WritePrivateProfileStringA("Combat_Net", "EventCoalescer", "0", iniPath.c_str());  // #42: hides buffs/countdowns — off by default
+            WritePrivateProfileStringA("Combat_Net", "EventCoalescer", "0", iniPath.c_str());
+            WritePrivateProfileStringA("Combat_Net", "NetAddonCoalescer", "0", iniPath.c_str());  // #42: hides buffs/countdowns — off by default
             WritePrivateProfileStringA("Combat_Net", "SavedVarsSerializer", "0", iniPath.c_str());
             WritePrivateProfileStringA("Combat_Net", "SavedVarsAsync", "0", iniPath.c_str());
             WritePrivateProfileStringA("Combat_Net", "SavedVarsPretoken", "0", iniPath.c_str());
@@ -791,6 +793,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptCombatLogParser     = GetPrivateProfileIntA("Combat_Net", "CombatLogParser", 0, iniPath.c_str()) != 0;
         g_settings.OptCombatLogIncremental = GetPrivateProfileIntA("Combat_Net", "CombatLogIncremental", 0, iniPath.c_str()) != 0;
         g_settings.OptEventCoalescer      = GetPrivateProfileIntA("Combat_Net", "EventCoalescer", 0, iniPath.c_str()) != 0;
+        g_settings.OptNetAddonCoalescer   = GetPrivateProfileIntA("Combat_Net", "NetAddonCoalescer", 0, iniPath.c_str()) != 0;
         // Back to 0. Both modules are inert - see the notes in config.h - so a 1
         // here only makes the config dump read as though something is running.
         g_settings.OptSavedVarsAsync      = GetPrivateProfileIntA("Combat_Net", "SavedVarsAsync", 0, iniPath.c_str()) != 0;

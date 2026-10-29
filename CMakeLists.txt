@@ -641,6 +641,8 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/gx_buffers.cpp
     src/hooks_subsystems/event_coalescer.cpp
     src/hooks_subsystems/event_coalescer.h
+    src/hooks_subsystems/net_addon_coalescer.cpp
+    src/hooks_subsystems/net_addon_coalescer.h
     src/hooks_subsystems/loading_state.cpp
     src/hooks_subsystems/loading_state.h
     src/runtime_vm/luaS_newlstr_sse2.cpp
