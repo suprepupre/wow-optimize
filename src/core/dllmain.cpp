@@ -178,6 +178,7 @@
 #include "simd_math/collision_clip_verts_box_sse2.h"
 #include "simd_math/terrain_alpha_unpack_fast.h"
 #include "simd_math/spline_catmull_rom_fast.h"
+#include "simd_math/ui_font_render_fast.h"
 #include "simd_math/plane_from_points_fast.h"
 #include "simd_math/matrix_adjugate_fast.h"
 #include "simd_math/spline_seg_length_fast.h"
@@ -6293,6 +6294,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("CollisionClipVertsBox::LogStats", CollisionClipVertsBox::LogStats());
     STAT_TIME("TerrainAlphaUnpackFast::LogStats", TerrainAlphaUnpackFast::LogStats());
     STAT_TIME("SplineCatmullRomFast::LogStats", SplineCatmullRomFast::LogStats());
+    STAT_TIME("UIFontRenderFast::LogStats", UIFontRenderFast::LogStats());
     STAT_TIME("PlaneFromPointsFast::LogStats", PlaneFromPointsFast::LogStats());
     STAT_TIME("MatrixAdjugateFast::LogStats", MatrixAdjugateFast::LogStats());
     STAT_TIME("SplineSegLengthFast::LogStats", SplineSegLengthFast::LogStats());
@@ -9127,6 +9129,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     CollisionClipVertsBox::Init();
     TerrainAlphaUnpackFast::Init();
     SplineCatmullRomFast::Init();
+    UIFontRenderFast::Init();
     PlaneFromPointsFast::Init();
     MatrixAdjugateFast::Init();
     SplineSegLengthFast::Init();
@@ -12232,6 +12235,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             CollisionClipVertsBox::Shutdown();
             TerrainAlphaUnpackFast::Shutdown();
             SplineCatmullRomFast::Shutdown();
+            UIFontRenderFast::Shutdown();
             PlaneFromPointsFast::Shutdown();
             MatrixAdjugateFast::Shutdown();
             SplineSegLengthFast::Shutdown();

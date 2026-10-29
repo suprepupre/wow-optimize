@@ -830,6 +830,7 @@ namespace Config {
         bool OptCollisionClipVertsBox = true;
         bool OptTerrainAlphaUnpackFast = true;
         bool OptSplineCatmullRomFast = true;
+        bool OptUIFontRenderFast = true;
     };
 
 
