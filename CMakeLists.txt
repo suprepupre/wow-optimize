@@ -947,6 +947,16 @@ add_library(wow_optimize SHARED
     src/simd_math/ui_font_render_fast.h
     src/simd_math/script_events_fast.cpp
     src/simd_math/script_events_fast.h
+    src/hooks_subsystems/gx_state_sync_fast.cpp
+    src/hooks_subsystems/gx_state_sync_fast.h
+    src/simd_math/collision_bsp_reject_sse2.cpp
+    src/simd_math/collision_bsp_reject_sse2.h
+    src/simd_math/m2_skinning_sse2_fast.cpp
+    src/simd_math/m2_skinning_sse2_fast.h
+    src/hooks_subsystems/anim_lod_fast.cpp
+    src/hooks_subsystems/anim_lod_fast.h
+    src/runtime_vm/ui_frame_cull_fast.cpp
+    src/runtime_vm/ui_frame_cull_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")

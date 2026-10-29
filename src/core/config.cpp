@@ -349,6 +349,11 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "SplineCatmullRomFast", &Settings::OptSplineCatmullRomFast },
     { "Graphics_Sound", "UIFontRenderFast", &Settings::OptUIFontRenderFast },
     { "Combat_Net", "ScriptEventsFast", &Settings::OptScriptEventsFast },
+    { "Graphics_Sound", "GxStateSyncFast", &Settings::OptGxStateSyncFast },
+    { "Graphics_Sound", "CollisionBspRejectFast", &Settings::OptCollisionBspRejectFast },
+    { "Graphics_Sound", "M2SkinningSse2Fast", &Settings::OptM2SkinningSse2Fast },
+    { "Graphics_Sound", "AnimLodFast", &Settings::OptAnimLodFast },
+    { "UI_Lua", "UIFrameCullFast", &Settings::OptUIFrameCullFast },
 };
 
 
@@ -996,7 +1001,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptM2ShadowBatchFast    = GetPrivateProfileIntA("Graphics_Sound", "M2ShadowBatchFast", 0, iniPath.c_str()) != 0;
         g_settings.OptParallelParticles    = GetPrivateProfileIntA("Graphics_Sound", "ParallelParticles", 0, iniPath.c_str()) != 0;
         g_settings.OptM2ParallelRoots      = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelRoots", 1, iniPath.c_str()) != 0;
-        g_settings.OptM2ParallelChildren   = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelChildren", 0, iniPath.c_str()) != 0;
+        g_settings.OptM2ParallelChildren   = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelChildren", 1, iniPath.c_str()) != 0;
         g_settings.OptNameplateParallel    = GetPrivateProfileIntA("Graphics_Sound", "NameplateParallel", 0, iniPath.c_str()) != 0;
         g_settings.OptGrassParallel        = GetPrivateProfileIntA("Graphics_Sound", "GrassParallel", 0, iniPath.c_str()) != 0;
         g_settings.OptTerrainVertexFast    = GetPrivateProfileIntA("Graphics_Sound", "TerrainVertexFast", 0, iniPath.c_str()) != 0;
@@ -1073,6 +1078,32 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptUIStrataOcclusionFast = GetPrivateProfileIntA("UI_Lua", "UIStrataOcclusionFast", 0, iniPath.c_str()) != 0;
         g_settings.OptM2SkinningFast = GetPrivateProfileIntA("Graphics_Sound", "M2SkinningFast", 0, iniPath.c_str()) != 0;
         g_settings.OptDistanceFast   = GetPrivateProfileIntA("Graphics_Sound", "DistanceFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptTransformDirectionFast = GetPrivateProfileIntA("Graphics_Sound", "TransformDirectionFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptM2BoneBlendFast = GetPrivateProfileIntA("Graphics_Sound", "M2BoneBlendFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptTrigApproxFast = GetPrivateProfileIntA("Graphics_Sound", "TrigApproxFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptGxBlitFast = GetPrivateProfileIntA("Graphics_Sound", "GxBlitFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptInsideFrustumFast = GetPrivateProfileIntA("Graphics_Sound", "InsideFrustumFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptAaBoxOpsFast = GetPrivateProfileIntA("Graphics_Sound", "AaBoxOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptM2LightingMatchFast = GetPrivateProfileIntA("Graphics_Sound", "M2LightingMatchFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptCameraNearestCornerFast = GetPrivateProfileIntA("Graphics_Sound", "CameraNearestCornerFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptMatrixDeterminantFast = GetPrivateProfileIntA("Graphics_Sound", "MatrixDeterminantFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptRectOpsFast = GetPrivateProfileIntA("Graphics_Sound", "RectOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptAaSphereOpsFast = GetPrivateProfileIntA("Graphics_Sound", "AaSphereOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptVectorRayOpsFast = GetPrivateProfileIntA("Graphics_Sound", "VectorRayOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptMat33QuatOpsFast = GetPrivateProfileIntA("Graphics_Sound", "Mat33QuatOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptAaBoxMultiOpsFast = GetPrivateProfileIntA("Graphics_Sound", "AaBoxMultiOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptMat44AffineOpsFast = GetPrivateProfileIntA("Graphics_Sound", "Mat44AffineOpsFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptTerrainChunkIntersectFast = GetPrivateProfileIntA("Graphics_Sound", "TerrainChunkIntersectFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptCollisionClipVertsBox = GetPrivateProfileIntA("Graphics_Sound", "CollisionClipVertsBox", 1, iniPath.c_str()) != 0;
+        g_settings.OptTerrainAlphaUnpackFast = GetPrivateProfileIntA("Graphics_Sound", "TerrainAlphaUnpackFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptSplineCatmullRomFast = GetPrivateProfileIntA("Graphics_Sound", "SplineCatmullRomFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptUIFontRenderFast = GetPrivateProfileIntA("Graphics_Sound", "UIFontRenderFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptScriptEventsFast = GetPrivateProfileIntA("Combat_Net", "ScriptEventsFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptGxStateSyncFast = GetPrivateProfileIntA("Graphics_Sound", "GxStateSyncFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptCollisionBspRejectFast = GetPrivateProfileIntA("Graphics_Sound", "CollisionBspRejectFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptM2SkinningSse2Fast = GetPrivateProfileIntA("Graphics_Sound", "M2SkinningSse2Fast", 1, iniPath.c_str()) != 0;
+        g_settings.OptAnimLodFast = GetPrivateProfileIntA("Graphics_Sound", "AnimLodFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptUIFrameCullFast = GetPrivateProfileIntA("UI_Lua", "UIFrameCullFast", 1, iniPath.c_str()) != 0;
     }
 
 }

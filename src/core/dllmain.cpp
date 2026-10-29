@@ -180,6 +180,11 @@
 #include "simd_math/spline_catmull_rom_fast.h"
 #include "simd_math/ui_font_render_fast.h"
 #include "simd_math/script_events_fast.h"
+#include "hooks_subsystems/gx_state_sync_fast.h"
+#include "simd_math/collision_bsp_reject_sse2.h"
+#include "simd_math/m2_skinning_sse2_fast.h"
+#include "hooks_subsystems/anim_lod_fast.h"
+#include "runtime_vm/ui_frame_cull_fast.h"
 #include "simd_math/plane_from_points_fast.h"
 #include "simd_math/matrix_adjugate_fast.h"
 #include "simd_math/spline_seg_length_fast.h"
@@ -6297,6 +6302,11 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("SplineCatmullRomFast::LogStats", SplineCatmullRomFast::LogStats());
     STAT_TIME("UIFontRenderFast::LogStats", UIFontRenderFast::LogStats());
     STAT_TIME("ScriptEventsFast::LogStats", ScriptEventsFast::LogStats());
+    STAT_TIME("GxStateSyncFast::LogStats", GxStateSyncFast::LogStats());
+    STAT_TIME("CollisionBspRejectSSE2::LogStats", CollisionBspRejectSSE2::LogStats());
+    STAT_TIME("M2SkinningSSE2Fast::LogStats", M2SkinningSSE2Fast::LogStats());
+    STAT_TIME("AnimLodFast::LogStats", AnimLodFast::LogStats());
+    STAT_TIME("UIFrameCullFast::LogStats", UIFrameCullFast::LogStats());
     STAT_TIME("PlaneFromPointsFast::LogStats", PlaneFromPointsFast::LogStats());
     STAT_TIME("MatrixAdjugateFast::LogStats", MatrixAdjugateFast::LogStats());
     STAT_TIME("SplineSegLengthFast::LogStats", SplineSegLengthFast::LogStats());
@@ -9133,6 +9143,11 @@ static DWORD WINAPI MainThread(LPVOID param) {
     SplineCatmullRomFast::Init();
     UIFontRenderFast::Init();
     ScriptEventsFast::Init();
+    GxStateSyncFast::Init();
+    CollisionBspRejectSSE2::Init();
+    M2SkinningSSE2Fast::Init();
+    AnimLodFast::Init();
+    UIFrameCullFast::Init();
     PlaneFromPointsFast::Init();
     MatrixAdjugateFast::Init();
     SplineSegLengthFast::Init();
@@ -12240,6 +12255,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             SplineCatmullRomFast::Shutdown();
             UIFontRenderFast::Shutdown();
             ScriptEventsFast::Shutdown();
+            GxStateSyncFast::Shutdown();
+            CollisionBspRejectSSE2::Shutdown();
+            M2SkinningSSE2Fast::Shutdown();
+            AnimLodFast::Shutdown();
+            UIFrameCullFast::Shutdown();
             PlaneFromPointsFast::Shutdown();
             MatrixAdjugateFast::Shutdown();
             SplineSegLengthFast::Shutdown();

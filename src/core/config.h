@@ -733,7 +733,7 @@ namespace Config {
         bool OptM2ShadowBatchFast = false;
         bool OptParallelParticles = false;
         bool OptM2ParallelRoots = true;
-        bool OptM2ParallelChildren = false;
+        bool OptM2ParallelChildren = true;
         bool OptNameplateParallel = false;
         bool OptGrassParallel = false;
         bool OptTerrainVertexFast = false;
@@ -832,6 +832,11 @@ namespace Config {
         bool OptSplineCatmullRomFast = true;
         bool OptUIFontRenderFast = true;
         bool OptScriptEventsFast = true;
+        bool OptGxStateSyncFast = true;
+        bool OptCollisionBspRejectFast = true;
+        bool OptM2SkinningSse2Fast = true;
+        bool OptAnimLodFast = true;
+        bool OptUIFrameCullFast = true;
     };
 
 
