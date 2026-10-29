@@ -344,6 +344,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "AaBoxMultiOpsFast", &Settings::OptAaBoxMultiOpsFast },
     { "Graphics_Sound", "Mat44AffineOpsFast", &Settings::OptMat44AffineOpsFast },
     { "Graphics_Sound", "TerrainChunkIntersectFast", &Settings::OptTerrainChunkIntersectFast },
+    { "Graphics_Sound", "CollisionClipVertsBox", &Settings::OptCollisionClipVertsBox },
 };
 
 
