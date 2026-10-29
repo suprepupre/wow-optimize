@@ -157,6 +157,7 @@
 #include "simd_math/spline_interp_fast.h"
 #include "simd_math/spline_deriv_fast.h"
 #include "simd_math/m2_skinning_fast.h"
+#include "simd_math/m2_skinning_40b_fast.h"
 #include "simd_math/distance_fast.h"
 #include "simd_math/transform_direction_fast.h"
 #include "simd_math/m2_bone_blend_fast.h"
@@ -6265,6 +6266,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("SplineInterpFast::LogStats", SplineInterpFast::LogStats());
     STAT_TIME("SplineDerivFast::LogStats", SplineDerivFast::LogStats());
     STAT_TIME("M2SkinningFast::LogStats", M2SkinningFast::LogStats());
+    STAT_TIME("M2Skinning40BFast::LogStats", M2Skinning40BFast::LogStats());
     STAT_TIME("DistanceFast::LogStats", DistanceFast::LogStats());
     STAT_TIME("TransformDirectionFast::LogStats", TransformDirectionFast::LogStats());
     STAT_TIME("M2BoneBlendFast::LogStats", M2BoneBlendFast::LogStats());
@@ -9090,6 +9092,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     SplineInterpFast::Init();
     SplineDerivFast::Init();
     M2SkinningFast::Init();
+    M2Skinning40BFast::Init();
     DistanceFast::Init();
     TransformDirectionFast::Init();
     M2BoneBlendFast::Init();
@@ -12190,6 +12193,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             SplineInterpFast::Shutdown();
             SplineDerivFast::Shutdown();
             M2SkinningFast::Shutdown();
+    M2Skinning40BFast::Shutdown();
             DistanceFast::Shutdown();
             TransformDirectionFast::Shutdown();
             M2BoneBlendFast::Shutdown();

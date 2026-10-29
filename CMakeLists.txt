@@ -751,6 +751,8 @@ add_library(wow_optimize SHARED
     src/simd_math/spline_deriv_fast.h
     src/simd_math/m2_skinning_fast.cpp
     src/simd_math/m2_skinning_fast.h
+    src/simd_math/m2_skinning_40b_fast.cpp
+    src/simd_math/m2_skinning_40b_fast.h
     src/simd_math/distance_fast.cpp
     src/simd_math/distance_fast.h
     src/simd_math/transform_direction_fast.cpp
