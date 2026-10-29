@@ -348,6 +348,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "TerrainAlphaUnpackFast", &Settings::OptTerrainAlphaUnpackFast },
     { "Graphics_Sound", "SplineCatmullRomFast", &Settings::OptSplineCatmullRomFast },
     { "Graphics_Sound", "UIFontRenderFast", &Settings::OptUIFontRenderFast },
+    { "Combat_Net", "ScriptEventsFast", &Settings::OptScriptEventsFast },
 };
 
 

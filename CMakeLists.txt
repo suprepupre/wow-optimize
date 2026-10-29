@@ -945,6 +945,8 @@ add_library(wow_optimize SHARED
     src/simd_math/spline_catmull_rom_fast.h
     src/simd_math/ui_font_render_fast.cpp
     src/simd_math/ui_font_render_fast.h
+    src/simd_math/script_events_fast.cpp
+    src/simd_math/script_events_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")

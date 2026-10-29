@@ -831,6 +831,7 @@ namespace Config {
         bool OptTerrainAlphaUnpackFast = true;
         bool OptSplineCatmullRomFast = true;
         bool OptUIFontRenderFast = true;
+        bool OptScriptEventsFast = true;
     };
 
 
