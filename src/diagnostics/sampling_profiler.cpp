@@ -408,6 +408,7 @@ static void BuildKnownFuncTable() {
         { 0x005FEC70,    60, "C3Vector::Cross" },
         { 0x005FECB0,    58, "CBox::Scale" },
         { 0x005FED20,    84, "VectorMatrixRotate" },
+        { 0x007D8840,  1460, "CMapChunk::Intersect" },
         { 0x00821A20,  5658, "M2_DrawBatchBuilder" },
         { 0x00960D20,   154, "Lua_Model_SetLight" },
         { 0x00979110,    84, "CQuaternion::Normalize" },

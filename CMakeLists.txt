@@ -933,6 +933,8 @@ add_library(wow_optimize SHARED
     src/simd_math/m2_particle_emitter_matrix_fast.h
     src/simd_math/mat44_affine_ops_fast.cpp
     src/simd_math/mat44_affine_ops_fast.h
+    src/simd_math/terrain_chunk_intersect_fast.cpp
+    src/simd_math/terrain_chunk_intersect_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")
