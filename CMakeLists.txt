@@ -941,6 +941,8 @@ add_library(wow_optimize SHARED
     src/simd_math/collision_clip_verts_box_sse2.h
     src/simd_math/terrain_alpha_unpack_fast.cpp
     src/simd_math/terrain_alpha_unpack_fast.h
+    src/simd_math/spline_catmull_rom_fast.cpp
+    src/simd_math/spline_catmull_rom_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")
