@@ -2126,8 +2126,7 @@ namespace WowOptimizeLauncher {
 
         private Control MakeCircleBanner() {
             DoubleBufferedPanel banner = new DoubleBufferedPanel();
-            int bannerWidth = (fixesFlow != null && fixesFlow.Width > 50) ? fixesFlow.Width - 30 : 640;
-            banner.Size = new Size(bannerWidth, 54);
+            banner.Height = 56;
             banner.BackColor = Color.FromArgb(28, 24, 16);
             banner.Margin = new Padding(6, 4, 6, 8);
             banner.Paint += delegate(object sender, PaintEventArgs pe) {
@@ -2140,29 +2139,27 @@ namespace WowOptimizeLauncher {
             titleLabel.Text = "WoW Circle / Private Server Compatibility";
             titleLabel.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
             titleLabel.ForeColor = Color.FromArgb(255, 193, 7);
-            titleLabel.Location = new Point(14, 7);
+            titleLabel.Location = new Point(14, 8);
             titleLabel.AutoSize = true;
             titleLabel.BackColor = Color.Transparent;
             banner.Controls.Add(titleLabel);
 
             Label textLabel = new Label();
-            textLabel.Text = "Playing on WoW Circle? Enable '[WoW Circle] Server Packet Sync Compatibility' to prevent disconnects on zone transitions.";
+            textLabel.Text = "Playing on WoW Circle? Enable '[WoW Circle] Server Packet Sync Compatibility' below to prevent disconnects on zone transitions.";
             textLabel.Font = new Font("Segoe UI", 8f, FontStyle.Regular);
             textLabel.ForeColor = Color.FromArgb(215, 225, 240);
-            textLabel.Location = new Point(14, 26);
+            textLabel.Location = new Point(14, 28);
             textLabel.AutoSize = false;
             textLabel.AutoEllipsis = true;
-            textLabel.Size = new Size(bannerWidth - 165, 22);
             textLabel.BackColor = Color.Transparent;
             banner.Controls.Add(textLabel);
 
+            DarkButton btnToggle = null;
             if (settingsMap != null && settingsMap.ContainsKey("[WoW Circle] Server Packet Sync Compatibility")) {
                 SettingItem item = settingsMap["[WoW Circle] Server Packet Sync Compatibility"];
-                DarkButton btnToggle = new DarkButton(Color.FromArgb(255, 193, 7), false);
+                btnToggle = new DarkButton(Color.FromArgb(255, 193, 7), false);
                 btnToggle.Font = new Font("Segoe UI", 8f, FontStyle.Bold);
                 btnToggle.Size = new Size(130, 28);
-                btnToggle.Location = new Point(bannerWidth - 145, 13);
-                btnToggle.Anchor = AnchorStyles.Top | AnchorStyles.Right;
                 bool isChecked = item.Ctrl != null && item.Ctrl.Checked;
                 btnToggle.Text = isChecked ? "ENABLED" : "ENABLE SYNC";
                 btnToggle.Click += delegate {
@@ -2174,6 +2171,23 @@ namespace WowOptimizeLauncher {
                 };
                 banner.Controls.Add(btnToggle);
             }
+
+            Action updateLayout = delegate {
+                int bw = (fixesFlow != null && fixesFlow.ClientSize.Width > 50) ? fixesFlow.ClientSize.Width - 24 : 640;
+                banner.Width = bw;
+                if (btnToggle != null) {
+                    btnToggle.Location = new Point(banner.ClientSize.Width - btnToggle.Width - 14, 14);
+                    textLabel.Size = new Size(Math.Max(100, btnToggle.Left - 24), 22);
+                } else {
+                    textLabel.Size = new Size(Math.Max(100, banner.ClientSize.Width - 28), 22);
+                }
+            };
+
+            banner.Resize += delegate { updateLayout(); };
+            if (fixesFlow != null) {
+                fixesFlow.ClientSizeChanged += delegate { updateLayout(); };
+            }
+            updateLayout();
 
             return banner;
         }

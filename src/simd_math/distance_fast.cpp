@@ -66,7 +66,7 @@ struct C3Segment{ C3Vector b, t; };
 typedef float (__cdecl* Distance3D_fn)(const CAaBox* box, const C3Vector* point);
 typedef float (__cdecl* DistanceSq2D_fn)(const CAaBox* box, const C2Vector* point);
 typedef float (__cdecl* DistanceSq3D_fn)(const CAaBox* box, const C3Vector* point);
-typedef float (__cdecl* DistanceSqSeg_fn)(const C3Segment* segment, const C3Vector* point, float* t);
+typedef double (__cdecl* DistanceSqSeg_fn)(const C3Segment* segment, const C3Vector* point, float* t);
 typedef float (__cdecl* DistanceSqEdge_fn)(const C2Vector* a, const C2Vector* b, const C2Vector* point);
 
 Distance3D_fn     orig_Distance3D     = nullptr;
@@ -149,7 +149,7 @@ __forceinline float Fast_DistanceSq3D_Impl(const CAaBox* box, const C3Vector* pt
     return (float)((dx * dx + dy * dy) + dz * dz);
 }
 
-__forceinline float Fast_DistanceSqSeg_Impl(const C3Segment* segment, const C3Vector* point, float* t) {
+__forceinline double Fast_DistanceSqSeg_Impl(const C3Segment* segment, const C3Vector* point, float* t) {
     const double dx = (double)point->x - (double)segment->b.x;
     const double dy = (double)point->y - (double)segment->b.y;
     const double dz = (double)point->z - (double)segment->b.z;
@@ -185,7 +185,7 @@ __forceinline float Fast_DistanceSqSeg_Impl(const C3Segment* segment, const C3Ve
         *t = (float)param;
     }
 
-    return (float)((diff_x * diff_x + diff_y * diff_y) + diff_z * diff_z);
+    return ((diff_x * diff_x + diff_y * diff_y) + diff_z * diff_z);
 }
 
 __forceinline float Fast_DistanceSqEdge_Impl(const C2Vector* a, const C2Vector* b, const C2Vector* point) {
@@ -313,36 +313,33 @@ float __cdecl Hooked_DistanceSq3D(const CAaBox* box, const C3Vector* point) {
     return fast_res;
 }
 
-float __cdecl Hooked_DistanceSqSeg(const C3Segment* segment, const C3Vector* point, float* t) {
+static double __cdecl Hooked_DistanceSqSeg_Body(const C3Segment* segment, const C3Vector* point, float* t) {
     if (g_dead_distsqseg || !segment || !point) {
         return orig_DistanceSqSeg(segment, point, t);
     }
 
     const unsigned long long call_idx = ++g_calls_distsqseg;
     float fast_t = 0.0f;
-    const float fast_res = Fast_DistanceSqSeg_Impl(segment, point, t ? &fast_t : nullptr);
+    const double fast_res = Fast_DistanceSqSeg_Impl(segment, point, t ? &fast_t : nullptr);
 
     if (call_idx <= kVerifyFirst || ((call_idx & kResampleMask) == 0)) {
         ++g_verified_distsqseg;
         float orig_t = 0.0f;
-        const float orig_res = orig_DistanceSqSeg(segment, point, t ? &orig_t : nullptr);
+        const double orig_res = orig_DistanceSqSeg(segment, point, t ? &orig_t : nullptr);
 
-        uint32_t uf = 0;
-        uint32_t uo = 0;
-        memcpy(&uf, &fast_res, sizeof(uint32_t));
-        memcpy(&uo, &orig_res, sizeof(uint32_t));
+        const double diff = std::fabs(fast_res - orig_res);
+        const double abs_orig = std::fabs(orig_res);
+        const double rel_tol = 1e-4 * ((abs_orig > 1.0) ? abs_orig : 1.0);
+        const bool t_match = !t || (std::fabs(fast_t - orig_t) <= 1e-4f);
 
-        if (uf != uo) {
-            const int diff = (int)uf - (int)uo;
-            if (diff < -1 || diff > 1) {
-                if (++g_mismatch_distsqseg == 1) {
-                    Log("[DistanceFast] DistanceSqSeg MISMATCH at call %llu: fast=%f (0x%08X), orig=%f (0x%08X), retiring hook",
-                        call_idx, fast_res, uf, orig_res, uo);
-                    g_dead_distsqseg = true;
-                }
-                if (t) *t = orig_t;
-                return orig_res;
+        if (diff > rel_tol || !t_match) {
+            if (++g_mismatch_distsqseg == 1) {
+                Log("[DistanceFast] DistanceSqSeg MISMATCH at call %llu: fast=%f, orig=%f, retiring hook",
+                    call_idx, fast_res, orig_res);
+                g_dead_distsqseg = true;
             }
+            if (t) *t = orig_t;
+            return orig_res;
         }
     }
 
@@ -350,6 +347,23 @@ float __cdecl Hooked_DistanceSqSeg(const C3Segment* segment, const C3Vector* poi
         *t = fast_t;
     }
     return fast_res;
+}
+
+// Blizzard's /LTCG compiler in WoW.exe optimized sub_984DB0 by keeping its outer polygon
+// vertex pointer in EDX across calls to sub_984CE0 (which in stock binary never writes to EDX).
+// Standard __cdecl permits clobbering EDX, so modern MSVC uses EDX inside Hooked_DistanceSqSeg_Body.
+// This naked trampoline guarantees EDX is strictly preserved across the hook invocation.
+__declspec(naked) double __cdecl Hooked_DistanceSqSeg(const C3Segment* segment, const C3Vector* point, float* t) {
+    __asm {
+        push edx
+        push dword ptr [esp + 16] // t
+        push dword ptr [esp + 16] // point
+        push dword ptr [esp + 16] // segment
+        call Hooked_DistanceSqSeg_Body
+        add esp, 12
+        pop edx
+        ret
+    }
 }
 
 float __cdecl Hooked_DistanceSqEdge(const C2Vector* a, const C2Vector* b, const C2Vector* point) {

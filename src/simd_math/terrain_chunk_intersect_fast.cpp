@@ -329,7 +329,9 @@ __declspec(safebuffers) static void __fastcall Hook_TerrainChunkIntersect(
             float dny = std::fabs(f.plane.n.y - c.plane.n.y);
             float dnz = std::fabs(f.plane.n.z - c.plane.n.z);
             float dd  = std::fabs(f.plane.d - c.plane.d);
-            if (dnx > 1e-4f || dny > 1e-4f || dnz > 1e-4f || dd > 1e-3f) {
+            float abs_d = std::fabs(c.plane.d);
+            float max_d = (abs_d > 1.0f) ? abs_d : 1.0f;
+            if (dnx > 1e-4f || dny > 1e-4f || dnz > 1e-4f || dd > (1e-4f * max_d)) {
                 Log("[TerrainChunkIntersectFast] Plane mismatch at facet %u! n=(%f,%f,%f) vs (%f,%f,%f), d=%f vs %f. Retiring hook.",
                     i, f.plane.n.x, f.plane.n.y, f.plane.n.z, c.plane.n.x, c.plane.n.y, c.plane.n.z, f.plane.d, c.plane.d);
                 g_dead.store(true, std::memory_order_relaxed);
