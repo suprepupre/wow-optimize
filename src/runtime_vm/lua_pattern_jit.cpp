@@ -237,6 +237,20 @@ static CompiledPattern CompilePattern(const char* p, size_t pLen) {
         return cp;
     }
 
+    // 6b. Single class plus without parens: %d+, %w+, %a+, %x+
+    if (pLen == 3 && p[0] == '%' && p[2] == '+') {
+        if (p[1] == 'd') { cp.kind = JitKind::kDigits; return cp; }
+        if (p[1] == 'w') { cp.kind = JitKind::kWord;   return cp; }
+        if (p[1] == 'a') { cp.kind = JitKind::kAlpha;  return cp; }
+        if (p[1] == 'x') { cp.kind = JitKind::kHex;    return cp; }
+    }
+    if (pLen == 4 && p[0] == '^' && p[1] == '%' && p[3] == '+') {
+        if (p[2] == 'd') { cp.kind = JitKind::kDigitsAnchoredStart; cp.anchoredStart = true; return cp; }
+        if (p[2] == 'w') { cp.kind = JitKind::kWord;   cp.anchoredStart = true; return cp; }
+        if (p[2] == 'a') { cp.kind = JitKind::kAlpha;  cp.anchoredStart = true; return cp; }
+        if (p[2] == 'x') { cp.kind = JitKind::kHex;    cp.anchoredStart = true; return cp; }
+    }
+
     // 7. Digits: (%d+) with optional anchors and literal prefix
     if (pLen == 5 && memcmp(p, "(%d+)", 5) == 0) {
         cp.kind = JitKind::kDigits;
