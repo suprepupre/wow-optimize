@@ -4,6 +4,7 @@
 // ============================================================================
 
 #include "lua_fastpath.h"
+#include "lua_pattern_jit.h"
 #include <cstdint>
 #include <cstring>
 #include <emmintrin.h>
@@ -803,6 +804,7 @@ static bool PushSubstring(lua_State* L, const char* s, size_t len) {
     return true;
 }
 static lua_CFunction_t orig_str_find = nullptr;
+static lua_CFunction_t orig_str_match = nullptr;
 
 static int __cdecl Hooked_StrFind(lua_State* L) {
     int nargs = lua_gettop_(L);
@@ -814,74 +816,24 @@ static int __cdecl Hooked_StrFind(lua_State* L) {
     size_t sLen = 0, pLen = 0;
     const char* s = lua_tolstring_(L, 1, &sLen);
     const char* p = lua_tolstring_(L, 2, &pLen);
-    if (!s || !p || HasEmbeddedNul(s, sLen) || HasEmbeddedNul(p, pLen)) return orig_str_find(L);
-
-    // Fast path applies when the caller passed plain=true, OR the pattern has no
-    // Lua magic characters. A magic-free pattern matches exactly the same span as
-    // a plain substring search and produces no captures, so find returns the
-    // identical (start,end) pair without running the pattern matcher. This catches
-    // the very common string.find(s, "literal") call that omits the plain flag.
-    bool plainMode = (nargs >= 4 && lua_toboolean_(L, 4));
-    if (!plainMode && !IsPlainLiteralPattern(p, pLen)) {
-        g_findFallbacks++;
-        return orig_str_find(L);
-    }
+    if (!s || !p) return orig_str_find(L);
 
     int init = 1;
     if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
         init = (int)lua_tonumber_(L, 3);
 
-    if (init < 0) init = (int)sLen + init + 1;
-    if (init < 1) init = 1;
-    if (init > (int)sLen + 1) { lua_pushnil_(L); g_findPlainHits++; return 1; }
+    bool plainMode = (nargs >= 4 && lua_toboolean_(L, 4));
 
-    int startIdx = init - 1;
-
-    if (pLen == 0) {
-        lua_pushnumber_(L, (double)init);
-        lua_pushnumber_(L, (double)(init - 1));
+    LuaPatternJit::SetOrigFuncs(orig_str_match, orig_str_find);
+    int res = LuaPatternJit::Find(L, s, sLen, p, pLen, init, plainMode);
+    if (res >= 0) {
         g_findPlainHits++;
-        return 2;
+        return res;
     }
 
-    if (pLen > sLen - startIdx) { lua_pushnil_(L); g_findPlainHits++; return 1; }
-
-    const char* searchStart = s + startIdx;
-    size_t searchLen = sLen - startIdx;
-    const char* found = nullptr;
-
-    if (pLen == 1) {
-        found = (const char*)memchr(searchStart, p[0], searchLen);
-    } else {
-        found = strstr(searchStart, p);
-    }
-
-    if (found) {
-        int pos = (int)(found - s) + 1;
-        lua_pushnumber_(L, (double)pos);
-        lua_pushnumber_(L, (double)(pos + (int)pLen - 1));
-    } else {
-        lua_pushnil_(L);
-    }
-    g_findPlainHits++;
-    return found ? 2 : 1;
+    g_findFallbacks++;
+    return orig_str_find(L);
 }
-
-// Every pattern shape Hooked_StrMatch can serve, and nothing else. A superset
-// would only cost a subject scan; a subset would silently retire a fast path,
-// which is what a whitelist of exact lengths did on the first attempt - three
-// of the shapes below are not keyed on one. Kept next to the dispatch it
-// mirrors so the two are read together.
-static inline bool MatchPatternIsHandled(const char* p, size_t pLen) {
-    if (pLen <= 1) return true;                              // empty, and one char
-    if (pLen == 4 || pLen == 9 || pLen == 10) return true;   // the literal shapes
-    if (pLen >= 5 && pLen <= 6 &&
-        p[pLen - 2] == '%' && p[pLen - 1] == '+') return true;
-    if (p[0] == '^' && IsPlainLiteralPattern(p + 1, pLen - 1)) return true;
-    return IsPlainLiteralPattern(p, pLen);
-}
-
-static lua_CFunction_t orig_str_match = nullptr;
 
 static int __cdecl Hooked_StrMatch(lua_State* L) {
     int nargs = lua_gettop_(L);
@@ -900,228 +852,15 @@ static int __cdecl Hooked_StrMatch(lua_State* L) {
         return orig_str_match(L);
     }
 
-    // Decide on the pattern before reading the subject.
-    //
-    // A field session put 29,455,944 calls through here and took a fast path on
-    // 59,427 of them - one in five hundred. Every one of the other twenty-nine
-    // million walked the subject byte by byte looking for an embedded NUL, up
-    // to four kilobytes of it, to reach a pattern test that was never going to
-    // match. The pattern is capped at 256 bytes and usually a dozen.
-    //
-    // Handing an unhandled pattern straight to the client changes no result.
-    // The one outcome given up is the nil for an init past the end of the
-    // subject, which the client returns as well.
-    if (pLen > 256 || !MatchPatternIsHandled(p, pLen)) {
-        g_matchPatternMiss++;
-        g_matchFallbacks++;
-        return orig_str_match(L);
-    }
-
-    // Avoid long / binary strings for safety
-    if (sLen > 4096 || pLen > 256 || HasEmbeddedNul(s, sLen) || HasEmbeddedNul(p, pLen)) {
-        g_matchFallbacks++;
-        return orig_str_match(L);
-    }
-
     int init = 1;
     if (nargs >= 3 && lua_type_(L, 3) == LUA_TNUMBER)
         init = (int)lua_tonumber_(L, 3);
 
-    if (init < 0) init = (int)sLen + init + 1;
-    if (init < 1) init = 1;
-    if (init > (int)sLen + 1) {
-        lua_pushnil_(L);
+    LuaPatternJit::SetOrigFuncs(orig_str_match, orig_str_find);
+    int res = LuaPatternJit::Match(L, s, sLen, p, pLen, init);
+    if (res >= 0) {
         g_matchHits++;
-        return 1;
-    }
-
-    const char* searchStart = s + (init - 1);
-    size_t searchLen = sLen - (size_t)(init - 1);
-
-    // Empty pattern => empty match
-    if (pLen == 0) {
-        lua_pushstring_(L, "");
-        g_matchHits++;
-        return 1;
-    }
-
-// ================================================================
-    // Fast path for ^([^%s]+) — match first word/token
-    // Common in chat parsing: "extract first word from string"
-    // Pattern: ^ ( [ ^ % s ] + )
-    // Length: 10
-    // ================================================================
-    if (pLen == 10 &&
-        p[0] == '^' && p[1] == '(' && p[2] == '[' &&
-        p[3] == '^' && p[4] == '%' && p[5] == 's' &&
-        p[6] == ']' && p[7] == '+' && p[8] == ')') {
-        
-        if (init != 1) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-        
-        // Find first whitespace character (ASCII <= 32 covers space, tab, newline, etc.)
-        size_t end = 0;
-        while (end < sLen && (unsigned char)s[end] > 32) {
-            end++;
-        }
-
-        if (end > 0) {
-            // Match found: return the token
-            if (PushSubstring(L, s, end)) {
-                g_matchHits++;
-                return 1;
-            }
-        }
-        
-        // String starts with whitespace or is empty -> match fails (returns nil)
-        lua_pushnil_(L);
-        g_matchHits++;
-        return 1;
-    }
-
-    // ================================================================
-    // Fast path for ^(.-)%s*$ — trim trailing whitespace
-    // Common in UI text cleanup.
-    // Pattern: ^ ( . - ) % s * $
-    // Length: 9
-    // ================================================================
-    if (pLen == 9 &&
-        p[0] == '^' && p[1] == '(' && p[2] == '.' &&
-        p[3] == '-' && p[4] == ')' && p[5] == '%' &&
-        p[6] == 's' && p[7] == '*' && p[8] == '$') {
-        
-        if (init != 1) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-        
-        // Find last non-whitespace character
-        int last = (int)sLen - 1;
-        while (last >= 0 && (unsigned char)s[last] <= 32) {
-            last--;
-        }
-
-        // Return substring from 0 to last+1
-        // If last < 0, string is all whitespace, return ""
-        size_t len = (last < 0) ? 0 : (size_t)(last + 1);
-        if (PushSubstring(L, s, len)) {
-            g_matchHits++;
-            return 1;
-        }
-    }    
-
-    // Case 1: anchored literal "^literal"
-    if (pLen > 1 && p[0] == '^' && IsPlainLiteralPattern(p + 1, pLen - 1)) {
-        if (init != 1) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-        if ((pLen - 1) <= sLen && memcmp(s, p + 1, pLen - 1) == 0) {
-            if (PushSubstring(L, s, pLen - 1)) {
-                g_matchHits++;
-                return 1;
-            }
-        } else {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-
-        g_matchFallbacks++;
-        return orig_str_match(L);
-    }
-
-    // Case 2: anchored ASCII class "^%x+"
-    if (pLen == 4 && p[0] == '^' && p[1] == '%' && p[3] == '+') {
-        if (init != 1) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-
-        char cls = p[2];
-        if (cls == 'd' || cls == 'a' || cls == 'w' || cls == 'l' || cls == 'u' || cls == 's') {
-            size_t i = 0;
-            while (i < sLen && MatchAsciiClass((unsigned char)s[i], cls)) {
-                i++;
-            }
-
-            if (i == 0) {
-                lua_pushnil_(L);
-                g_matchHits++;
-                return 1;
-            }
-
-            if (PushSubstring(L, s, i)) {
-                g_matchHits++;
-                return 1;
-            }
-
-            g_matchFallbacks++;
-            return orig_str_match(L);
-        }
-    }
-
-
-    // Case 3: captured class (%d+), (%w+) - ONLY anchored (^%w+, ^%d+) is supported for safety (non-anchored requires scanning)
-    if (pLen >= 5 && pLen <= 6 && p[pLen-2] == '%' && p[pLen-1] == '+') {
-        int off = (p[0] == '^') ? 1 : 0;
-        if (off == 1 && (pLen - off) == 5 && p[off] == '(' && p[off+4] == ')') {
-            char cls = p[off+2];
-            if (cls == 'd' || cls == 'a' || cls == 'w' || cls == 'l' || cls == 'u') {
-                if (off && init != 1) { lua_pushnil_(L); g_matchHits++; return 1; }
-                const char* start = off ? searchStart : s + (init - 1);
-                size_t maxLen = off ? searchLen : sLen - (init - 1);
-                size_t i = 0;
-                while (i < maxLen && MatchAsciiClass((unsigned char)start[i], cls)) i++;
-                if (i > 0 && PushSubstring(L, start, i)) { g_matchHits++; return 1; }
-                lua_pushnil_(L); g_matchHits++; return 1;
-            }
-        }
-    }
-
-    // Case 3: plain literal pattern
-    if (IsPlainLiteralPattern(p, pLen)) {
-        if (pLen > searchLen) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-
-        const char* found = nullptr;
-
-        if (pLen == 1) {
-            found = (const char*)memchr(searchStart, p[0], searchLen);
-        } else {
-            size_t limit = searchLen - pLen + 1;
-            char first = p[0];
-            for (size_t i = 0; i < limit; i++) {
-                if (searchStart[i] == first &&
-                    memcmp(searchStart + i, p, pLen) == 0) {
-                    found = searchStart + i;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
-            lua_pushnil_(L);
-            g_matchHits++;
-            return 1;
-        }
-
-        if (PushSubstring(L, found, pLen)) {
-            g_matchHits++;
-            return 1;
-        }
-
-        g_matchFallbacks++;
-        return orig_str_match(L);
+        return res;
     }
 
     g_matchFallbacks++;
@@ -3586,6 +3325,7 @@ fallback:
 namespace LuaFastPath {
 
 bool Init() {
+    LuaPatternJit::Init();
     Log("[FastPath] ====================================");
     Log("[FastPath]  Lua Fast Path — Phase 1");
     Log("[FastPath] ====================================");
@@ -3931,6 +3671,7 @@ void LogStats() {
     }
     if (g_findPlainHits > 0 || g_findFallbacks > 0)
         Log("[FastPath] Find(plain): %ld fast, %ld fallback", g_findPlainHits, g_findFallbacks);
+    LuaPatternJit::LogStats();
     if (g_matchHits > 0 || g_matchFallbacks > 0)
         Log("[FastPath] Match: %ld fast, %ld fallback (%ld of those decided on "
             "the pattern alone, without reading the subject)",

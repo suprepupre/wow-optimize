@@ -510,6 +510,8 @@ add_library(wow_optimize SHARED
     src/runtime_vm/regex_cache.h
     src/runtime_vm/lua_bytecode_cache.cpp
     src/runtime_vm/lua_bytecode_cache.h
+    src/runtime_vm/lua_pattern_jit.cpp
+    src/runtime_vm/lua_pattern_jit.h
     src/hooks_subsystems/addon_preload.cpp
     src/hooks_subsystems/addon_preload.h
     src/hooks_subsystems/strstr_fast.cpp
@@ -1136,4 +1138,4 @@ target_compile_definitions(wow_loader PRIVATE
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
 )
-
+
