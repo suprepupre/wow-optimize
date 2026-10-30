@@ -174,9 +174,7 @@ __forceinline void ComputePlaneSSE(CFacet* facet) {
     float nz = e2y * e1x - e2x * e1y;
 
     float lenSq = nx * nx + ny * ny + nz * nz;
-    __m128 vlen = _mm_set_ss(lenSq);
-    __m128 vrsq = _mm_rsqrt_ss(vlen);
-    float scale = _mm_cvtss_f32(vrsq);
+    float scale = (lenSq > 1e-12f) ? (1.0f / std::sqrt(lenSq)) : 0.0f;
 
     nx *= scale;
     ny *= scale;

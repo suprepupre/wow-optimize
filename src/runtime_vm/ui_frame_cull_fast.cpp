@@ -79,6 +79,12 @@ void __fastcall Hooked_OnLayerUpdate(void* self, void* dummy_edx, float elapsedS
 bool Init() {
     if (!Config::g_settings.OptUIFrameCullFast) return true;
 
+    if (Config::g_settings.OptUIStrataOpt) {
+        Log("[UIFrameCullFast] Subsumed by UIStrataOpt on 0x%08X.", kTarget);
+        g_installed = true;
+        return true;
+    }
+
     if (memcmp(reinterpret_cast<const void*>(kTarget), kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
         Log("[UIFrameCullFast] Prologue mismatch at 0x%08X; hook aborted.", kTarget);
         return false;

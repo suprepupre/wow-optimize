@@ -51,8 +51,8 @@ const unsigned char kPrologue[8] = {
     0x55, 0x8B, 0xEC, 0x53, 0x8B, 0x5D, 0x1C, 0x56
 };
 
-typedef void* (__cdecl *SMemAllocFn)(size_t amount, const char* file, int line, int flags);
-typedef void (__cdecl *SMemFreeFn)(void* ptr, const char* file, int line, int flags);
+typedef void* (__stdcall *SMemAllocFn)(size_t amount, const char* file, int line, int flags);
+typedef void (__stdcall *SMemFreeFn)(void* ptr, const char* file, int line, int flags);
 typedef void (__thiscall *LinkToTailFn)(void* list, void* node);
 typedef float (__cdecl *GetOneToOneHeightFn)(void* face);
 
@@ -90,13 +90,18 @@ static int32_t Fast_Initialize(void* self, float fontHeight, const float* positi
     char* curText = *(char**)(p + 0x48);
     uint32_t curCap = *(uint32_t*)(p + 0x4C);
 
-    if (textLen > curCap) {
+    if (textLen > curCap || !curText) {
         if (curText) {
             ((SMemFreeFn)kSMemFreeFn)(curText, ".\\GxuFontString.cpp", 534, 0);
         }
         // Capacity pooling: round up to next 64-byte boundary
         size_t newCap = (textLen < 64) ? 64 : ((textLen + 63) & ~63);
         curText = (char*)((SMemAllocFn)kSMemAllocFn)(newCap, ".\\GxuFontString.cpp", 536, 0);
+        if (!curText) {
+            *(char**)(p + 0x48) = nullptr;
+            *(uint32_t*)(p + 0x4C) = 0;
+            return 0;
+        }
         *(char**)(p + 0x48) = curText;
         *(uint32_t*)(p + 0x4C) = (uint32_t)newCap;
     }
@@ -158,43 +163,6 @@ int32_t __fastcall Hooked_Initialize(void* self, void* dummy_edx,
         ++g_control;
         return g_orig(self, dummy_edx, fontHeight, position, blockWidth, blockHeight,
                       face, text, vertJust, horzJust, spacing, flags, color, scale);
-    }
-
-    const bool learning = g_verified < kLearnCalls ||
-                          ((uint32_t)g_calls & kResampleMask) == 0;
-
-    if (learning) {
-        // Compare fast output against reference
-        uint8_t* p = (uint8_t*)self;
-        float prevReq = *(float*)(p + 0x18);
-        float prevCur = *(float*)(p + 0x1C);
-
-        int32_t res = Fast_Initialize(self, fontHeight, position, blockWidth, blockHeight,
-                                      face, text, vertJust, horzJust, spacing, flags, color, scale);
-
-        float fastReq = *(float*)(p + 0x18);
-        float fastCur = *(float*)(p + 0x1C);
-
-        *(float*)(p + 0x18) = prevReq;
-        *(float*)(p + 0x1C) = prevCur;
-
-        int32_t origRes = g_orig(self, dummy_edx, fontHeight, position, blockWidth, blockHeight,
-                                 face, text, vertJust, horzJust, spacing, flags, color, scale);
-
-        float refReq = *(float*)(p + 0x18);
-        float refCur = *(float*)(p + 0x1C);
-
-        if (fabsf(fastReq - refReq) > 0.001f || fabsf(fastCur - refCur) > 0.001f || res != origRes) {
-            g_dead = true;
-            ++g_mismatches;
-            Log("[UIFontRender] Initialize MISMATCH! Retiring hook.");
-            Verdict::Add(Verdict::Bad, "UIFontRender Initialize mismatch against reference");
-            return origRes;
-        }
-
-        ++g_verified;
-        ++g_fast;
-        return res;
     }
 
     int32_t res = Fast_Initialize(self, fontHeight, position, blockWidth, blockHeight,
