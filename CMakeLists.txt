@@ -959,6 +959,12 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/anim_lod_fast.h
     src/runtime_vm/ui_frame_cull_fast.cpp
     src/runtime_vm/ui_frame_cull_fast.h
+    src/hooks_subsystems/texture_stream_fast.cpp
+    src/hooks_subsystems/texture_stream_fast.h
+    src/hooks_subsystems/heap_size_fast.cpp
+    src/hooks_subsystems/heap_size_fast.h
+    src/hooks_subsystems/mpq_inflate_fast.cpp
+    src/hooks_subsystems/mpq_inflate_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")

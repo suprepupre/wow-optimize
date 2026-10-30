@@ -185,6 +185,9 @@
 #include "simd_math/m2_skinning_sse2_fast.h"
 #include "hooks_subsystems/anim_lod_fast.h"
 #include "runtime_vm/ui_frame_cull_fast.h"
+#include "hooks_subsystems/texture_stream_fast.h"
+#include "hooks_subsystems/heap_size_fast.h"
+#include "hooks_subsystems/mpq_inflate_fast.h"
 #include "simd_math/plane_from_points_fast.h"
 #include "simd_math/matrix_adjugate_fast.h"
 #include "simd_math/spline_seg_length_fast.h"
@@ -6307,6 +6310,9 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("M2SkinningSSE2Fast::LogStats", M2SkinningSSE2Fast::LogStats());
     STAT_TIME("AnimLodFast::LogStats", AnimLodFast::LogStats());
     STAT_TIME("UIFrameCullFast::LogStats", UIFrameCullFast::LogStats());
+    STAT_TIME("TextureStreamFast::LogStats", TextureStreamFast::LogStats());
+    STAT_TIME("HeapSizeFast::LogStats", HeapSizeFast::LogStats());
+    STAT_TIME("MpqInflateFast::LogStats", MpqInflateFast::LogStats());
     STAT_TIME("PlaneFromPointsFast::LogStats", PlaneFromPointsFast::LogStats());
     STAT_TIME("MatrixAdjugateFast::LogStats", MatrixAdjugateFast::LogStats());
     STAT_TIME("SplineSegLengthFast::LogStats", SplineSegLengthFast::LogStats());
@@ -9148,6 +9154,9 @@ static DWORD WINAPI MainThread(LPVOID param) {
     M2SkinningSSE2Fast::Init();
     AnimLodFast::Init();
     UIFrameCullFast::Init();
+    TextureStreamFast::Init();
+    HeapSizeFast::Init();
+    MpqInflateFast::Init();
     PlaneFromPointsFast::Init();
     MatrixAdjugateFast::Init();
     SplineSegLengthFast::Init();
@@ -12260,6 +12269,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             M2SkinningSSE2Fast::Shutdown();
             AnimLodFast::Shutdown();
             UIFrameCullFast::Shutdown();
+            TextureStreamFast::Shutdown();
+            HeapSizeFast::Shutdown();
+            MpqInflateFast::Shutdown();
             PlaneFromPointsFast::Shutdown();
             MatrixAdjugateFast::Shutdown();
             SplineSegLengthFast::Shutdown();

@@ -449,6 +449,10 @@ extern "C" void __cdecl AnimCensus_NoteCall(void* This, int a2, int a3,
 
 bool Init() {
     if (!Config::g_settings.OptAnimCensus) return true;
+    if (Config::g_settings.OptM2ParallelRoots) {
+        Log("[AnimCensus] STANDING DOWN: M2ParallelRoots is active (parallel animation takes precedence over single-threaded census).");
+        return false;
+    }
 
     // AnimLod hooks this same function. Two of our modules on one address means
     // whichever installs first wins and the other logs what reads as a failure

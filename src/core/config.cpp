@@ -354,6 +354,9 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "M2SkinningSse2Fast", &Settings::OptM2SkinningSse2Fast },
     { "Graphics_Sound", "AnimLodFast", &Settings::OptAnimLodFast },
     { "UI_Lua", "UIFrameCullFast", &Settings::OptUIFrameCullFast },
+    { "Graphics_Sound", "TextureStreamFast", &Settings::OptTextureStreamFast },
+    { "General", "HeapSizeFast", &Settings::OptHeapSizeFast },
+    { "Combat_Net", "MpqInflateFast", &Settings::OptMpqInflateFast },
 };
 
 
@@ -406,6 +409,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         }
 
         Log("[Config]   [General] SleepPrecisionValue=%d", g_settings.SleepPrecisionValue);
+        Log("[Config]   [Graphics_Sound] TextureStreamBudgetMB=%u", g_settings.TextureStreamBudgetMB);
         Log("[Config]   [General] FlightRecorderKey=0x%02X", g_settings.FlightRecorderKey);
         Log("[Config]   [General] CameraReplayKey=0x%02X", g_settings.CameraReplayKey);
         Log("[Config]   [General] AbTestSubject='%s' every %d ms",
@@ -1104,6 +1108,10 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptM2SkinningSse2Fast = GetPrivateProfileIntA("Graphics_Sound", "M2SkinningSse2Fast", 1, iniPath.c_str()) != 0;
         g_settings.OptAnimLodFast = GetPrivateProfileIntA("Graphics_Sound", "AnimLodFast", 1, iniPath.c_str()) != 0;
         g_settings.OptUIFrameCullFast = GetPrivateProfileIntA("UI_Lua", "UIFrameCullFast", 1, iniPath.c_str()) != 0;
+        g_settings.TextureStreamBudgetMB = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamBudgetMB", 64, iniPath.c_str());
+        g_settings.OptTextureStreamFast = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptHeapSizeFast = GetPrivateProfileIntA("General", "HeapSizeFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptMpqInflateFast = GetPrivateProfileIntA("Combat_Net", "MpqInflateFast", 1, iniPath.c_str()) != 0;
     }
 
 }

@@ -375,9 +375,7 @@ void Init() {
     }
     if (Config::g_settings.OptAnimLod || Config::g_settings.OptM2AnimStride || Config::g_settings.OptM2AnimReuse ||
         Config::g_settings.OptAnimCensus || Config::g_settings.OptAnimTrackCensus) {
-        Log("[M2ParallelRoots] NOT active: AnimLod, M2AnimStride, M2AnimReuse, AnimCensus or AnimTrackCensus is on, "
-            "and each keeps per-model tables that are not built for more threads than the client's two.");
-        return;
+        Log("[M2ParallelRoots] Taking precedence over AnimLod/M2AnimStride/M2AnimReuse/AnimCensus; standing down conflicting single-threaded passes.");
     }
     const Site sites[] = {
         { kSiteDispatch,  kDispatchFn, (const void*)&Site_Dispatch,   "dispatch" },

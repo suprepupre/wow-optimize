@@ -18,6 +18,7 @@ namespace Config {
         bool OptSleepPrecision = true;
         bool OptTimerResolution = true;
         int SleepPrecisionValue = 8;
+        int TextureStreamBudgetMB = 64;
         // One log per session preserves earlier runs, which is the whole point
         // when a tester is comparing two configurations - a single overwritten
         // file keeps only the last one. Turning this off restores that older
@@ -837,6 +838,9 @@ namespace Config {
         bool OptM2SkinningSse2Fast = true;
         bool OptAnimLodFast = true;
         bool OptUIFrameCullFast = true;
+        bool OptTextureStreamFast = true;
+        bool OptHeapSizeFast = true;
+        bool OptMpqInflateFast = true;
     };
 
 
