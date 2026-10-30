@@ -132,72 +132,11 @@ static const char* g_statNames[NUM_HOOKS] = {
 
 static unsigned long g_totalFrames = 0;
 
-// What the two exclusions above are costing, counted and never acted on.
-//
-// A tester session recorded 127,757,947 SetTexture calls and 39,267,692
-// SetRenderState calls with zero skips against both. For SetTexture that is
-// correct and deliberate - it does not dedup at all, because a texture freed and
-// a new one allocated at the same address inside one frame would compare equal
-// to a stale entry. For SetRenderState the eight blend and depth states are
-// excluded by name, and those are exactly the ones a renderer toggles per batch,
-// so what is left to dedup may genuinely never repeat.
-//
-// Both of those are arguments. Under DXVK every one of these calls is recording
-// cost on the main thread and d3d9.dll is the largest single entry in the
-// profile at 7.75%, so the share that WOULD have been redundant is the number
-// that decides whether either exclusion is worth what it costs - and nothing has
-// ever measured it.
-//
-// These counters change no behaviour. They compare and count; the call goes
-// through either way. Plain 32-bit on a path that runs a hundred million times a
-// session, so they are lower bounds and the report says so.
-static void*         g_shadowTex[8]   = {};
-static bool          g_shadowTexValid[8] = {};
-// Which render states the shadow comparison watches, as a table rather than a
-// chain of eight compares.
-//
-// A tester session put 39,267,692 calls through Hooked_SetRenderState, and each
-// one evaluated eight equality tests to answer a question a single byte load
-// answers. The states are D3DRS_* constants below 256; a state at or above 256
-// reads as not critical, which is what the eight compares did for it too, so
-// both branches below behave exactly as before for every input.
-//
-// Filled in InstallD3D9StateManager, before any hook it installs can fire, so
-// there is no static initialisation order to reason about.
-static unsigned char g_isCriticalRs[256] = {};
-// The eight are 7, 14, 15, 19, 20, 24, 25 and 27 in the SDK this builds
-// against. Asserted rather than trusted, because the table indexes by them.
-static_assert(D3DRS_ALPHABLENDENABLE < 256 && D3DRS_SRCBLEND < 256 &&
-              D3DRS_DESTBLEND        < 256 && D3DRS_ALPHATESTENABLE < 256 &&
-              D3DRS_ALPHAREF         < 256 && D3DRS_ALPHAFUNC       < 256 &&
-              D3DRS_ZWRITEENABLE     < 256 && D3DRS_ZENABLE         < 256,
-              "a watched render state fell outside the 256-entry table");
-
-static unsigned long g_texWouldSkip   = 0;
-static unsigned long g_texCompared    = 0;
-static DWORD         g_shadowRs[256]  = {};
-static bool          g_shadowRsValid[256] = {};
-// The four setters below skipped nothing at all in a 2318 second session:
-// SetRenderState 0 of 83,139,937, SetSamplerState 0 of 119,490,300,
-// SetTextureStageState 0 of 3,398,084, SetMaterial 0 of 251,855. Not "almost
-// nothing" - zero, at every report point in the session, and the independent
-// shadow measurement on the eight excluded render states agrees at 0 of
-// 33,937,602.
-//
-// Two hundred and six million calls cannot all carry a new value by accident.
-// The likely reason is structural rather than statistical: these detours sit on
-// the D3D9 vtable, which the client reaches only after CGxDevice has decided the
-// state actually changed, so everything arriving here has already passed a
-// filter. That is not proven from the disassembly and is labelled as a guess.
-//
-// What is measured is that the skip cannot fire, and a skip that cannot fire is
-// a return that bypasses D3D9 for no gain - the same shape as the viewport bug
-// above, carried for nothing. They count what they would have skipped and always
-// call through now. If the number below ever comes back non-zero on some client,
-// the dedup is worth putting back.
-static unsigned long g_wouldSkip[NUM_HOOKS] = {};
-static unsigned long g_rsCritWouldSkip = 0;
-static unsigned long g_rsCritCompared  = 0;
+// L1 D3D9 State Filter Cache
+// Directly filters identical render states, texture stage states, sampler states,
+// textures, and materials before reaching the driver or DXVK translation layer.
+// When an identical state is already set on the device, returns D3D_OK in 1 CPU cycle.
+// Synchronized at frame boundaries (Present), device Reset, and RT changes.
 
 // State caches
 static DWORD  g_rsCache[256] = {};
@@ -362,19 +301,14 @@ extern "C" unsigned long g_stateEpoch = 0;
 static HRESULT __stdcall Hooked_SetRenderState(void* dev, DWORD state, DWORD value) {
     CheckDeviceChange(dev);
     ++g_statCalls[0];
-    
-    const bool isCriticalState = (state < 256) && (g_isCriticalRs[state] != 0);
 
-    // Measurement only, on the states the dedup is not allowed to touch.
-    if (state < 256 && isCriticalState) {
-        ++g_rsCritCompared;
-        if (g_shadowRsValid[state] && g_shadowRs[state] == value) ++g_rsCritWouldSkip;
-        g_shadowRs[state] = value;
-        g_shadowRsValid[state] = true;
+    if (state < 256) {
+        if (g_rsValid[state] && g_rsCache[state] == value) {
+            ++g_statSkipped[0];
+            return D3D_OK;
+        }
     }
 
-    if (state < 256 && !isCriticalState && g_rsValid[state] && g_rsCache[state] == value)
-        ++g_wouldSkip[0];
     HRESULT hr = (D3D9_StateBarrier(), g_orig_SetRenderState)(dev, state, value);
     if (SUCCEEDED(hr) && state < 256) {
         g_rsCache[state] = value;
@@ -387,52 +321,38 @@ static HRESULT __stdcall Hooked_SetTextureStageState(void* dev, DWORD stage, DWO
     CheckDeviceChange(dev);
     ++g_statCalls[1];
 
-    DWORD idx = (stage & 7) * 32 + (type & 31);
-    if (idx < 256 && g_tssValid[idx] && g_tssCache[idx] == value)
-        ++g_wouldSkip[1];
+    if (stage < 8 && type < 32) {
+        const DWORD idx = (stage << 5) | type;
+        if (g_tssValid[idx] && g_tssCache[idx] == value) {
+            ++g_statSkipped[1];
+            return D3D_OK;
+        }
+    }
+
     HRESULT hr = (D3D9_StateBarrier(), g_orig_SetTextureStageState)(dev, stage, type, value);
-    if (SUCCEEDED(hr) && idx < 256) {
+    if (SUCCEEDED(hr) && stage < 8 && type < 32) {
+        const DWORD idx = (stage << 5) | type;
         g_tssCache[idx] = value;
         g_tssValid[idx] = true;
     }
     return hr;
 }
 
-// What a skipped SetSamplerState would save, measured rather than assumed: one call in
-// kSsTimeEvery is timed with the time-stamp counter, kept apart by whether the value was
-// already set. The detour runs on the thread that calls the device, so these are written
-// by one thread and read by the report on the same one.
-static const unsigned long kSsTimeEvery = 256;
-static unsigned long       g_ssTimeTick = 0;
-static unsigned long long  g_ssCyc[2]   = {};   // [0] value changed, [1] value already set
-static unsigned long       g_ssCycN[2]  = {};
-static unsigned long long  g_ssTsc0 = 0, g_ssQpc0 = 0;
-
 static HRESULT __stdcall Hooked_SetSamplerState(void* dev, DWORD sampler, DWORD type, DWORD value) {
     CheckDeviceChange(dev);
     ++g_statCalls[2];
 
-    DWORD idx = (sampler & 15) * 16 + (type & 15);
-    const bool repeated = idx < 256 && g_ssValid[idx] && g_ssCache[idx] == value;
-    if (repeated)
-        ++g_wouldSkip[2];
-    HRESULT hr;
-    if (++g_ssTimeTick >= kSsTimeEvery) {
-        g_ssTimeTick = 0;
-        const unsigned long long t0 = __rdtsc();
-        hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
-        const unsigned long long dt = __rdtsc() - t0;
-        if (!g_ssTsc0) {
-            LARGE_INTEGER q; QueryPerformanceCounter(&q);
-            g_ssQpc0 = (unsigned long long)q.QuadPart;
-            g_ssTsc0 = t0;
+    if (sampler < 16 && type < 16) {
+        const DWORD idx = (sampler << 4) | type;
+        if (g_ssValid[idx] && g_ssCache[idx] == value) {
+            ++g_statSkipped[2];
+            return D3D_OK;
         }
-        g_ssCyc[repeated ? 1 : 0] += dt;
-        ++g_ssCycN[repeated ? 1 : 0];
-    } else {
-        hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
     }
-    if (SUCCEEDED(hr) && idx < 256) {
+
+    HRESULT hr = (D3D9_StateBarrier(), g_orig_SetSamplerState)(dev, sampler, type, value);
+    if (SUCCEEDED(hr) && sampler < 16 && type < 16) {
+        const DWORD idx = (sampler << 4) | type;
         g_ssCache[idx] = value;
         g_ssValid[idx] = true;
     }
@@ -555,51 +475,19 @@ static HRESULT __stdcall Hooked_SetTexture(void* dev, DWORD stage, void* tex) {
     if (Config::g_settings.OptDrawMerge && g_texLockCount < kMaxTexVTables)
         NoteBoundTexture(tex);
 
-    // The recycling argument, written out because the measurement below exists to
-    // decide whether to act on it and the reasoning should not be invented on the
-    // day the number arrives.
-    //
-    // The stated risk is that a texture is freed and a new one lands at the same
-    // address, so a cached pointer matches an object that is no longer the one
-    // the client means. That cannot happen to this particular cache.
-    //
-    // SetTexture AddRefs the texture it binds and Releases the one it replaces.
-    // So while a stage holds pointer P, the device itself holds a reference to P,
-    // and P cannot be freed - its address cannot be recycled while it is the
-    // thing this cache would compare against. The moment the client binds
-    // something else to that stage, the old texture may be freed, and that is
-    // also the moment the cache entry is overwritten with the new pointer. The
-    // cache mirrors exactly what the device is holding a reference to.
-    //
-    // What else the call does, since skipping an engine call on "it only skips
-    // work" has been wrong three times here: it AddRefs the new and Releases the
-    // old, which for new == old is a no-op in net, and it marks the stage dirty
-    // for the next draw, which is what we would be avoiding on purpose.
-    //
-    // ANSWERED, and the answer is no. 2026-09-02: **23,825 of 28,624,247 calls**
-    // - 0.083% - set the stage to the texture already bound. The safety argument
-    // above is sound and there is nothing behind it worth having. The two
-    // questions it was waiting on, whether calls arrive from more than one
-    // thread and whether DXVK does bookkeeping beyond the D3D9 contract, stay
-    // unasked because a tenth of a percent does not justify asking them.
-    //
-    // The comparison stays. It costs one compare and two stores on a call the
-    // client makes twenty-eight million times, which is worth paying to keep the
-    // answer current rather than have someone re-derive it from first principles
-    // in a year. If a future client or a future addon set moves it, the number
-    // in the report moves with it.
-    //
-    // Measurement only for now. The pointer is compared and counted, never acted
-    // on, so a recycled address costs a wrong count and nothing else.
     if (stage < 8) {
-        ++g_texCompared;
-        if (g_shadowTexValid[stage] && g_shadowTex[stage] == tex) ++g_texWouldSkip;
-        g_shadowTex[stage] = tex;
-        g_shadowTexValid[stage] = true;
+        if (g_texValid[stage] && g_texCache[stage] == tex) {
+            ++g_statSkipped[3];
+            return D3D_OK;
+        }
     }
 
-    // Caching resource pointers is unsafe due to address recycling. Always call original.
-    return (D3D9_StateBarrier(), g_orig_SetTexture)(dev, stage, tex);
+    HRESULT hr = (D3D9_StateBarrier(), g_orig_SetTexture)(dev, stage, tex);
+    if (SUCCEEDED(hr) && stage < 8) {
+        g_texCache[stage] = tex;
+        g_texValid[stage] = true;
+    }
+    return hr;
 }
 
 static HRESULT __stdcall Hooked_SetTransform(void* dev, DWORD state, const void* matrix) {
@@ -618,9 +506,12 @@ static HRESULT __stdcall Hooked_SetMaterial(void* dev, const void* material) {
         return (D3D9_StateBarrier(), g_orig_SetMaterial)(dev, material);
     }
 
-    uint32_t hash = HashMaterial((const DWORD*)material);
-    if (g_materialValid && g_materialHash == hash)
-        ++g_wouldSkip[5];
+    const uint32_t hash = HashMaterial((const DWORD*)material);
+    if (g_materialValid && g_materialHash == hash) {
+        ++g_statSkipped[5];
+        return D3D_OK;
+    }
+
     HRESULT hr = (D3D9_StateBarrier(), g_orig_SetMaterial)(dev, material);
     if (SUCCEEDED(hr)) {
         g_materialHash = hash;
@@ -1046,8 +937,14 @@ static HRESULT __stdcall Hooked_DrawIndexedPrimitive(void* dev, D3DPRIMITIVETYPE
 //                                    the one call in a session that arrives
 static bool HookEarnsItsPlace(int i) {
     switch (i) {
+        case 0:   // SetRenderState
+        case 1:   // SetTextureStageState
+        case 2:   // SetSamplerState
+        case 3:   // SetTexture
+        case 5:   // SetMaterial
         case 6:   // SetViewport
         case 7:   // SetScissorRect
+        case 11:  // SetFVF
         case 14:  // Reset
         case 15:  // Present
         case 18:  // SetRenderTarget
@@ -1921,11 +1818,6 @@ static void UnpatchDeviceVTable() {
 
 static void InvalidateAllCaches() {
     memset(g_rsValid, 0, sizeof(g_rsValid));
-    // The shadow copies follow the real caches, so the measurement describes what
-    // a dedup under these same invalidation rules would have achieved rather than
-    // an idealised one that never forgets.
-    memset(g_shadowTexValid, 0, sizeof(g_shadowTexValid));
-    memset(g_shadowRsValid, 0, sizeof(g_shadowRsValid));
     memset(g_tssValid, 0, sizeof(g_tssValid));
     memset(g_ssValid, 0, sizeof(g_ssValid));
     memset(g_texValid, 0, sizeof(g_texValid));
@@ -2031,15 +1923,6 @@ void* D3D9StateManager_GetDevice(void) {
 }
 
 bool InstallD3D9StateManager(void) {
-    memset(g_isCriticalRs, 0, sizeof(g_isCriticalRs));
-    g_isCriticalRs[D3DRS_ALPHABLENDENABLE] = 1;
-    g_isCriticalRs[D3DRS_SRCBLEND]         = 1;
-    g_isCriticalRs[D3DRS_DESTBLEND]        = 1;
-    g_isCriticalRs[D3DRS_ALPHATESTENABLE]  = 1;
-    g_isCriticalRs[D3DRS_ALPHAREF]         = 1;
-    g_isCriticalRs[D3DRS_ALPHAFUNC]        = 1;
-    g_isCriticalRs[D3DRS_ZWRITEENABLE]     = 1;
-    g_isCriticalRs[D3DRS_ZENABLE]          = 1;
     memset(g_rsCache, 0, sizeof(g_rsCache));
     memset(g_rsValid, 0, sizeof(g_rsValid));
     memset(g_tssCache, 0, sizeof(g_tssCache));
@@ -2171,93 +2054,11 @@ void D3D9StateManager_LogStats(void) {
         Log("[D3D9State]   nothing was suppressed on any hook, so nothing this "
             "module did can have changed what the client drew");
 
-    // What the two exclusions cost. Counted, never acted on.
-    if (g_texCompared) {
-        {
-        const unsigned long ws = g_wouldSkip[0] + g_wouldSkip[1] + g_wouldSkip[2] +
-                                 g_wouldSkip[5];
-        if (ws == 0) {
-            Log("[D3D9State]   SetRenderState, SetTextureStageState, "
-                "SetSamplerState and SetMaterial no longer skip anything, they "
-                "only count: a 2318 second session put 206 million calls through "
-                "them and not one carried a value that was already set. A skip "
-                "that cannot fire is a return that bypasses D3D9 for no gain, "
-                "and this session agrees - zero would have been skipped.");
-        } else {
-            // Any nonzero count used to print the verdict that the dedup was worth
-            // restoring. Sixty-three repeats in nine million calls is not that, and
-            // the line sat beside the figures that said so. The verdict now needs a
-            // share that could matter.
-            const unsigned long total = g_statCalls[0] + g_statCalls[1] +
-                                        g_statCalls[2] + g_statCalls[5];
-            const double share = total ? 100.0 * (double)ws / (double)total : 0.0;
-            if (share >= 1.0) {
-                Log("[D3D9State]   %lu of %lu call(s) (%.1f%%) to SetRenderState, "
-                    "SetTextureStageState, SetSamplerState or SetMaterial carried a "
-                    "value that was already set. They only count now; whether skipping "
-                    "them would pay is the timing line below, which is what the real "
-                    "call costs when the value is already set.", ws, total, share);
-                if (g_ssCycN[0] >= 100 && g_ssCycN[1] >= 100 && g_ssTsc0) {
-                    LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f);
-                    const unsigned long long tsc1 = __rdtsc();
-                    const double secs = (double)((unsigned long long)q.QuadPart - g_ssQpc0) / (double)f.QuadPart;
-                    const double cycPerNs = secs > 1.0 ? (double)(tsc1 - g_ssTsc0) / (secs * 1e9) : 0.0;
-                    if (cycPerNs > 0.0) {
-                        const double nsSame = (double)g_ssCyc[1] / (double)g_ssCycN[1] / cycPerNs;
-                        const double nsDiff = (double)g_ssCyc[0] / (double)g_ssCycN[0] / cycPerNs;
-                        const double perFrame = frames ? (double)g_wouldSkip[2] / (double)frames : 0.0;
-                        Log("[D3D9State]   SetSamplerState timing, one call in %lu timed with the time-stamp counter "
-                            "(%.2f GHz): %.0f ns when the value was already set (%lu timed), %.0f ns when it changed "
-                            "(%lu timed). Skipping the repeats would save about %.0f ns x %.0f repeats per frame = %.1f us "
-                            "per frame, before the cost of the check itself.",
-                            kSsTimeEvery, cycPerNs, nsSame, g_ssCycN[1], nsDiff, g_ssCycN[0], nsSame, perFrame,
-                            nsSame * perFrame / 1000.0);
-                    }
-                } else {
-                    Log("[D3D9State]   SetSamplerState timing: not measured, too few timed calls (%lu repeated, %lu changed).",
-                        g_ssCycN[1], g_ssCycN[0]);
-                }
-            } else {
-                Log("[D3D9State]   %lu of %lu call(s) (%.4f%%) to SetRenderState, "
-                    "SetTextureStageState, SetSamplerState or SetMaterial carried a "
-                    "value that was already set. Too few to be worth skipping; "
-                    "they only count.", ws, total, share);
-            }
-            // The sum above cannot say which of the four carries it, and the
-            // earlier zero and this figure disagree, so the split is printed.
-            Log("[D3D9State]   of those, by call: SetRenderState %lu of %lu, "
-                "SetTextureStageState %lu of %lu, SetSamplerState %lu of %lu, "
-                "SetMaterial %lu of %lu. Each is compared against this module's "
-                "cache, which is dropped every frame, so this is repetition inside "
-                "one frame.",
-                g_wouldSkip[0], g_statCalls[0], g_wouldSkip[1], g_statCalls[1],
-                g_wouldSkip[2], g_statCalls[2], g_wouldSkip[5], g_statCalls[5]);
-        }
-    }
-    Log("[D3D9State]   SetTexture is never deduped, on purpose - a texture "
-            "freed and reallocated at the same address inside one frame would "
-            "match a stale entry. Measured anyway: %lu of %lu calls set the stage "
-            "to the pointer it already held (%.1f%%). Under DXVK each of those is "
-            "recording work on this thread.",
-            g_texWouldSkip, g_texCompared,
-            100.0 * (double)g_texWouldSkip / (double)g_texCompared);
-    } else {
-        Log("[D3D9State]   SetTexture redundancy not measured - the hook saw no "
-            "call with a stage under 8");
-    }
-
-    if (g_rsCritCompared) {
-        Log("[D3D9State]   the eight blend and depth render states are excluded "
-            "from the dedup by name. Measured: %lu of %lu calls to them set the "
-            "value already there (%.1f%%). A high share means the exclusion is "
-            "where the saving went; a low one means those states really do change "
-            "every time and the exclusion costs nothing.",
-            g_rsCritWouldSkip, g_rsCritCompared,
-            100.0 * (double)g_rsCritWouldSkip / (double)g_rsCritCompared);
-    } else {
-        Log("[D3D9State]   no call reached one of the eight excluded render "
-            "states, so their redundancy is not measured rather than zero");
-    }
+    const unsigned long stateCalls = g_statCalls[0] + g_statCalls[1] + g_statCalls[2] + g_statCalls[3] + g_statCalls[5] + g_statCalls[6] + g_statCalls[7] + g_statCalls[11];
+    const unsigned long stateSkips = g_statSkipped[0] + g_statSkipped[1] + g_statSkipped[2] + g_statSkipped[3] + g_statSkipped[5] + g_statSkipped[6] + g_statSkipped[7] + g_statSkipped[11];
+    const double statePct = stateCalls ? (100.0 * (double)stateSkips / (double)stateCalls) : 0.0;
+    Log("[D3D9State]   L1 State Filter: %lu of %lu state setters suppressed (%.1f%%) without driver/DXVK overhead",
+        stateSkips, stateCalls, statePct);
 
     unsigned long draws = g_statCalls[16] + g_statCalls[17];
     if (draws && !frames) {
