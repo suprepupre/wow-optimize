@@ -733,7 +733,7 @@ namespace Config {
         bool OptDetailDoodadVertices = false;
         bool OptM2ShadowBatchFast = false;
         bool OptParallelParticles = false;
-        bool OptM2ParallelRoots = true;
+        bool OptM2ParallelRoots = false;
         bool OptM2ParallelChildren = true;
         bool OptNameplateParallel = false;
         bool OptGrassParallel = false;
@@ -840,7 +840,7 @@ namespace Config {
         bool OptUIFrameCullFast = true;
         bool OptTextureStreamFast = true;
         bool OptHeapSizeFast = true;
-        bool OptMpqInflateFast = true;
+        bool OptMpqInflateFast = false;
     };
 
 

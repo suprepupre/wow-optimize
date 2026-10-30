@@ -1004,7 +1004,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.OptDetailDoodadVertices = GetPrivateProfileIntA("Graphics_Sound", "DetailDoodadVertices", 0, iniPath.c_str()) != 0;
         g_settings.OptM2ShadowBatchFast    = GetPrivateProfileIntA("Graphics_Sound", "M2ShadowBatchFast", 0, iniPath.c_str()) != 0;
         g_settings.OptParallelParticles    = GetPrivateProfileIntA("Graphics_Sound", "ParallelParticles", 0, iniPath.c_str()) != 0;
-        g_settings.OptM2ParallelRoots      = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelRoots", 1, iniPath.c_str()) != 0;
+        g_settings.OptM2ParallelRoots      = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelRoots", 0, iniPath.c_str()) != 0;
         g_settings.OptM2ParallelChildren   = GetPrivateProfileIntA("Graphics_Sound", "M2ParallelChildren", 1, iniPath.c_str()) != 0;
         g_settings.OptNameplateParallel    = GetPrivateProfileIntA("Graphics_Sound", "NameplateParallel", 0, iniPath.c_str()) != 0;
         g_settings.OptGrassParallel        = GetPrivateProfileIntA("Graphics_Sound", "GrassParallel", 0, iniPath.c_str()) != 0;
@@ -1111,7 +1111,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.TextureStreamBudgetMB = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamBudgetMB", 64, iniPath.c_str());
         g_settings.OptTextureStreamFast = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamFast", 1, iniPath.c_str()) != 0;
         g_settings.OptHeapSizeFast = GetPrivateProfileIntA("General", "HeapSizeFast", 1, iniPath.c_str()) != 0;
-        g_settings.OptMpqInflateFast = GetPrivateProfileIntA("Combat_Net", "MpqInflateFast", 1, iniPath.c_str()) != 0;
+        g_settings.OptMpqInflateFast = GetPrivateProfileIntA("Combat_Net", "MpqInflateFast", 0, iniPath.c_str()) != 0;
     }
 
 }

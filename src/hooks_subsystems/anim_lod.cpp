@@ -622,10 +622,6 @@ void OnFrame() {
 
 bool Init() {
     if (!Config::g_settings.OptAnimLod) return true;
-    if (Config::g_settings.OptM2ParallelRoots) {
-        Log("[AnimLod] STANDING DOWN: M2ParallelRoots is active (parallel animation takes precedence).");
-        return true;
-    }
 
     static const unsigned char kAnimateOpening[12] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x9C, 0x01, 0x00, 0x00, 0x56, 0x8B, 0xF1 };
     if (!WowOpt_ClientBytesAre(kAnimateModel, kAnimateOpening, sizeof(kAnimateOpening))) {

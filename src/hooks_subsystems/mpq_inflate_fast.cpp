@@ -9,11 +9,9 @@
 // Stock 2004 zlib copies matches 3 bytes at a time in scalar byte-by-byte loops:
 //     do { *out++ = *from++; *out++ = *from++; *out++ = *from++; len -= 3; } while (len > 2);
 //
-// Because inflate_fast() guarantees avail_in >= 6 and avail_out >= 258 on entry,
-// writing in 64-bit (8-byte) chunks is completely safe and conforms to the zlib-ng
-// design. For dist >= 8 (>95% of all matches in WoW assets), unaligned 64-bit
-// transfers copy up to 8x more bytes per instruction. For dist == 1, memset
-// accelerates RLE padding blocks.
+// When dist >= 8 and len >= 8, unaligned 64-bit transfers copy 8 bytes per step.
+// Crucially, remaining bytes (len < 8) MUST be copied strictly byte-by-byte to
+// prevent buffer overruns into adjacent heap blocks.
 // ============================================================================
 
 #include "mpq_inflate_fast.h"
@@ -75,25 +73,25 @@ static uint64_t g_rleMatchesCopied  = 0;
 static uint64_t g_bytesDecompressed = 0;
 
 static inline void CopyMatchFast(uint8_t*& out, const uint8_t* from, unsigned len, unsigned dist) {
-    if (dist >= 8) {
-        while (len > 8) {
+    if (dist >= 8 && len >= 8) {
+        while (len >= 8) {
             *reinterpret_cast<uint64_t*>(out) = *reinterpret_cast<const uint64_t*>(from);
             out += 8;
             from += 8;
             len -= 8;
         }
-        *reinterpret_cast<uint64_t*>(out) = *reinterpret_cast<const uint64_t*>(from);
-        out += len;
         ++g_fastMatchesCopied;
-    } else if (dist == 1) {
+    } else if (dist == 1 && len >= 4) {
         uint8_t b = *from;
         memset(out, b, len);
         out += len;
         ++g_rleMatchesCopied;
-    } else {
-        do {
-            *out++ = *from++;
-        } while (--len);
+        return;
+    }
+    // Strictly byte-by-byte for remaining/short lengths to prevent heap overrun
+    while (len > 0) {
+        *out++ = *from++;
+        --len;
     }
 }
 
@@ -256,16 +254,20 @@ void* __cdecl Hooked_InflateFast(void* strmPtr, int start) {
         }
     } while (in < last && out < end);
 
-    // Return unused bytes to input stream
-    unsigned len = bits >> 3;
-    in -= len;
-    bits -= len << 3;
+    len_adjust:
+    len_adjust_end:
+        (void)0;
+
+    // Return unused bytes from bit buffer
+    unsigned bytesLeft = bits >> 3;
+    in   -= bytesLeft;
+    bits -= bytesLeft << 3;
     hold &= (1u << bits) - 1u;
 
     strm->next_in   = in;
     strm->next_out  = out;
-    strm->avail_in  = static_cast<uint32_t>(in < last ? 5 + (last - in) : 5 - (in - last));
-    strm->avail_out = static_cast<uint32_t>(out < end ? 257 + (end - out) : 257 - (out - end));
+    strm->avail_in  = static_cast<uint32_t>((in < last) ? (5 + (last - in)) : (5 - (in - last)));
+    strm->avail_out = static_cast<uint32_t>((out < end) ? (257 + (end - out)) : (257 - (out - end)));
     state[12]       = hold;
     state[13]       = bits;
 
@@ -273,7 +275,7 @@ void* __cdecl Hooked_InflateFast(void* strmPtr, int start) {
     return state;
 }
 
-// Self-test for chunk copy correctness
+// Self-test for chunk copy correctness and ZERO buffer overrun past len
 bool RunSelfTest() {
     uint8_t src[512];
     uint8_t dstFast[512];
@@ -284,12 +286,16 @@ bool RunSelfTest() {
     }
 
     const unsigned testDistances[] = { 1, 2, 3, 4, 7, 8, 16, 32, 64, 128 };
-    const unsigned testLengths[]   = { 3, 4, 8, 15, 16, 31, 32, 64, 128, 258 };
+    const unsigned testLengths[]   = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 31, 32, 64, 128, 258 };
 
     for (unsigned dist : testDistances) {
         for (unsigned len : testLengths) {
             memset(dstFast, 0xAA, sizeof(dstFast));
             memset(dstScalar, 0xAA, sizeof(dstScalar));
+
+            // Set canary byte right after the expected output
+            dstFast[200 + len]   = 0xDD;
+            dstScalar[200 + len] = 0xDD;
 
             uint8_t* pFast = dstFast + 200;
             const uint8_t* fromFast = pFast - dist;
@@ -299,6 +305,18 @@ bool RunSelfTest() {
 
             CopyMatchFast(pFast, fromFast, len, dist);
 
+            // Assert exact pointer advance
+            if (pFast != dstFast + 200 + len) {
+                Log("[MpqInflateFast] Self-test FAILED: out pointer mismatch for dist=%u len=%u!", dist, len);
+                return false;
+            }
+
+            // Assert NO buffer overrun past len (canary intact)
+            if (dstFast[200 + len] != 0xDD) {
+                Log("[MpqInflateFast] Self-test FAILED: canary overwritten past len for dist=%u len=%u!", dist, len);
+                return false;
+            }
+
             uint8_t* pScalar = dstScalar + 200;
             const uint8_t* fromScalar = pScalar - dist;
             for (unsigned i = 0; i < len; ++i) {
@@ -306,7 +324,7 @@ bool RunSelfTest() {
             }
 
             if (memcmp(dstFast + 200, dstScalar + 200, len) != 0) {
-                Log("[MpqInflateFast] Self-test FAILED for dist=%u len=%u!", dist, len);
+                Log("[MpqInflateFast] Self-test FAILED: data mismatch for dist=%u len=%u!", dist, len);
                 return false;
             }
         }
@@ -363,4 +381,3 @@ void LogStats() {
 }
 
 } // namespace MpqInflateFast
-
