@@ -204,6 +204,7 @@ unsigned char g_savedJoin[7];
 
 bool g_armed      = false;
 bool g_abSubject  = false;
+static volatile LONG g_bypass = 0;
 
 // Every one of these is incremented before any early return that could stop it,
 // so a frozen number cannot be read back as a rate.
@@ -375,7 +376,7 @@ int __cdecl ClassifyEntryC(uint32_t self, uint32_t model, uint32_t frame) {
     const float* verts = (const float*)(model + kM_verts);
 
     if (g_armed) {
-        if (g_abSubject && AbTest::StandAside()) { ++g_stoodAside; return 0; }
+        if (g_bypass != 0 || (g_abSubject && AbTest::StandAside())) { ++g_stoodAside; return 0; }
         const unsigned long long t = AbTest::TickIn();
         const bool did = ClassifyAll(self, verts, count,
                                      (uint8_t*)(frame - kCodeArray));
@@ -618,4 +619,11 @@ void LogStats() {
             g_stoodAside);
 }
 
+void SetBypass(bool bypass) {
+    InterlockedExchange(&g_bypass, bypass ? 1 : 0);
+}
+
+bool IsBypassed() {
+    return g_bypass != 0;
+}
 } // namespace CollisionRayOutcode

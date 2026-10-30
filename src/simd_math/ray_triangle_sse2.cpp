@@ -196,6 +196,7 @@ struct Channel {
 
 // Read on the hot paths, written by the A/B harness. File scope on purpose.
 static bool g_abSubject = false;
+static volatile LONG g_bypass = 0;
 
 static Channel g_ch16    = { "16-bit",      "RayTriIntersect16_SSE2", kTarget16,    nullptr, false, false, false, false, -1, 0, 0, 0, 0, 0 };
 static Channel g_ch32    = { "32-bit",      "RayTriIntersect32_SSE2", kTarget32,    nullptr, false, false, false, false, -1, 0, 0, 0, 0, 0 };
@@ -331,7 +332,7 @@ inline int Hooked_TestImpl(const void* ray, const void* verts, const void* tri,
     ++ch.calls;
     Compare_t orig = (Compare_t)ch.origTest;
 
-    if (ch.dead || !ray || !verts || !tri)
+    if (g_bypass != 0 || ch.dead || !ray || !verts || !tri)
         return orig(ray, verts, tri, outT, outUV, tol);
     if (!ReadableRange(ray, 24) || !ReadableRange(tri, sizeof(IndexT) * 3))
         return orig(ray, verts, tri, outT, outUV, tol);
@@ -561,7 +562,7 @@ char __cdecl Hooked_RayPlane(const float* ray, const float* plane,
     ++g_chPlane.calls;
     RayPlane_t orig = (RayPlane_t)g_chPlane.origTest;
 
-    if (g_chPlane.dead || !ray || !plane)
+    if (g_bypass != 0 || g_chPlane.dead || !ray || !plane)
         return orig(ray, plane, outT, outPoint, tol);
     if (!ReadableRange(ray, 24) || !ReadableRange(plane, 16))
         return orig(ray, plane, outT, outPoint, tol);
@@ -728,7 +729,7 @@ char __cdecl Hooked_PointInPoly(const float* pt, const float* verts,
     ++g_chPoly.calls;
     PointInPoly_t orig = (PointInPoly_t)g_chPoly.origTest;
 
-    if (g_chPoly.dead || !pt || !verts || count == 0)
+    if (g_bypass != 0 || g_chPoly.dead || !pt || !verts || count == 0)
         return orig(pt, verts, count, axis);
     if (!ReadableRange(pt, 12) || !ReadableRange(verts, count * 12))
         return orig(pt, verts, count, axis);
@@ -1069,5 +1070,21 @@ void LogStats() {
     reportChannel(g_chPlane);
     reportChannel(g_chPoly);
 }
+void SetBypass(bool bypass) {
+    InterlockedExchange(&g_bypass, bypass ? 1 : 0);
+}
+
+bool IsBypassed() {
+    return g_bypass != 0;
+}
+
+void RetireAll() {
+    g_ch16.dead = true;
+    g_ch32.dead = true;
+    g_chPlane.dead = true;
+    g_chPoly.dead = true;
+    Log("[RayTriangle] All channels retired due to diagnostic discrepancy");
+}
+
 
 }  // namespace RayTriangle

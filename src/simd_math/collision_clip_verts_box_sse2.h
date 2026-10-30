@@ -11,4 +11,7 @@ namespace CollisionClipVertsBox {
 bool Init();
 void Shutdown();
 void LogStats();
+void SetBypass(bool bypass);
+bool IsBypassed();
+void Retire();
 }

@@ -131,6 +131,7 @@ QueryFn g_orig = nullptr;
 bool g_installed = false;
 bool g_dead = false;
 bool g_abSubject = false;
+static volatile LONG g_bypass = 0;
 
 unsigned long long g_calls = 0;
 unsigned long long g_fast = 0;
@@ -336,7 +337,7 @@ char Fast_GetFaceIndicesUsingCache(BspQuery_Segment* q, const void* aaBsp, const
 
 char __fastcall Hooked_GetFaceIndicesUsingCache(void* self, void* dummy_edx, const void* aaBsp, const void* node) {
     ++g_calls;
-    if (g_dead || !self) {
+    if (g_bypass != 0 || g_dead || !self) {
         return g_orig(self, dummy_edx, aaBsp, node);
     }
 
@@ -413,4 +414,17 @@ void LogStats() {
         g_dead ? " [RETIRED]" : "");
 }
 
+
+void SetBypass(bool bypass) {
+    InterlockedExchange(&g_bypass, bypass ? 1 : 0);
+}
+
+bool IsBypassed() {
+    return g_bypass != 0;
+}
+
+void Retire() {
+    g_dead = true;
+    Log("[CollisionClip] Hook retired due to diagnostic discrepancy");
+}
 }  // namespace CollisionClipVertsBox

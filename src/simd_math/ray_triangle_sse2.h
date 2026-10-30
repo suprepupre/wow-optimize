@@ -9,5 +9,8 @@ namespace RayTriangle {
 bool Init();
 void Shutdown();
 void LogStats();
+void SetBypass(bool bypass);
+bool IsBypassed();
+void RetireAll();
 
 } // namespace RayTriangle

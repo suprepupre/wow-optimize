@@ -40,6 +40,10 @@
 #include "ab_test.h"
 #include "flight_recorder.h"
 #include "config.h"
+#include "ray_triangle_sse2.h"
+#include "collision_clip_verts_box_sse2.h"
+#include "collision_ray_outcode_sse2.h"
+
 
 extern "C" void Log(const char* fmt, ...);
 
@@ -91,36 +95,99 @@ constexpr float kSuspect = 0.03f;
 // last, and two globals that name what it hit. So every re-run gets scratch
 // space of its own and no hit record, and the last one is the call the client
 // made, with the client's inputs, so the globals end where the camera expects.
-void Diagnose(const float* from, const float* to, int flags, float frac0) {
+void Diagnose(const float* from, const float* to, int flags, float frac0,
+              float* outFrac, float* outHit, char* outR) {
     g_inDiag = true;
     ++g_diagRuns;
 
-    auto run = [&](float* frac) -> int {
-        float hit[3] = {};
+    auto run = [&](float* frac, float* hit) -> char {
         *frac = 1.0f;
-        return (unsigned char)orig_Trace(from, to, hit, frac, flags, nullptr);
+        if (hit) hit[0] = hit[1] = hit[2] = 0.0f;
+        return (char)orig_Trace(from, to, hit, frac, flags, nullptr);
     };
-    // A fraction is what the camera uses, so two answers are the same when the
-    // fractions are, hit or miss aside.
     auto differs = [](float a, float b) { return (a > b ? a - b : b - a) > 0.001f; };
 
+    // 1. Run as it currently is (with optimizations active)
+    float hitFirst[3] = {};
     float fFirst = 1.0f;
-    run(&fFirst);
+    char rFirst = run(&fFirst, hitFirst);
 
+    // 2. Run with all candidate collision optimizations bypassed (pure stock client answer)
+    RayTriangle::SetBypass(true);
+    CollisionClipVertsBox::SetBypass(true);
+    CollisionRayOutcode::SetBypass(true);
+
+    float hitStock[3] = {};
+    float fStock = 1.0f;
+    char rStock = run(&fStock, hitStock);
+
+    RayTriangle::SetBypass(false);
+    CollisionClipVertsBox::SetBypass(false);
+    CollisionRayOutcode::SetBypass(false);
+
+    // 3. Isolated module testing if stock differed
+    float fNoRayTri = 1.0f, fNoClip = 1.0f, fNoOutcode = 1.0f;
+    const bool isFalsePositive = (!rStock || fStock >= kSuspect);
+
+    if (isFalsePositive) {
+        // Test with RayTriangle alone bypassed
+        RayTriangle::SetBypass(true);
+        run(&fNoRayTri, nullptr);
+        RayTriangle::SetBypass(false);
+
+        // Test with CollisionClip alone bypassed
+        CollisionClipVertsBox::SetBypass(true);
+        run(&fNoClip, nullptr);
+        CollisionClipVertsBox::SetBypass(false);
+
+        // Test with CollisionRayOutcode alone bypassed
+        CollisionRayOutcode::SetBypass(true);
+        run(&fNoOutcode, nullptr);
+        CollisionRayOutcode::SetBypass(false);
+
+        const char* culprit = "Unknown";
+        if (differs(fNoRayTri, fFirst) && !differs(fNoRayTri, fStock)) {
+            culprit = "RayTriangle";
+            RayTriangle::RetireAll();
+        } else if (differs(fNoClip, fFirst) && !differs(fNoClip, fStock)) {
+            culprit = "CollisionClip";
+            CollisionClipVertsBox::Retire();
+        } else if (differs(fNoOutcode, fFirst) && !differs(fNoOutcode, fStock)) {
+            culprit = "CollisionRayOutcode";
+        }
+
+        Log("[CameraWatch] FALSE POSITIVE camera collision intercepted! Ray: (%.1f,%.1f,%.1f) -> (%.1f,%.1f,%.1f), flags %08X. "
+            "Fast=%.4f, Stock=%.4f (NoRayTri=%.4f, NoClip=%.4f, NoOutcode=%.4f). Culprit: %s. Overriding with stock fraction.",
+            (double)from[0], (double)from[1], (double)from[2],
+            (double)to[0], (double)to[1], (double)to[2], (unsigned)flags,
+            (double)fFirst, (double)fStock, (double)fNoRayTri, (double)fNoClip, (double)fNoOutcode, culprit);
+
+        *outFrac = fStock;
+        if (outHit) { outHit[0] = hitStock[0]; outHit[1] = hitStock[1]; outHit[2] = hitStock[2]; }
+        *outR = rStock;
+    } else {
+        Log("[CameraWatch] Real geometry collision: stock client also hit at fraction %.4f (fast=%.4f) from (%.1f,%.1f,%.1f) to (%.1f,%.1f,%.1f), flags %08X.",
+            (double)fStock, (double)fFirst, (double)from[0], (double)from[1], (double)from[2],
+            (double)to[0], (double)to[1], (double)to[2], (unsigned)flags);
+        *outFrac = frac0;
+        *outR = 1;
+    }
+
+    // Run A/B test diagnosis if A/B test is active
     float fAside = 1.0f, fLast = 1.0f;
     char named[640] = {};
     int namedCount = 0;
     const bool begun = AbTest::DiagBegin();
     if (begun) {
         AbTest::DiagSelect(-1);
-        run(&fAside);
+        run(&fAside, nullptr);
         const int n = AbTest::DiagCount();
         for (int i = 0; i < n; ++i) {
             const char* name = nullptr;
             if (!AbTest::DiagSubject(i, &name)) continue;
             AbTest::DiagSelect(i);
             float fi = 1.0f;
-            run(&fi);
+            run(&fi, nullptr);
             if (differs(fi, fFirst)) {
                 ++namedCount;
                 char item[96];
@@ -134,31 +201,16 @@ void Diagnose(const float* from, const float* to, int flags, float frac0) {
         }
         AbTest::DiagEnd();
     }
-    run(&fLast);
+    run(&fLast, nullptr);
 
-    Log("[CameraWatch] trace #%lu: the camera's call gave fraction %.4f, from %.1f %.1f %.1f to "
-        "%.1f %.1f %.1f, flags %08X. Run again at once as it was: %.4f. With every replacement "
-        "standing aside: %s. As it was once more afterwards: %.4f.",
-        g_diagRuns, (double)frac0, (double)from[0], (double)from[1], (double)from[2],
-        (double)to[0], (double)to[1], (double)to[2], (unsigned)flags,
-        (double)fFirst, begun ? "see next line" : "not run (no A/B test)", (double)fLast);
     if (begun) {
         char lead[64];
         wsprintfA(lead, "%d.%04d", (int)fAside, (int)((fAside - (int)fAside) * 10000.0f));
-        if (differs(frac0, fFirst))
-            Log("[CameraWatch]   the same call gave %.4f a moment later with nothing changed, so "
-                "its answer depends on state the first call used up or left behind.",
-                (double)fFirst);
         if (differs(fAside, fFirst))
-            Log("[CameraWatch]   every replacement standing aside gives fraction %s against %.4f "
-                "as it was, so the answer comes from the replacements.", lead, (double)fFirst);
-        else
-            Log("[CameraWatch]   every replacement standing aside gives fraction %s, the same as "
-                "it was, so the answer is not made by a replacement in the A/B test.", lead);
+            Log("[CameraWatch]   every replacement standing aside gives fraction %s against %.4f as it was.",
+                lead, (double)fFirst);
         if (namedCount)
             Log("[CameraWatch]   standing aside alone changes the answer: %s", named);
-        else
-            Log("[CameraWatch]   no single replacement standing aside alone changes the answer.");
     }
     g_inDiag = false;
 }
@@ -168,29 +220,50 @@ char __cdecl Hooked_Trace(const float* from, const float* to, float* hitPoint,
     const uintptr_t ret = (uintptr_t)_ReturnAddress();
     ++g_traces;
     const float before = frac ? *frac : 1.0f;
-    const char r = orig_Trace(from, to, hitPoint, frac, flags, hitInfo);
+    char r = orig_Trace(from, to, hitPoint, frac, flags, hitInfo);
     if (r && frac && !g_inDiag && *frac < kSuspect && before >= 0.99f &&
         (ret == kCameraCalls[0] || ret == kCameraCalls[1] || ret == kCameraCalls[2]) &&
-        GetCurrentThreadId() == g_mainTid && AbTest::Running()) {
+        GetCurrentThreadId() == g_mainTid) {
         ++g_suspicious;
         const DWORD now = GetTickCount();
+        float savedFrac = *frac;
+        float savedHit[3] = {};
+        if (hitPoint) { savedHit[0] = hitPoint[0]; savedHit[1] = hitPoint[1]; savedHit[2] = hitPoint[2]; }
+
+        char outR = r;
+        float outFrac = savedFrac;
+        float outHit[3] = { savedHit[0], savedHit[1], savedHit[2] };
+
         if (g_diagRuns < kMaxDiag && (g_diagRuns == 0 || now - g_lastDiagTick >= kDiagGapMs)) {
             g_lastDiagTick = now;
-            // The re-runs overwrite what the client's call produced, so keep it.
-            float savedHit[3] = {};
-            if (hitPoint) { savedHit[0] = hitPoint[0]; savedHit[1] = hitPoint[1]; savedHit[2] = hitPoint[2]; }
-            const float savedFrac = *frac;
             __try {
-                Diagnose(from, to, flags, savedFrac);
+                Diagnose(from, to, flags, savedFrac, &outFrac, outHit, &outR);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 g_inDiag = false;
                 AbTest::DiagEnd();
             }
-            *frac = savedFrac;
-            if (hitPoint) { hitPoint[0] = savedHit[0]; hitPoint[1] = savedHit[1]; hitPoint[2] = savedHit[2]; }
         } else {
             ++g_diagSkipped;
+            // Quick stock check to prevent camera collapse even when logging is rate-limited
+            RayTriangle::SetBypass(true);
+            CollisionClipVertsBox::SetBypass(true);
+            CollisionRayOutcode::SetBypass(true);
+            float stockHit[3] = {};
+            float stockFrac = 1.0f;
+            char stockR = orig_Trace(from, to, stockHit, &stockFrac, flags, nullptr);
+            RayTriangle::SetBypass(false);
+            CollisionClipVertsBox::SetBypass(false);
+            CollisionRayOutcode::SetBypass(false);
+
+            if (!stockR || stockFrac >= kSuspect) {
+                outFrac = stockFrac;
+                outHit[0] = stockHit[0]; outHit[1] = stockHit[1]; outHit[2] = stockHit[2];
+                outR = stockR;
+            }
         }
+        *frac = outFrac;
+        if (hitPoint) { hitPoint[0] = outHit[0]; hitPoint[1] = outHit[1]; hitPoint[2] = outHit[2]; }
+        r = outR;
     }
     return r;
 }
@@ -239,7 +312,7 @@ bool ReadCamera(float* dist, unsigned* flags) {
 }  // namespace
 
 void Init() {
-    if (!Config::g_settings.OptAbTest) return;
+    // Unconditional install for camera pull-in protection
     __try {
         const unsigned char* p = (const unsigned char*)kTrace;
         if (!(p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && p[3] == 0x83 && p[4] == 0xEC && p[5] == 0x18)) {
