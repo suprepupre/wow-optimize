@@ -357,6 +357,7 @@ static const BoolSetting kBoolSettings[] = {
     { "Graphics_Sound", "TextureStreamFast", &Settings::OptTextureStreamFast },
     { "General", "HeapSizeFast", &Settings::OptHeapSizeFast },
     { "Combat_Net", "MpqInflateFast", &Settings::OptMpqInflateFast },
+    { "General", "AsyncPollFast", &Settings::OptAsyncPollFast },
 };
 
 
@@ -822,7 +823,7 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         // Graphics & Sound
         g_settings.OptFastMemsetOpt       = GetPrivateProfileIntA("Graphics_Sound", "FastMemsetOpt", 0, iniPath.c_str()) != 0;
         g_settings.OptFastStrnicmpOpt     = GetPrivateProfileIntA("UI_Lua", "FastStrnicmpOpt", 1, iniPath.c_str()) != 0;
-        g_settings.OptLuaSNewLstrFast     = GetPrivateProfileIntA("UI_Lua", "LuaSNewLstrFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptLuaSNewLstrFast     = GetPrivateProfileIntA("UI_Lua", "LuaSNewLstrFast", 1, iniPath.c_str()) != 0;
         g_settings.OptStrStrSse2          = GetPrivateProfileIntA("Graphics_Sound", "StrStrSse2", 0, iniPath.c_str()) != 0;
         // Inherits StrStrSse2 when absent, and must be read AFTER it - placed
         // earlier in this function it would have inherited the struct
@@ -1111,7 +1112,8 @@ static const int kBoolSettingCount = (int)(sizeof(kBoolSettings) / sizeof(kBoolS
         g_settings.TextureStreamBudgetMB = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamBudgetMB", 64, iniPath.c_str());
         g_settings.OptTextureStreamFast = GetPrivateProfileIntA("Graphics_Sound", "TextureStreamFast", 1, iniPath.c_str()) != 0;
         g_settings.OptHeapSizeFast = GetPrivateProfileIntA("General", "HeapSizeFast", 1, iniPath.c_str()) != 0;
-        g_settings.OptMpqInflateFast = GetPrivateProfileIntA("Combat_Net", "MpqInflateFast", 0, iniPath.c_str()) != 0;
+        g_settings.OptMpqInflateFast = false; // Permanently retired to protect archive integrity
+        g_settings.OptAsyncPollFast = GetPrivateProfileIntA("General", "AsyncPollFast", 1, iniPath.c_str()) != 0;
     }
 
 }

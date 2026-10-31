@@ -188,6 +188,7 @@
 #include "hooks_subsystems/texture_stream_fast.h"
 #include "hooks_subsystems/heap_size_fast.h"
 #include "hooks_subsystems/mpq_inflate_fast.h"
+#include "hooks_subsystems/async_poll_fast.h"
 #include "simd_math/plane_from_points_fast.h"
 #include "simd_math/matrix_adjugate_fast.h"
 #include "simd_math/spline_seg_length_fast.h"
@@ -6313,6 +6314,7 @@ static void DumpPeriodicStats(const char* why, bool atProcessExit) {
     STAT_TIME("TextureStreamFast::LogStats", TextureStreamFast::LogStats());
     STAT_TIME("HeapSizeFast::LogStats", HeapSizeFast::LogStats());
     STAT_TIME("MpqInflateFast::LogStats", MpqInflateFast::LogStats());
+    STAT_TIME("AsyncPollFast::LogStats", AsyncPollFast::LogStats());
     STAT_TIME("PlaneFromPointsFast::LogStats", PlaneFromPointsFast::LogStats());
     STAT_TIME("MatrixAdjugateFast::LogStats", MatrixAdjugateFast::LogStats());
     STAT_TIME("SplineSegLengthFast::LogStats", SplineSegLengthFast::LogStats());
@@ -9157,6 +9159,7 @@ static DWORD WINAPI MainThread(LPVOID param) {
     TextureStreamFast::Init();
     HeapSizeFast::Init();
     MpqInflateFast::Init();
+    AsyncPollFast::Init();
     PlaneFromPointsFast::Init();
     MatrixAdjugateFast::Init();
     SplineSegLengthFast::Init();
@@ -12272,6 +12275,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             TextureStreamFast::Shutdown();
             HeapSizeFast::Shutdown();
             MpqInflateFast::Shutdown();
+            AsyncPollFast::Shutdown();
             PlaneFromPointsFast::Shutdown();
             MatrixAdjugateFast::Shutdown();
             SplineSegLengthFast::Shutdown();

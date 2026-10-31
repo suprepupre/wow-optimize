@@ -263,7 +263,7 @@ namespace Config {
         // no signal from turning them off.
         bool OptFastMemsetOpt = false;   // SSE2 memset replacement (0x0040BB80)
         bool OptFastStrnicmpOpt = true;  // SSE2 _strnicmp replacement (0x0076E780)
-        bool OptLuaSNewLstrFast = false;
+        bool OptLuaSNewLstrFast = true;
         bool OptStrStrSse2 = false;
         bool OptStrCatFast = false;
         bool OptSoundMixerOpt = false;
@@ -841,6 +841,7 @@ namespace Config {
         bool OptTextureStreamFast = true;
         bool OptHeapSizeFast = true;
         bool OptMpqInflateFast = false;
+        bool OptAsyncPollFast = true;
     };
 
 

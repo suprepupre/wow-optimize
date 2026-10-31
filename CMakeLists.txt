@@ -965,6 +965,8 @@ add_library(wow_optimize SHARED
     src/hooks_subsystems/heap_size_fast.h
     src/hooks_subsystems/mpq_inflate_fast.cpp
     src/hooks_subsystems/mpq_inflate_fast.h
+    src/hooks_subsystems/async_poll_fast.cpp
+    src/hooks_subsystems/async_poll_fast.h
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/server_sync_compat.cpp")

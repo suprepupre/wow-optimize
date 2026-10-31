@@ -29,6 +29,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <cstdint>
+#include <cstdio>
 
 #include "net_diag.h"
 #include "crash_dumper.h"
@@ -106,6 +107,7 @@ static volatile LONG g_connSeq = 0;
 // The counters now follow whichever socket is carrying traffic and reset when it
 // changes, and only that socket can produce a report.
 static volatile LONG g_watchedSocket = -1;
+static char g_peerAddr[64] = "unknown";
 
 // A close the client performs itself, with no error anywhere, is what an orderly
 // logout looks like as well as a realm handoff. Reporting it needs the
@@ -131,6 +133,19 @@ static void WatchSocket(SOCKET s) {
     g_lastSendTick  = 0;
     InterlockedIncrement(&g_connSeq);
     InterlockedExchange(&g_reported, 0);
+
+    sockaddr_in sin{};
+    int sinLen = sizeof(sin);
+    if (getpeername(s, reinterpret_cast<sockaddr*>(&sin), &sinLen) == 0) {
+        const char* ip = inet_ntoa(sin.sin_addr);
+        if (ip) {
+            snprintf(g_peerAddr, sizeof(g_peerAddr), "%s:%u", ip, ntohs(sin.sin_port));
+        } else {
+            strcpy_s(g_peerAddr, sizeof(g_peerAddr), "unknown");
+        }
+    } else {
+        strcpy_s(g_peerAddr, sizeof(g_peerAddr), "unknown");
+    }
 }
 
 static bool IsWatched(SOCKET s) { return g_watchedSocket == (LONG)s; }
@@ -164,15 +179,15 @@ static void ReportDisconnect(const char* how, int err) {
     // game. It gets a line rather than a banner. Silence is what let the
     // per-session latch look harmless for as long as it did.
     if (sessionMs < kRealSessionMs && g_recvBytes < kRealSessionBytes) {
-        Log("[NetDiag] Connection %ld ended (%s) after %lu ms and %llu bytes - too "
+        Log("[NetDiag] Connection %ld (peer %s) ended (%s) after %lu ms and %llu bytes - too "
             "short to be a world session, so this is the logon handoff",
-            g_connSeq, how, (unsigned long)sessionMs,
+            g_connSeq, g_peerAddr, how, (unsigned long)sessionMs,
             (unsigned long long)g_recvBytes);
         return;
     }
 
-    Verdict::Add(Verdict::Bad, "disconnected: %s", how);
-    Log("!!! DISCONNECT !!! (connection %ld) %s%s%s", g_connSeq, how,
+    Verdict::Add(Verdict::Bad, "disconnected from %s: %s", g_peerAddr, how);
+    Log("!!! DISCONNECT !!! (connection %ld, peer %s) %s%s%s", g_connSeq, g_peerAddr, how,
         (err && *ErrorName(err)) ? " - " : "",
         (err && *ErrorName(err)) ? ErrorName(err) : "");
 
@@ -357,9 +372,9 @@ bool Init() {
 void LogStats() {
     if (!g_active) return;
     DWORD now = GetTickCount();
-    Log("[NetDiag] connection %ld: %ld receives (%llu bytes), %ld sends (%llu "
+    Log("[NetDiag] connection %ld (peer %s): %ld receives (%llu bytes), %ld sends (%llu "
         "bytes), last byte %lu ms ago",
-        g_connSeq, g_recvCalls, (unsigned long long)g_recvBytes,
+        g_connSeq, g_peerAddr, g_recvCalls, (unsigned long long)g_recvBytes,
         g_sendCalls, (unsigned long long)g_sendBytes,
         (unsigned long)(g_lastRecvTick ? (now - g_lastRecvTick) : 0));
 }

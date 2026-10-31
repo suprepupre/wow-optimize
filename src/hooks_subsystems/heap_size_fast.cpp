@@ -77,6 +77,10 @@ size_t __cdecl Hooked_Msize(void* block) {
 
 bool Init() {
     if (!Config::g_settings.OptHeapSizeFast) return false;
+    if (!Config::g_settings.OptCrtMimalloc) {
+        Log("[HeapSizeFast] Skipped: OptCrtMimalloc is disabled, so HeapSize bypass is not required.");
+        return false;
+    }
 
     HMODULE hK32 = GetModuleHandleA("kernel32.dll");
     if (!hK32) return false;

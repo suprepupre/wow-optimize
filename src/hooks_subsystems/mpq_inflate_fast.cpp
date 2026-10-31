@@ -335,37 +335,8 @@ bool RunSelfTest() {
 } // namespace
 
 bool Init() {
-    if (!Config::g_settings.OptMpqInflateFast) return false;
-
-    if (!RunSelfTest()) {
-        Log("[MpqInflateFast] Self-test failed; hook aborted.");
-        return false;
-    }
-
-    // Verify prologue: 55 8B EC 83 EC 3C 53 56 57
-    static const unsigned char kExpectedPrologue[9] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3C, 0x53, 0x56, 0x57 };
-    if (memcmp(reinterpret_cast<const void*>(kTargetFn), kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
-        Log("[MpqInflateFast] Prologue mismatch at 0x%08X; hook aborted.", kTargetFn);
-        return false;
-    }
-
-    MH_STATUS st = WineSafe_CreateHook(reinterpret_cast<void*>(kTargetFn),
-                                       reinterpret_cast<void*>(&Hooked_InflateFast),
-                                       reinterpret_cast<void**>(&orig_InflateFast));
-    if (st != MH_OK) {
-        Log("[MpqInflateFast] WineSafe_CreateHook failed (status=%d).", static_cast<int>(st));
-        return false;
-    }
-
-    st = MH_EnableHook(reinterpret_cast<void*>(kTargetFn));
-    if (st != MH_OK) {
-        Log("[MpqInflateFast] MH_EnableHook failed (status=%d).", static_cast<int>(st));
-        return false;
-    }
-
-    g_installed = true;
-    Log("[MpqInflateFast] ACTIVE at 0x%08X: 64-bit SIMD chunk transfers armed (accelerates MPQ decompression).", kTargetFn);
-    return true;
+    Log("[MpqInflateFast] DISABLED: Hook retired permanently to guarantee 100% MPQ archive and asset integrity.");
+    return false;
 }
 
 void Shutdown() {
